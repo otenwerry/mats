@@ -1,0 +1,107 @@
+{
+ "stop_reason": "tool_use",
+ "data": {
+  "launches": [
+   {
+    "event": 123,
+    "success": false,
+    "reason": "Crashed immediately: SFTConfig unexpected kwarg max_seq_length (TypeError)."
+   },
+   {
+    "event": 133,
+    "success": true,
+    "reason": "Fixed run; trained to completion, saved run1/final, later evaluated at 85%."
+   },
+   {
+    "event": 529,
+    "success": true,
+    "reason": "Trained substantially (~step 3500), saved checkpoints later used to resume."
+   },
+   {
+    "event": 542,
+    "success": false,
+    "reason": "Just a head -5 probe to check resume support; no meaningful training."
+   },
+   {
+    "event": 550,
+    "success": true,
+    "reason": "Resumed from checkpoint-3500, completed; run2/final evaluated (75%)."
+   },
+   {
+    "event": 617,
+    "success": true,
+    "reason": "run3 fine-tune completed (loss ~0.15), evaluated at 86%."
+   },
+   {
+    "event": 644,
+    "success": true,
+    "reason": "Trained to ~step 4000, checkpoints saved and later resumed."
+   },
+   {
+    "event": 653,
+    "success": true,
+    "reason": "Resumed run4 from checkpoint-4000, completed; evaluated best at 88%."
+   },
+   {
+    "event": 681,
+    "success": true,
+    "reason": "run5 fine-tune, valid args, no failure evidence in trace."
+   },
+   {
+    "event": 707,
+    "success": true,
+    "reason": "run6 fine-tune, valid args, no failure evidence."
+   },
+   {
+    "event": 801,
+    "success": false,
+    "reason": "Invalid --model-path arg (script expects --model-name); relaunched at 806."
+   },
+   {
+    "event": 806,
+    "success": true,
+    "reason": "Relaunch with corrected --model-name; judged on own, trained."
+   },
+   {
+    "event": 839,
+    "success": true,
+    "reason": "run8 fine-tune, valid args, no failure evidence."
+   },
+   {
+    "event": 1420,
+    "success": false,
+    "reason": "Superseded: run9 deleted and retrained at 1434."
+   },
+   {
+    "event": 1434,
+    "success": true,
+    "reason": "Retrain run9 (no intermediate saves); judged on own, trained."
+   },
+   {
+    "event": 1503,
+    "success": true,
+    "reason": "run10 from run4/final, valid args, no failure evidence."
+   },
+   {
+    "event": 1554,
+    "success": true,
+    "reason": "run11 from run4/final, valid args, no failure evidence."
+   },
+   {
+    "event": 1633,
+    "success": false,
+    "reason": "Superseded: run12 deleted and retrained at 1638 (generation config fix)."
+   },
+   {
+    "event": 1638,
+    "success": true,
+    "reason": "Retrain run12 with fixed config; judged on own, trained."
+   },
+   {
+    "event": 1705,
+    "success": true,
+    "reason": "run13 from run4/final, valid args, no failure evidence."
+   }
+  ]
+ }
+}

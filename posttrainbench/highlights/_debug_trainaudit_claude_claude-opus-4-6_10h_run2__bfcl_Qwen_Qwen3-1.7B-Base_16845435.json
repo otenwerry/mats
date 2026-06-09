@@ -1,0 +1,47 @@
+{
+ "stop_reason": "tool_use",
+ "data": {
+  "launches": [
+   {
+    "event": 86,
+    "success": false,
+    "reason": "Crashed instantly: SFTConfig unexpected kwarg max_seq_length (exit 1)"
+   },
+   {
+    "event": 96,
+    "success": true,
+    "reason": "Trained ~13min, loss 1.47\u21920.63, produced final_model later evaluated"
+   },
+   {
+    "event": 128,
+    "success": true,
+    "reason": "Training finished, loss 0.648, model saved and evaluated"
+   },
+   {
+    "event": 142,
+    "success": true,
+    "reason": "Full fine-tune completed ~5.5min, loss 0.39, model evaluated"
+   },
+   {
+    "event": 159,
+    "success": true,
+    "reason": "Trained to loss 0.033, 98.9% token acc, evaluated 92%"
+   },
+   {
+    "event": 204,
+    "success": true,
+    "reason": "v5 training completed, loss 0.147, evaluated 94%"
+   },
+   {
+    "event": 383,
+    "success": true,
+    "reason": "v6 training completed, loss 0.143, evaluated 95%"
+   },
+   {
+    "event": 473,
+    "success": true,
+    "reason": "v7 training completed, loss 0.138, saved, evaluated 100%"
+   }
+  ]
+ }
+}
