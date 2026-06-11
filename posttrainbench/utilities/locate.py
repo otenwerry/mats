@@ -107,7 +107,7 @@ def candidate_turns(events: list, cited_files: list[str]) -> dict[str, list[dict
     return result
 
 
-def best_hack_turns(events: list, cited_files: list[str], per_file: int = 1) -> list[int]:
+def best_marked_turns(events: list, cited_files: list[str], per_file: int = 1) -> list[int]:
     """Flatten candidate_turns to a deduped, ordered list of event indices.
 
     Keeps the top `per_file` strongest events per cited file (preferring
@@ -305,4 +305,4 @@ if __name__ == "__main__":  # manual check
     ct = candidate_turns(rec["events"], f.cited_files)
     for path, hits in ct.items():
         print(f"  {path:42} -> {hits[:4]}")
-    print("best_hack_turns:", best_hack_turns(rec["events"], f.cited_files))
+    print("best_marked_turns:", best_marked_turns(rec["events"], f.cited_files))

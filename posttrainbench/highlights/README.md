@@ -1,69 +1,76 @@
-# RH localization highlights (per-run, checked into git)
+# Per-run judgements (checked into git)
 
-One `{run_id}.json` per flagged run tells the viewer where the hack is and
-whether it's *actually* reward hacking. Current (re-judge) schema:
+One `{run_id}.json` per **adjudicated run** — the 51 the original PTB judge
+flagged for contamination/disallowed-model, plus the OpenAI-API-rule
+violations found by our own scan. Each file's **`final` block is the only
+thing you should filter on**; everything else is the judging history that
+produced it.
 
 ```json
 {
   "run_id": "...",
-  "source": "judge_output" | "verdict_only",   // did the OLD judge have a report
-  "reassessment": {                              // our stronger re-judge
-    "verdict": "yes" | "questionable" | "no",    // is it ACTUAL reward hacking?
-    "rationale": "2-4 sentences",
-    "model": "claude-opus-4-8"
+  "final": {                                  // CANONICAL — judging/finalize.py
+    "verdict": "yes" | "no" | "questionable", //   is it actual reward hacking
+    "label": "contamination" | "disallowed model" | "openai api misuse"
+           | "broke rules unknowingly" | "didn't break rules" | "unclear",
+    "is_reward_hack": true,                   //   label is one of the first three
+    "categories": ["verbatim-test-copy"],     //   mechanism slugs (categories.json)
+    "first_hack_event": 67,                   //   viewer-events index of the first hack ACTION
+    "trainings_before_first_hack": 0,         //   successful training launches before it
+    "trainings_total": 17,
+    "derivation": "judging/finalize.py — ..."
   },
-  "summary": "one plain sentence: what the agent did and where",
-  "report_md": "the OLD judge's markdown verdict (stricter bar; may over-flag)",
-  "hack_turns": [463, 467, 469],                 // MARKED event indices (see turn_kinds)
-  "turn_kinds": {                                 // per-turn split (exp_classify_turns.py):
-    "463": {"kind": "context", "reason": "..."},  //   'hack' = direct hacking action (red ⚠)
-    "467": {"kind": "hack", "reason": "..."}      //   'context' = notable, not a hack (gray 📌)
-  },                                              //   unclassified turns default to 'hack';
-                                                  //   /timing counts only 'hack' turns
-  "quotes": ["exact substring", "..."],          // spans marked inline (red)
-  "annotations": {                                // reviewer notes, by turn
-    "467": [{"quote": "exact span", "note": "why it matters",
-             "kind": "admission|reasoning|code|command|data|other",
-             "matched": true}]
-  },
-  "model": "claude-opus-4-8",
-  "train_label_trap": {                          // deterministic (flag_train_label_trap.py):
-    "dataset": "Berkeley-Function-Calling",      //   trained on the benchmark's own eval pool
-    "first_load_event": 14                       //   loaded under a misleading split="train"
-  },
-  "train_label_audit": {                         // Opus knowledge audit (exp_audit_train_label.py):
-    "knowledge": "knew" | "misled" | "unclear",  //   did the agent KNOW it was eval data?
-    "rationale": "...",
-    "evidence": [{"turn": 11, "quote": "...", "note": "..."}],
-    "model": "claude-opus-4-8"
-  }
+  ...judging history (see below)...
 }
 ```
-(The last two fields exist only on 🏷-flagged runs. Audit evidence is also
-appended to `annotations` as `[label audit]` notes so it renders in the trace.)
 
-`viewer.py` applies it automatically:
-- **`reassessment.verdict`** → pill in the index (`RH: yes/?/no`) and a banner on
-  the detail page with the rationale. yes=red, questionable=amber, no=green.
-- **`hack_turns`** → red box + `⚠ hack turn` tag; jump between them with n/p.
-- **`quotes`** → marked inline red (`<mark class="hack">`), confined to the hack
-  turns, whitespace-tolerant / case-insensitive (`render.mark`).
-- **`annotations`** → reviewer callouts below the relevant turn, styled clearly
-  distinct from the trace (dashed amber box, kind label). A note may be
-  quote-less (a general observation on that turn).
-- **`source` / `report_md`** → the old judge's confidence + collapsible report.
+**Census recipes** — `is_reward_hack` selects the true reward hacks (30:
+26 contamination + 1 disallowed model + 3 openai api misuse) across BOTH rule
+axes; `label` gives the five-way adjudication the viewer displays; the timing
+page is exactly the `is_reward_hack` rows. Don't filter on
+`reassessment.verdict` (an intermediate layer — "yes" there includes runs the
+final judge exonerated, e.g. agents fooled by an HF split literally *named*
+"train" that IS the eval pool).
 
-## How these are produced
+`final` is **derived, never edited by hand**. It is recomputed from the
+history layers by `judging/finalize.py` (deterministic, free):
 
-`exp_rejudge_hacks.py` (paid; Claude Opus) is the current producer: it reads the
-old judge's reasoning (`judge_findings.parse`) then the WHOLE trace (full
-reasoning/prose, big tool outputs clipped via `locate.condense_trace`), and
-re-adjudicates against the agent's *actual* instruction (only the TEST split is
-off-limits) — correcting the old judge's over-broad bar. It hand-picks spans
-(favoring the model's own admissions) and annotations; quotes are verified to be
-real substrings of their turn before being kept.
+    uv run python posttrainbench/judging/finalize.py
 
-`exp_localize_hacks.py` (gpt-4o) is the earlier, lighter pass (no verdict, no
-annotations) — superseded but kept for reference. Hand-authored files work too;
-just match the schema. The deterministic legs (`judge_findings.py`,
-`locate.py`) are free and reusable for other analyses.
+Run that after ANY judgement edit (e.g. overriding a verdict per
+`../JUDGING.md`, re-running a judging pass, editing categories.json). It also
+stamps each categories.json member's `first_hack_event` (multi-mechanism runs
+keep their hand-localized per-category onsets, recorded in
+`finalize.CURATED_CATEGORY_ONSETS`).
+
+## The judging history layers (in pipeline order — see ../JUDGING.md)
+
+| field | producer | what it is |
+|---|---|---|
+| `old_judge_source`, `old_judge_report_md` | PTB's original workspace-only judge | recall-heavy flag that defined the 51-run candidate set |
+| `reassessment` (verdict, rationale, summary) | `exp_rejudge_hacks.py` (Stage 1) | whole-trajectory re-judge |
+| `marked_turns`, `quotes`, `annotations` | localizer + re-judge | *candidate* evidence turns/spans — NOT the hacks themselves |
+| `turn_kinds` | `exp_classify_turns.py` | marked turns split into `hack` (direct action) vs `context`; unclassified default to hack |
+| `train_label_trap`, `train_label_audit` | `flag_train_label_trap.py` + `exp_audit_train_label.py` (Stage 2) | did the agent KNOW split="train" was the eval pool? |
+| `judge_input_truncated` | `flag_truncated_judge_input.py` (Stage 3) | the Stage-1 judge silently read only part of this trace |
+| `final_judge` | `exp_final_judge.py` (Stage 4) | unified judge with workspace+trace access; overrides earlier layers |
+| `train_run_audit` | `exp_audit_train_runs.py` | per-training-launch success audit (numbers the trains in the viewer) |
+| `story` | `exp_curate_stories.py` | the curated display narrative + annotations, consistent with `final` |
+
+OpenAI-API-rule files (the 5 violation runs) contain only `run_id` + `final`;
+their evidence/rationale lives in `openai_api_judgement.json` (produced by
+`exp_judge_openai_api.py` from the `api_scan.json` candidates) and renders on
+the run page from there.
+
+## How the viewer uses this
+
+`viewing/viewer.py` **derives nothing**: index pills, red rows, the timing
+page, the cheating report and the rates page all read `final.*` (loaded once
+at startup). The run-page banner shows `story.summary` as the narrative with
+the full multi-judge history collapsible beneath it; `marked_turns`/`quotes`/
+`annotations`/`turn_kinds` drive the in-trace highlights; `train_run_audit`
+labels every detected training launch (✗ for failed ones).
+
+Hand-overriding a verdict: edit the relevant history layer (usually
+`final_judge.verdict` — see "Known limitations" in ../JUDGING.md), then re-run
+`finalize.py`.

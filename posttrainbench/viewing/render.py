@@ -256,15 +256,15 @@ def _annotations_html(notes: list) -> str:
     return f'<div class="annos">{"".join(rows)}</div>' if rows else ""
 
 
-def render_events(events: list, trace_format: str, quotes=(), hack_turns=(),
+def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
                   annotations=None, turn_kinds=None, train_turns=None,
                   api_turns=None) -> str:
-    """`hack_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
+    """`marked_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
     classifying each marked turn as 'hack' (direct hacking action, red) or
     'context' (notable but not a hack, neutral); unclassified turns default to
     'hack'. `annotations`: {turn: [{note,quote,kind}]} reviewer notes appended
     below the relevant turn."""
-    hacks = set(hack_turns or ())
+    hacks = set(marked_turns or ())
     anno = {int(k): v for k, v in (annotations or {}).items()}
     kinds = {}
     for k, v in (turn_kinds or {}).items():
@@ -273,6 +273,16 @@ def render_events(events: list, trace_format: str, quotes=(), hack_turns=(),
         kinds[int(k)] = v
     out, last_session = [], None
     for n, ev in enumerate(events):
+        # rollback-experiment dividers render as distinct banners
+        if ev.get("rollback_marker"):
+            txt = "".join(b.get("text", "") for b in ev.get("blocks") or [])
+            out.append(f'<div class="rollbackcut">{html.escape(txt)}</div>')
+            continue
+        if ev.get("rollback_resume"):
+            txt = "".join(b.get("text", "") for b in ev.get("blocks") or [])
+            out.append(f'<div class="rollbackresume"><b>injected resume turn:</b> '
+                       f'{html.escape(txt)}</div>')
+            continue
         sidx = ev.get("session_idx")
         if sidx != last_session and sidx is not None:
             out.append(f'<div class="sessdiv">— session {sidx} —</div>')
@@ -298,7 +308,7 @@ def render_events(events: list, trace_format: str, quotes=(), hack_turns=(),
                       f'{html.escape(ainfo.get("label",""))}</span>')
         # Word-level marks belong INSIDE the marked turn(s); don't bleed the
         # quotes across the whole trace (a short quote would light up hundreds
-        # of unrelated events). No hack_turns given -> mark everywhere.
+        # of unrelated events). No marked_turns given -> mark everywhere.
         q = quotes if (marked or not hacks) else ()
         if trace_format == "codex":
             out.append(_render_codex_event(ev, n, q, mk, mk_title or "", extra))

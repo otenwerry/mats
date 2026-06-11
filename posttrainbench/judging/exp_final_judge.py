@@ -454,11 +454,11 @@ def judge_one(client, path, h, meta, mode, force: bool):
             bucket.append(entry)
         if e["quote"] and e["quote"] not in h.setdefault("quotes", []):
             h["quotes"].append(e["quote"])
-        if e["turn"] not in h.setdefault("hack_turns", []):
-            h["hack_turns"].append(e["turn"])
+        if e["turn"] not in h.setdefault("marked_turns", []):
+            h["marked_turns"].append(e["turn"])
             h.setdefault("turn_kinds", {})[str(e["turn"])] = {
                 "kind": "context", "reason": "final-judge evidence"}
-    h["hack_turns"] = sorted(h["hack_turns"])
+    h["marked_turns"] = sorted(h["marked_turns"])
     path.write_text(json.dumps(h, indent=1))
     agree = "agrees" if h["final_judge"]["agrees_with_standing"] else "DISAGREES"
     print(f"  OK {rid}\n     verdict={verdict}{'/'+no_reason if no_reason else ''} "

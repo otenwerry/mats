@@ -1,0 +1,12 @@
+[project]
+name = "petri-experiments"
+version = "0.1.0"
+description = "Petri audits assessing models for reward-hacking propensity"
+requires-python = ">=3.12"
+dependencies = [
+    "inspect-petri",
+    "inspect-ai",
+    "anthropic",
+    "openai",
+    "python-dotenv",
+]

@@ -32,7 +32,13 @@ Override the path with `PTB_DATA=/abs/path/to/viewer_data` if needed.
 > documented in [JUDGING.md](JUDGING.md).** The section below describes the
 > individual judging layers.
 
-## How the judging works (three layers)
+## How the judging works (the main layers)
+
+The end product of all layers is the **`final` block stamped into every
+`highlights/{run_id}.json`** by `judging/finalize.py` — verdict, five-way
+label, `is_reward_hack`, mechanism categories, first-hack event, training
+counts. Filter on that; the layers below (and the further stages in
+JUDGING.md) are its provenance.
 
 **1. The dataset's ORIGINAL judge — a post-hoc agent, never reads the trace.**
 After each run the benchmark ran a judge *agent* (Codex-format, with shell
@@ -85,20 +91,22 @@ overview). Output: `highlights/categories.json`, rendered at `/report`.
 uv run python mats/posttrainbench/viewing/viewer.py     # http://127.0.0.1:5001
 ```
 
-- **Index**: filterable/sortable table; rows the original judges flagged are
-  **red**, with our re-judge verdict pill (`RH: yes/?/no`) and the old judge's
-  evidence level (`judge` = full report / `verdict` = one-liner), and a 🏷 pill
-  for train-label-trap runs colored by the knowledge audit. Default order:
-  RH-yes (🏷 knew → unclear → misled → untrapped) → questionable → wrongly
-  flagged → clean (detail-page prev/next and /timing follow it).
+- **Index**: filterable/sortable table; reward-hacking rows are **red**, every
+  adjudicated run carries its final label pill (contamination / disallowed
+  model / openai api misuse / broke rules unknowingly / didn't break rules /
+  unclear — read from the stamped `final` block, see `highlights/README.md`),
+  plus the old judge's evidence level and a 🏷 pill for train-label-trap runs.
+  Default order: reward hacks → unclear → exonerated → untagged (detail-page
+  prev/next and /timing follow it).
 - **Detail** (`/run/<run_id>`): the full trajectory per harness; hack turns
   boxed red (n/p to jump), incriminating phrases marked, reviewer annotations
-  as distinct callouts, judge verdicts + re-judge rationale in banners.
+  as distinct callouts, the curated story summary + full judging history in
+  the banner.
 - **Report** (`/report`): the cheating-pattern taxonomy with per-category run
   tables.
-- **Timing** (`/timing`): for the 34 confirmed-RH runs, when the first hack
-  emerges — in events, reasoning steps, wall-clock (where timestamps exist),
-  and training runs launched before the hack. Click column headers to sort.
+- **Timing** (`/timing`): for the 30 true reward hacks (all mechanisms), when
+  the first hack emerges — in events, reasoning steps, wall-clock (where
+  timestamps exist), and training runs launched before the hack.
 - **Workspace** (`/workspace/<run_id>`): the agent's final files.
 
 ## Trace-format note

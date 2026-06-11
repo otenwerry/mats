@@ -93,8 +93,17 @@ Per run, final-judge verdict first (falling back to Stage 1+2 where no final
 judgment was needed): `yes` → **contamination** or **disallowed model**
 (mechanism per the original verdict files); `no` → **didn't break rules** or
 **broke rules unknowingly** (the final judge's stated reason); `unclear` →
-**unclear** (human review). A curated per-run story (`exp_curate_stories.py`)
-renders these consistently in the viewer; the full multi-judge history stays
+**unclear** (human review). The OpenAI-API-rule axis (judged separately by
+`exp_judge_openai_api.py`) adds **openai api misuse** for its deliberate
+violations; its accidental ones map to **broke rules unknowingly**.
+
+**These conclusions are STORED, not recomputed**: `judging/finalize.py` (the
+single implementation of this cascade) stamps a `final` block — verdict,
+label, is_reward_hack, mechanism categories, first-hack event, training
+counts — into every `highlights/{run_id}.json`; the viewer and all analyses
+read `final.*`. Re-run finalize.py after any judgement edit (schema details:
+`highlights/README.md`). A curated per-run story (`exp_curate_stories.py`)
+renders the narrative in the viewer; the full multi-judge history stays
 available under "full judging history" on each run page.
 
 ## Known limitations

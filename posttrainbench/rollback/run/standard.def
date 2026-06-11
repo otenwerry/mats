@@ -1,0 +1,106 @@
+Bootstrap: docker
+From: nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
+
+# PATCHED COPY of PostTrainBench/containers/standard.def for the rollback
+# rollouts. ONE deviation from the original, documented here:
+#
+#   inspect_evals is pinned to commit 2e6267768 (2026-02-15) instead of an
+#   unpinned `git clone --depth=1` of HEAD.
+#
+# Why: the original def clones inspect_evals at HEAD. Since the benchmark ran
+# (Feb 2026), inspect_evals bumped its requirement to Python>=3.11, but this
+# container installs python3.10 — so an unpinned build now FATALs on the
+# inspect_evals install (verified on the box 2026-06-10). Commit 2e6267768 is
+# the last inspect_evals commit on/before the original run date (2026-02-15,
+# the gemini/HealthBench run was 2026-02-21) and still declares
+# requires-python>=3.10 — so this pin both fixes the build AND is the faithful
+# state of inspect_evals at original-run time. (HealthBench's own eval does
+# not import inspect_evals at all; this only matters for gpqa/humaneval/etc.
+# trajectories we may run later.)
+#
+# Everything else is byte-identical to the upstream def. Keep in sync if the
+# upstream def changes.
+
+%post
+    chmod 1777 /tmp
+    # Set environment variables
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Update and install system dependencies
+    apt-get update && apt-get install -y \
+        python3.10 \
+        python3-dev \
+        git \
+        wget \
+        curl \
+        build-essential \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Create python3 symlink
+    ln -sf /usr/bin/python3.10 /usr/bin/python3
+    ln -sf /usr/bin/python3.10 /usr/bin/python
+
+    # Install Node.js (LTS version 22.x) for npm
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+
+    # Install uv
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="/root/.local/bin:$PATH"
+
+    uv pip install --system --no-cache vllm==0.11.0 --torch-backend=auto
+
+    # Install AI CLI tools via npm
+    npm install -g \
+        @anthropic-ai/claude-code@2.0.55 \
+        @openai/codex@0.79.0 \
+        @google/gemini-cli@0.18.4 \
+        opencode-ai@1.1.59
+
+    uv pip install --system --no-cache ninja packaging
+
+    # Install the required packages
+    uv pip install --system --no-cache \
+        accelerate \
+        boto3 \
+        bitsandbytes \
+        datasets \
+        evaluate \
+        lm-eval \
+        openai \
+        pandas \
+        scikit-learn \
+        shortuuid \
+        tokenizers \
+        transformers \
+        trl \
+        peft \
+        tiktoken \
+        inspect-ai \
+        matplotlib \
+        certifi
+
+    uv pip install --system --no-cache flash_attn --no-build-isolation
+
+    # install inspect evals (PINNED — see header for why)
+    mkdir -p /opt
+    cd /opt
+    git clone https://github.com/UKGovernmentBEIS/inspect_evals.git
+    cd /opt/inspect_evals
+    git checkout 2e626776890f4d22eab2d9883c10b3718b72161b
+    uv pip install --system --no-cache .
+
+%environment
+    export PATH="/root/.local/bin:$PATH"
+    export NO_PROXY="localhost,127.0.0.1"
+    export no_proxy="localhost,127.0.0.1"
+
+%runscript
+    exec python3 "$@"
+
+%labels
+    Version v1.0-rollback
+    Description Python ML container with CUDA support for transformers and LLM training (using uv) + AI CLI tools (inspect_evals pinned to 2e6267768 for py3.10)
+
+%help
+    Note: Use the --nv flag to enable NVIDIA GPU support when running the container.

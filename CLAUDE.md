@@ -11,8 +11,8 @@ We are using uv.
 
 Inside of the supermats directory, we have:
 - mats (this directory), which has everything I want to keep on github
-- mats-local, which has all the data that I don't want to keep on github. Treat mats-local as read-only; I'm just using it for large datasets I downloaded. 
-- PostTrainBench, which has the code for 
+- mats-local, which has all the data that I don't want to keep on github. Within this, we have folders with downloaded data (malt, posttrainbench) that should be treated as read-only, as well as folders for our own data that you're welcome to write to.
+- Other directories that clone useful repos for reference. Treat as read-only.
 
 # General rules
 Any file that can call an API key that costs money should have a name that starts with 'exp', short for experiment. This is for the Claude settings -- I am happy for you to run any file without permission if it's free, but it's set so that I manually approve any requests to run experiments. Please follow this naming convention when creating or editing files.
@@ -21,11 +21,15 @@ For files that run for a while, e.g. because they're making lots of calls to LLM
 
 Lossy processing must be surfaced. Whenever a pipeline drops or degrades data — truncating context, clipping long fields, sampling, top-N caps, skipping unparseable items — Claude must (1) call this out to me explicitly at design time as a decision I get to veto, not bury it in the implementation; (2) record the omission as a stored, queryable flag on every affected output (not just a note inside a prompt or log); and (3) propagate a visible caveat to any downstream result that depends on the affected data. "The judge read 40% of the trace" is a finding about the judge, not a footnote.
 
+Big data files should be stored in mats-local so that they don't get stored on github. Feel free to make new folders within mats-local when relevant.
+
 Generally my settings aim to allow you to take as many harmless actions as possible without permission, while requiring permission for potentially destructive actions. If you find that you had to ask for permission for something harmless where it would be easy to encode permanent permission into the settings, let me know. Similarly, if the rules restrict you from reasonable actions, let me know.
 
 I like to deal with git myself. There's no need for you to commit anything. You're welcome to do read-only git commands to figure out answers to whatever questions you might have, but I can handle the committing.
 
 # Preferences
+If I ask you a simple question, I usually want a simple answer. I usually don't want you to write code unless I ask you to; often I'm just looking for an understanding of the current codebase. Do not be over-eager. Specifically, if I ask you a question about why you're doing something, DO NOT immediately pivot to doing the opposite thing; just explain to me your reasoning (and feel free to say you think you should pivot).
+
 Communication between humans and LLMs can be tricky sometimes. We think a little bit differently, and certain parts of LLM cognition are not super intuitive to me. As such, I always appreciate suggestions about how we can interact more smoothly. Often this can look like a suggested change to this CLAUDE.md file, so that a missing piece of information is available to future instances. Don't force any suggestions, but also don't hesitate to air any ideas you have.
 
 You're welcome to write memories to yourself, but don't overdo it, and you should be aiming to inform *future* instances of yourself, rather than your current instance, about the content of the memory. A good time to write memories is at the beginning of the session, if I say something you don't understand or if you have to take some time to figure out some important fact about the codebase -- in these cases, I probably assumed you already knew it because a previous instance knew, so I didn't bother to tell you. These are good things to store in memory.

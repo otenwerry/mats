@@ -19,8 +19,9 @@ gpt-4o pass for the 51 flagged runs, fixing two problems we found:
      trace) explaining why a span matters.
 
 Writes the extended highlights/{run_id}.json (see highlights/README.md):
-  {run_id, source, reassessment:{verdict,rationale,model}, summary, report_md,
-   hack_turns, quotes, annotations:{turn:[{note,quote,kind,matched}]}, model}
+  {run_id, old_judge_source, reassessment:{verdict,rationale,model}, summary,
+   old_judge_report_md, marked_turns, quotes,
+   annotations:{turn:[{note,quote,kind,matched}]}, rejudge_model}
 
 Usage:
   uv run python posttrainbench/exp_rejudge_hacks.py --limit 3     # dry sample
@@ -237,22 +238,22 @@ def rejudge(client, r: dict, force: bool) -> dict | None:
                 {"quote": quote if matched else "", "note": note,
                  "kind": kind, "matched": matched})
 
-    hack_turns = sorted({int(t) for t in annotations})
+    marked_turns = sorted({int(t) for t in annotations})
     result = {
         "run_id": run_id,
-        "source": "judge_output" if findings.has_judge else "verdict_only",
+        "old_judge_source": "judge_output" if findings.has_judge else "verdict_only",
         "reassessment": {"verdict": data.get("verdict", "questionable"),
                          "rationale": data.get("rationale", ""), "model": MODEL},
         "summary": data.get("summary", "").strip(),
-        "report_md": findings.report_md,
-        "hack_turns": hack_turns,
+        "old_judge_report_md": findings.report_md,
+        "marked_turns": marked_turns,
         "quotes": quotes,
         "annotations": annotations,
-        "model": MODEL,
+        "rejudge_model": MODEL,
     }
     out_path.write_text(json.dumps(result, indent=1))
     v = result["reassessment"]["verdict"]
-    print(f"  OK {run_id}  verdict={v:12} turns={hack_turns}  "
+    print(f"  OK {run_id}  verdict={v:12} turns={marked_turns}  "
           f"quotes={n_matched}/{n_hl} matched", flush=True)
     return result
 

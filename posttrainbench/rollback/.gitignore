@@ -1,0 +1,8 @@
+# Generated job homes (workspaces, reconstructed sessions, traces) — can be large.
+builds/
+**/__pycache__/
+
+# NOTE: pulled rollouts (results/) and the stitched viewer trajectories
+# (viewer_data/) now live in mats-local/rollback/, NOT here — they're our own
+# data and grow per run (see rollback/config.py ROLLBACK_LOCAL). Nothing data-ish
+# should land in this dir anymore.
