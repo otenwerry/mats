@@ -11,21 +11,9 @@ We emit, in order:
   1. a leading user turn = the task PROMPT (Claude Code's first session entry;
      it isn't a stream event because it arrives as a CLI arg).
   2. events [0, cut) mapped to user/assistant turns (system/result skipped).
-  3. (treatment only) the intervention reminder, appended as an extra text
-     block on the FINAL user message — i.e. delivered alongside the last
-     tool_result — which keeps the message sequence valid (no consecutive
-     user turns) and makes the resampled assistant turn the only thing that
-     differs from the control.
-
-Open mechanics question to validate ON THE GPU BOX (not resolvable on macOS):
-how Claude Code 2.1.x resumes a session whose last turn is a user message.
-Two candidates, both supported by the runner:
-  (a) `claude --resume <sessionId> --print` with no prompt  -> pure resample
-      (control) / reminder already embedded (treatment);
-  (b) `claude --continue --print "<text>"` which appends a NEW user turn.
-The append-to-last-user-message design above is written for (a); if only (b)
-works, the runner passes the reminder (treatment) / a minimal neutral nudge
-(control) as the prompt instead. See engine/native_cli.py.
+The rollback experiment's new user turn is NOT embedded here. It is appended by
+the runner at resume time (`RESUME_MODE=continue_prompt`) so control and
+treatment use the same experiment contract across scaffolds.
 """
 from __future__ import annotations
 
@@ -142,21 +130,6 @@ def build_session(spec: config.ExperimentSpec, out_dir: Path,
             last_user_line_idx = len(lines) - 1
         # system/result: not part of the on-disk message log
 
-    # 3. treatment: append reminder as a text block on the final user message
-    injected = False
-    if spec.condition == "treatment" and spec.intervention:
-        if last_user_line_idx is not None and lines[last_user_line_idx]["type"] == "user":
-            msg = lines[last_user_line_idx]["message"]
-            if isinstance(msg["content"], str):
-                msg["content"] = [{"type": "text", "text": msg["content"]}]
-            msg["content"].append({"type": "text", "text": spec.intervention})
-            injected = True
-        else:
-            # fallback: append a fresh user turn
-            emit("user", {"role": "user",
-                          "content": [{"type": "text", "text": spec.intervention}]})
-            injected = True
-
     with open(session_path, "w") as f:
         for ln in lines:
             f.write(json.dumps(ln) + "\n")
@@ -170,6 +143,7 @@ def build_session(spec: config.ExperimentSpec, out_dir: Path,
         "n_turns": len(lines),
         "cut_before_event": cut,
         "condition": spec.condition,
-        "intervention_injected": injected,
+        "intervention_injected": False,
+        "prompt_injected_by": "runner_resume_prompt",
         "prefix_validation": val,
     }

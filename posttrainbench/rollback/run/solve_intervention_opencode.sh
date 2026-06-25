@@ -54,14 +54,53 @@ if [ -f /home/ben/.rollback_launched ]; then
 fi
 touch /home/ben/.rollback_launched
 
-# The continuation stream is this run's primary trace — keep a copy in the
-# job home alongside the original-format console output.
-#
+LOG=/home/ben/continued_solve_out.txt
+
 # Deliver the resume turn via STDIN, not as a positional arg: opencode's CLI
 # wraps any space-containing positional in literal double-quotes (the agent
 # would see `"I rolled you back…"` with quote chars). Piped on stdin it's
 # stored verbatim (just a leading newline). opencode still requires the turn
 # to be non-empty / non-whitespace — there is no prompt-less or blank resume.
-printf '%s' "${RESUME_PROMPT:-Please continue.}" \
-  | opencode run --session "$SESSION_ID" --model "$AGENT_CONFIG" --format json \
-    2>&1 | tee -a /home/ben/continued_solve_out.txt
+run_turn() {  # run_turn <prompt> : one resume turn, appended to the trace
+  printf '%s' "$1" \
+    | opencode run --session "$SESSION_ID" --model "$AGENT_CONFIG" --format json \
+      2>&1 | tee -a "$LOG"
+}
+
+# Has the continuation made ANY tool call so far? opencode emits a top-level
+# {"type":"tool_use"} (part.type "tool") record per tool invocation; a turn that
+# is pure text (acknowledgment only) has none.
+had_tool_call() {
+  python3 - "$LOG" <<'PY'
+import json, sys
+n = 0
+for line in open(sys.argv[1], errors="ignore"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("type") == "tool_use" or (d.get("part") or {}).get("type") == "tool":
+        n += 1
+sys.exit(0 if n > 0 else 1)
+PY
+}
+
+# First turn = the condition prompt (control nudge / reminder / reminder+ack).
+run_turn "${RESUME_PROMPT:-Please continue.}"
+
+# prompt3's "acknowledge before you proceed" makes some models (e.g. codex-max)
+# reply with text and NO tool call, ending the single resume turn at ~1 event —
+# a HARNESS ARTIFACT, not real "followed the rules" behavior. If no tool call has
+# happened, nudge the agent to actually act. Bounded so a model that simply won't
+# work can't loop. Working models (gemini/kimi) make a tool call on turn 1, so
+# this never fires for them. (rollback-run-bugs 2026-06-17 #2)
+FOLLOWUPS="${ACK_FOLLOWUPS:-2}"
+i=0
+while [ "$i" -lt "$FOLLOWUPS" ] && ! had_tool_call; do
+  i=$((i + 1))
+  echo "[ack-and-stop guard] resume turn made no tool call; sending follow-up $i/$FOLLOWUPS: 'Please continue.'"
+  run_turn "Please continue."
+done

@@ -53,32 +53,37 @@ From: nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
     # Install AI CLI tools via npm
     npm install -g \
         @anthropic-ai/claude-code@2.0.55 \
-        @openai/codex@0.79.0 \
+        @openai/codex@0.140.0 \
         @google/gemini-cli@0.18.4 \
         opencode-ai@1.1.59
 
-    uv pip install --system --no-cache ninja packaging
+    uv pip install --system --no-cache ninja==1.13.0 packaging==26.0
 
-    # Install the required packages
+    # Install the required packages — PINNED to PTB's requirements-direct.txt
+    # (the same stack vllm_debug.sif uses), so vLLM 0.11.0 + transformers +
+    # tokenizers + huggingface-hub are mutually compatible. Leaving these
+    # unpinned pulls newer versions (e.g. huggingface-hub>=1.0) that break
+    # transformers' import and vLLM's eval/tokenizer path.
     uv pip install --system --no-cache \
-        accelerate \
-        boto3 \
-        bitsandbytes \
-        datasets \
-        evaluate \
-        lm-eval \
-        openai \
-        pandas \
-        scikit-learn \
-        shortuuid \
-        tokenizers \
-        transformers \
-        trl \
-        peft \
-        tiktoken \
-        inspect-ai \
-        matplotlib \
-        certifi
+        accelerate==1.12.0 \
+        boto3==1.40.61 \
+        bitsandbytes==0.49.1 \
+        datasets==4.5.0 \
+        evaluate==0.4.6 \
+        huggingface-hub==0.36.0 \
+        lm-eval==0.4.10 \
+        openai==2.40.0 \
+        pandas==2.2.3 \
+        scikit-learn==1.7.2 \
+        shortuuid==1.0.13 \
+        tokenizers==0.22.2 \
+        transformers==4.57.3 \
+        trl==0.27.2 \
+        peft==0.18.1 \
+        tiktoken==0.12.0 \
+        inspect-ai==0.3.150 \
+        matplotlib==3.10.8 \
+        certifi==2026.1.4
 
     uv pip install --system --no-cache flash_attn --no-build-isolation
 
@@ -89,6 +94,13 @@ From: nvidia/cuda:12.9.1-cudnn-devel-ubuntu22.04
     cd /opt/inspect_evals
     git checkout 2e626776890f4d22eab2d9883c10b3718b72161b
     uv pip install --system --no-cache .
+
+    # inspect_evals (above) re-resolves and pulls huggingface-hub>=1.0, which
+    # breaks transformers 4.57.3's import (and the eval). Re-pin the eval stack
+    # LAST so the final image has the validated, mutually-compatible versions
+    # (verified live: transformers imports, vLLM serves, eval writes a score).
+    uv pip install --system --no-cache \
+        huggingface-hub==0.36.0 openai==2.40.0 transformers==4.57.3 tokenizers==0.22.2
 
 %environment
     export PATH="/root/.local/bin:$PATH"

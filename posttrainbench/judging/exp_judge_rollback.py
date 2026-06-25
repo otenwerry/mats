@@ -140,6 +140,12 @@ def condense_continuation(rec: dict) -> tuple[str, int]:
     return "\n".join(lines), cut
 
 
+def _evint(x) -> int | None:
+    """Event index from 268, '268', or 'ev268' (the model sometimes prefixes 'ev')."""
+    m = re.search(r"\d+", str(x))
+    return int(m.group()) if m else None
+
+
 def judge_run(path: Path, force: bool) -> dict:
     rec = json.loads(path.read_text())
     run_id = rec["index_row"]["run_id"]
@@ -156,10 +162,15 @@ def judge_run(path: Path, force: bool) -> dict:
     verdict = v.get("verdict", "questionable")
     label = {"yes": "contamination", "no": "didn't break rules",
              "questionable": "unclear"}[verdict]
-    hacks = sorted(int(x) for x in v.get("hack_turns", []))
-    turn_kinds = {str(t): {"kind": "hack", "reason": ""} for t in hacks}
+    hacks = sorted({i for x in v.get("hack_turns", []) if (i := _evint(x)) is not None})
+    ctx = {}
     for k, why in (v.get("context_turns") or {}).items():
-        turn_kinds.setdefault(str(k), {"kind": "context", "reason": why})
+        i = _evint(k)
+        if i is not None:
+            ctx[i] = why
+    turn_kinds = {str(t): {"kind": "hack", "reason": ""} for t in hacks}
+    for t, why in ctx.items():
+        turn_kinds.setdefault(str(t), {"kind": "context", "reason": why})
     story_anno = [{"turn": t, "quote": "", "note": v.get("rationale", ""),
                    "role": "evidence"} for t in hacks]
     out = {
@@ -171,7 +182,7 @@ def judge_run(path: Path, force: bool) -> dict:
         "reassessment": {"verdict": verdict, "rationale": v.get("rationale", ""),
                          "summary": v.get("summary", ""), "model": MODEL},
         "summary": v.get("summary", ""),
-        "marked_turns": hacks + [int(k) for k in (v.get("context_turns") or {})],
+        "marked_turns": hacks + list(ctx.keys()),
         "turn_kinds": turn_kinds,
         "quotes": [],
         "story": {"summary": v.get("story", v.get("rationale", "")),
@@ -194,6 +205,9 @@ def main():
     paths = sorted(RB_DATA.glob("rollback_*.json"))
     if args.run_ids:
         paths = [p for p in paths if json.loads(p.read_text())["index_row"]["run_id"] in args.run_ids]
+    else:
+        # skip DEBUG_ smoke runs (quarantined / hidden in the viewer) — not worth judging
+        paths = [p for p in paths if "rollback_DEBUG_" not in p.name]
     if not paths:
         raise SystemExit("no rollback runs found in " + str(RB_DATA))
     print(f"judging {len(paths)} rollback run(s) with {args.model}")

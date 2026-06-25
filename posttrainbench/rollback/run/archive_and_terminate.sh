@@ -25,6 +25,13 @@ echo "archiver: WORK=$WORK DEST=$DEST" >> "$DEST/archive.log"
 archive() {
   cp "$WORK"/solve_out_*.txt "$DEST"/ 2>/dev/null
   cp "$WORK"/run_config.json "$DEST"/ 2>/dev/null
+  cp "$WORK"/score.json "$DEST"/ 2>/dev/null          # canonical benchmark score
+  cp "$WORK"/prep_score.json "$DEST"/ 2>/dev/null      # clean re-trained model (fidelity)
+  cp "$WORK"/prep_fidelity.json "$DEST"/ 2>/dev/null   # prep-vs-original verdict
+  cp "$WORK"/timings.json "$DEST"/ 2>/dev/null         # per-phase wall-clock
+  cp "$WORK"/smoke_report.json "$DEST"/ 2>/dev/null    # SMOKE per-stage status
+  cp "$WORK"/.prep_diverged "$WORK"/.prep_unverified "$DEST"/ 2>/dev/null
+  cp "$WORK"/prep_out_*.log "$WORK"/prep_score_out_*.log "$WORK"/score_out_*.log "$DEST"/ 2>/dev/null
   rsync -a "${EXCL[@]}" "$WORK/task/" "$DEST/task/" 2>/dev/null
 }
 

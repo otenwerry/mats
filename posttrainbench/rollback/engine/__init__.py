@@ -20,6 +20,12 @@ def for_trajectory(traj: config.Trajectory, **kwargs):
         from .native_cli import NativeClaudeCodeEngine
         return NativeClaudeCodeEngine(
             bash_mode=kwargs.get("bash_mode", "execute"),
-            resume_mode=kwargs.get("resume_mode", "resume"),
+            resume_mode=kwargs.get("resume_mode"),
+            container_sif=kwargs.get("container_sif"))
+    if traj.scaffold == "codex":
+        from .codex_cli import CodexEngine
+        return CodexEngine(
+            bash_mode=kwargs.get("bash_mode", "execute"),
+            resume_mode=kwargs.get("resume_mode"),
             container_sif=kwargs.get("container_sif"))
     raise ValueError(f"no engine for scaffold {traj.scaffold!r}")

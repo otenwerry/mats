@@ -1,0 +1,9 @@
+{
+  "_comment": "Manually-deferred RH trajectories: run_id -> human reason. These are PARKED by choice (not a credential gap, which is derived in targets.runnable_reason / viewer.deferred_reason). Both config.py (-> targets) and viewing/viewer.py read this file directly, so it is the single source of truth and survives trajectory_manifest.json regeneration. Remove an entry to un-defer.",
+  "codex_non_api_high_reprompt_gpt-5.4_10h__arenahardwriting_google_gemma-3-4b-pt_17073339": "heavy: cut 2412, 19 pre-cut trainings + 20+ build scripts (parked)",
+  "codex_non_api_high_reprompt_gpt-5.4_10h__bfcl_HuggingFaceTB_SmolLM3-3B-Base_17078935": "heavy: cut 1831, 14 pre-cut trainings (parked)",
+  "claude_claude-opus-4-6_10h_run1__arenahardwriting_Qwen_Qwen3-1.7B-Base_16829396": "cut 1605, riskiest model rebuild (its auto-derived prep is 'review'-grade — agent interleaved prep/train); defer until its curated prep is re-checked/confirmed (2026-06-17)",
+  "codex_non_api_gpt-5.3-codex_10h_run3__arenahardwriting_HuggingFaceTB_SmolLM3-3B-Base_16849716": "codex gpt-5.3-codex: blocked by codex 0.140 'Model metadata for gpt-5.3-codex not found' bug; defer until the model-id metadata fix (2026-06-17)",
+  "codex_non_api_high_gpt-5.3-codex_10h_run2__bfcl_Qwen_Qwen3-1.7B-Base_16917993": "codex gpt-5.3-codex: blocked by codex 0.140 'Model metadata for gpt-5.3-codex not found' bug; defer until the model-id metadata fix (2026-06-17)",
+  "codex_non_api_high_gpt-5.3-codex_10h_run2__bfcl_google_gemma-3-4b-pt_16917254": "codex gpt-5.3-codex: blocked by codex 0.140 'Model metadata for gpt-5.3-codex not found' bug; defer until the model-id metadata fix (2026-06-17)"
+}

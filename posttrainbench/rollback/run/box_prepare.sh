@@ -39,6 +39,26 @@ fi
 nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || { echo "PREP: FAIL no GPU (nvidia-smi)"; exit 1; }
 echo "PREP: GPU $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 
+# 4.5 CUDA ACTUALLY INITIALIZES IN THE CONTAINER (not just nvidia-smi visibility).
+# A box can pass nvidia-smi yet fail real CUDA init with error 802 ("system not
+# yet initialized") — typically the SXM fabric manager not up yet right after boot.
+# That silently wasted a whole run (data-prep ran, then training crashed on CUDA
+# init; cut300 on a southeast 4x, 2026-06-17). So run a real CUDA op here and only
+# declare READY once it works. Retry a few times (fabric manager can take ~a minute
+# post-boot), with a best-effort start of it. Fail clean if it never inits, so the
+# launcher aborts BEFORE burning prep/agent budget on a broken box.
+CUDA_OK=0
+for try in $(seq 1 6); do
+  if apptainer exec --nv -c "$FS/containers/standard.sif" \
+       python3 -c "import torch; torch.cuda.init(); torch.zeros(1, device='cuda'); print('device_count', torch.cuda.device_count())" 2>/tmp/ptb_cuda_check.err; then
+    CUDA_OK=1; echo "PREP: CUDA init OK"; break
+  fi
+  echo "PREP: CUDA not ready (attempt $try/6): $(tail -1 /tmp/ptb_cuda_check.err 2>/dev/null)"
+  sudo systemctl start nvidia-fabricmanager 2>/dev/null || true   # best-effort if it's the fabric manager
+  sleep 20
+done
+[ "$CUDA_OK" = 1 ] || { echo "PREP: FAIL CUDA never initialized (error 802 / fabric manager not up?) — bad box; relaunch a fresh one"; exit 1; }
+
 # 5. secrets present (deployed separately by the orchestrator)
 [ -f /home/ubuntu/.ptb_secrets ] && grep -q OPENROUTER_API_KEY /home/ubuntu/.ptb_secrets \
   && echo "PREP: secrets present" || echo "PREP: WARN secrets not yet deployed"

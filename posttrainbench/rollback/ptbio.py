@@ -93,11 +93,30 @@ def _op_path(inp: dict) -> str | None:
 
 
 def iter_tool_calls(events: list[dict], upto: int | None = None) -> list[ToolCall]:
-    """All tool_use calls in event order, optionally for events [0, upto)."""
+    """All tool_use calls in event order, optionally for events [0, upto).
+
+    Handles both block-format scaffolds (Claude/OpenCode: assistant events with
+    tool_use blocks) and Codex (codex_item events: command_execution -> a Bash
+    call; file_change -> one write/edit call per changed path). Codex file_change
+    carries only path+kind (no content), which is enough for the BACKWARD roller
+    (first_write_index) but NOT for forward replay — see file_ops."""
     end = len(events) if upto is None else upto
     calls: list[ToolCall] = []
     for i in range(end):
         ev = events[i]
+        if ev.get("type") == "codex_item":
+            it = ev.get("item") or {}
+            itype = it.get("type")
+            if itype == "command_execution":
+                calls.append(ToolCall(idx=i, block_idx=0, tool_id=it.get("id", ""),
+                                      name="bash", input={"command": it.get("command", "")}))
+            elif itype == "file_change":
+                for k, ch in enumerate(it.get("changes") or []):
+                    calls.append(ToolCall(
+                        idx=i, block_idx=k, tool_id=it.get("id", ""),
+                        name="write" if ch.get("kind") == "add" else "edit",
+                        input={"path": ch.get("path")}))
+            continue
         if ev.get("type") != "assistant":
             continue
         for bi, b in enumerate(ev.get("blocks") or []):

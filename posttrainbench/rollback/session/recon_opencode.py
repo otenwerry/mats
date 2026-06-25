@@ -74,33 +74,38 @@ def group_messages(stream: list[dict]) -> list[tuple[str, list[dict]]]:
 
 
 def cut_message_id(events: list[dict], cut: int, stream: list[dict]) -> str:
-    """messageID of the first message dropped by the cut, located via the
-    first tool_use callID at/after the cut event."""
-    anchor = next((tc for tc in ptbio.iter_tool_calls(events) if tc.idx >= cut), None)
-    if anchor is None:
+    """messageID of the first message dropped by the cut, anchored by the
+    ORDINAL of the first tool_use at/after the cut (its position among all
+    tool_uses), NOT by callID. Some runs reset/reuse callIDs across messages
+    (e.g. functions.bash:0 recurs), which breaks ID-based matching; the viewer's
+    tool_use order and the stream's tool_use order agree, so position is robust."""
+    kept = sum(1 for tc in ptbio.iter_tool_calls(events) if tc.idx < cut)
+    tool_uses = [d for d in stream if d["type"] == "tool_use"]
+    if kept >= len(tool_uses):
         raise ValueError(f"no tool_use at/after cut {cut}; cannot anchor")
-    for d in stream:
-        if d["type"] == "tool_use" and d["part"].get("callID") == anchor.tool_id:
-            return d["part"]["messageID"]
-    raise ValueError(f"anchor callID {anchor.tool_id} not found in solve_out stream")
+    return tool_uses[kept]["part"]["messageID"]
 
 
 def validate_cut(events: list[dict], cut: int, stream: list[dict],
                  kept_ids: set[str], cut_mid: str) -> dict:
-    """The kept viewer events' tool calls must map exactly onto kept messages."""
-    call_to_mid = {d["part"]["callID"]: d["part"]["messageID"]
-                   for d in stream if d["type"] == "tool_use"}
-    kept_calls = [tc.tool_id for tc in ptbio.iter_tool_calls(events, cut)]
-    misplaced = [c for c in kept_calls if call_to_mid.get(c) not in kept_ids]
-    dropped_calls_in_kept_msgs = [
-        c for tc in ptbio.iter_tool_calls(events)
-        if tc.idx >= cut and (c := tc.tool_id) and call_to_mid.get(c) in kept_ids
-    ]
+    """The kept viewer events' tool calls must map exactly onto kept messages —
+    checked by ORDINAL (callID-agnostic). Requires the events' tool_use count to
+    match the stream's (else the ordinal mapping is unsafe -> not ok)."""
+    tool_uses = [d for d in stream if d["type"] == "tool_use"]
+    n_events_tool = len(ptbio.iter_tool_calls(events))
+    kept = sum(1 for tc in ptbio.iter_tool_calls(events) if tc.idx < cut)
+    misplaced = [d["part"].get("callID") for d in tool_uses[:kept]
+                 if d["part"]["messageID"] not in kept_ids]
+    dropped_in_kept = [d["part"].get("callID") for d in tool_uses[kept:]
+                       if d["part"]["messageID"] in kept_ids]
     return {
-        "kept_tool_calls": len(kept_calls),
+        "kept_tool_calls": kept,
+        "stream_tool_uses": len(tool_uses),
+        "events_tool_calls": n_events_tool,
+        "count_match": n_events_tool == len(tool_uses),
         "misplaced_kept_calls": misplaced,
-        "dropped_calls_in_kept_messages": dropped_calls_in_kept_msgs,
-        "ok": not misplaced and not dropped_calls_in_kept_msgs,
+        "dropped_calls_in_kept_messages": dropped_in_kept,
+        "ok": (n_events_tool == len(tool_uses)) and not misplaced and not dropped_in_kept,
     }
 
 

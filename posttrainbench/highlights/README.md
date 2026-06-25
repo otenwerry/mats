@@ -6,6 +6,12 @@ violations found by our own scan. Each file's **`final` block is the only
 thing you should filter on**; everything else is the judging history that
 produced it.
 
+> **`rollback_*.json` here are the rollback-experiment JUDGE OUTPUTS** (written
+> by `judging/exp_judge_rollback.py`, same schema as above). They are NOT
+> duplicates of the `mats-local/rollback/viewer_data/rollback_*.json` *trajectory*
+> files — same name, different directory, different content. The viewer reads
+> rollback "judged" status from these. **Don't delete them.**
+
 ```json
 {
   "run_id": "...",

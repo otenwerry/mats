@@ -79,8 +79,8 @@ def sanity_checks(task: Path, traj: config.Trajectory) -> list[dict]:
 
 def inspect(traj: config.Trajectory, cut: int, do_build: bool,
             bash_mode: str = "skip") -> dict:
-    spec_f = config.ExperimentSpec(traj, "forward", "control", cut)
-    spec_b = config.ExperimentSpec(traj, "backward", "control", cut)
+    spec_f = config.ExperimentSpec(traj, "forward", "prompt1", cut)
+    spec_b = config.ExperimentSpec(traj, "backward", "prompt1", cut)
 
     report: dict = {"run_id": traj.run_id, "cut_before_event": cut}
     if do_build:

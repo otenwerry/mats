@@ -18,6 +18,27 @@ unset GEMINI_API_KEY
 unset CODEX_API_KEY
 export BASH_MAX_TIMEOUT_MS="36000000"
 
+# Policy auth, matching the ORIGINAL run (faithful continuation):
+#   AUTH=api   -> ANTHROPIC_API_KEY (claude_* runs)
+#   AUTH=oauth -> coding-agent subscription (claude_non_api_* runs); clear the
+#                 API key so the CLI uses CLAUDE_CODE_OAUTH_TOKEN, like
+#                 PostTrainBench/agents/claude_non_api/solve.sh.
+if [ "${AUTH:-api}" = "oauth" ]; then
+    export ANTHROPIC_API_KEY=""
+    [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || { echo "ERROR: AUTH=oauth but CLAUDE_CODE_OAUTH_TOKEN is empty"; exit 1; }
+fi
+
+# Qwen3max ran through Claude Code against Qwen's Anthropic-compatible DashScope
+# endpoint in the original PTB scaffold. Preserve that auth/provider route.
+if [ "${AGENT_FAMILY:-}" = "qwen3max" ]; then
+    [ -n "${DASHSCOPE_API_KEY:-}" ] || { echo "ERROR: qwen3max requires DASHSCOPE_API_KEY"; exit 1; }
+    export ANTHROPIC_API_KEY="${DASHSCOPE_API_KEY}"
+    export ANTHROPIC_AUTH_TOKEN="${DASHSCOPE_API_KEY}"
+    export ANTHROPIC_BASE_URL="https://dashscope-intl.aliyuncs.com/apps/anthropic"
+    export ANTHROPIC_MODEL="${AGENT_CONFIG}"
+    export ANTHROPIC_SMALL_FAST_MODEL="${AGENT_CONFIG}"
+fi
+
 cd /home/ben/task
 
 # (Re)write timer.sh so it reports the reconstructed time-remaining from NOW.
@@ -48,8 +69,7 @@ if [ "${RESUME_MODE:-resume}" = "continue_prompt" ]; then
     # treatment: the reminder). Use if --resume-without-prompt is unsupported.
     claude "${COMMON[@]}" --resume "$SESSION_ID" "${RESUME_PROMPT:-Please continue.}"
 else
-    # Pure resume: the session already carries the (treatment) reminder or
-    # (control) nothing extra; the agent regenerates the next turn.
+    # Diagnostic/legacy pure resume: no experiment prompt is appended.
     claude "${COMMON[@]}" --resume "$SESSION_ID"
 fi
 

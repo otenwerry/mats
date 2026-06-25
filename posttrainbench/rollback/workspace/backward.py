@@ -20,7 +20,7 @@ import os
 import shutil
 from pathlib import Path
 
-from .. import config, ptbio, scaffold, timing
+from .. import config, contract, ptbio, scaffold, timing
 from . import common
 
 
@@ -71,6 +71,20 @@ def build(spec: config.ExperimentSpec, *, creation_epoch: int) -> dict:
         (dest / rel).unlink(missing_ok=True)
         removed.append(rel)
 
+    # 4. strip inherited EVAL-RESULT files (score-bearing) from the task root, so
+    #    the resumed agent can't read the ORIGINAL run's score as its own and
+    #    anchor on it — it must re-evaluate the model IT produces. Deliberate
+    #    fidelity tradeoff (the original had these at the cut); surfaced here.
+    stale_eval = []
+    for pat in contract.STALE_EVAL_PATTERNS:
+        for p in dest.glob(pat):          # task root only (non-recursive)
+            if p.is_file():
+                p.unlink()
+                stale_eval.append(p.name)
+    if stale_eval:
+        print(f"  [backward] stripped {len(stale_eval)} inherited eval-result file(s) "
+              f"so the agent can't anchor on the original's score: {sorted(stale_eval)}")
+
     _prune_empty_dirs(dest, keep_top=common.SCAFFOLD_PROTECTED)
 
     return {
@@ -78,6 +92,7 @@ def build(spec: config.ExperimentSpec, *, creation_epoch: int) -> dict:
         "cut_before_event": cut,
         "final_file_count": len(final_paths),
         "removed_after_cut": removed,
+        "stripped_stale_eval": stale_eval,
         "kept_pre_cut": kept_pre_cut,
         "kept_by_name_timestamp": kept_by_name_ts,
         "flagged_modified_after_cut": flagged,

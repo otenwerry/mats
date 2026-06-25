@@ -9,6 +9,10 @@ wheels/
 # environments
 .venv
 .env
+.uv-cache/
+.venv-codex/
+.codex/config.toml
 
 # claude stuff
 .claude/settings.local.json
+.agents/settings.local.json

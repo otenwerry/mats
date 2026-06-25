@@ -3,7 +3,7 @@
 session, on this Mac, with your real OPENROUTER_API_KEY. Costs ~a cent.
 
 What it does:
-  1. copies a prepared cell (default backward_control) into a throwaway sandbox
+  1. copies a prepared cell (default backward_prompt1) into a throwaway sandbox
      so the real build dir is never mutated;
   2. resumes the session with the cell's actual resume prompt via a local
      opencode-ai@1.1.59 (npx); the model sees the full reconstructed history;
@@ -18,7 +18,7 @@ the Mac: there is no GPU here and the full loop belongs in the container.
 
 Usage:
     OPENROUTER_API_KEY=sk-or-v1-... python -m rollback.run.exp_local_smoke \
-        [--cell backward_control_cut39] [--max-steps 1] [--max-seconds 180]
+        [--cell backward_prompt1_cut39] [--max-steps 1] [--max-seconds 180]
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ OPENCODE_PKG = "opencode-ai@1.1.59"  # match the container pin
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cell", default="backward_control_cut39")
+    ap.add_argument("--cell", default="backward_prompt1_cut39")
     ap.add_argument("--max-steps", type=int, default=1)
     ap.add_argument("--max-seconds", type=int, default=180)
     args = ap.parse_args()

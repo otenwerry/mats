@@ -122,6 +122,71 @@ def cut_epoch(events: list[dict], cut: int) -> float | None:
     return max(kept) if kept else None
 
 
+def _timer_remaining(text: str) -> float | None:
+    """Seconds remaining parsed from a timer.sh result ('H:MM', or expired)."""
+    if not text:
+        return None
+    if "expired" in text.lower():
+        return 0.0
+    m = re.search(r"(\d{1,2}):(\d{2})\b", text)
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60
+
+
+def timer_anchors(events: list[dict], budget: int) -> list[tuple[int, float]]:
+    """(event_index, elapsed_seconds) for every `timer.sh` call, derived from the
+    time-remaining it reported. These are REAL wall-clock anchors — far more
+    accurate than step-count when the trace lacks timestamps. timer.sh truncates
+    to whole minutes, so each reading over-states elapsed by 0-60s; we bias-correct
+    by the 30s mean."""
+    res: dict = {}
+    for ev in events:
+        for b in ev.get("blocks") or []:
+            if b.get("type") == "tool_result":
+                res[b.get("tool_use_id")] = str(b.get("content") or "")
+    anchors = []
+    for tc in ptbio.iter_tool_calls(events):
+        cmd = tc.input.get("command") if isinstance(tc.input, dict) else None
+        if not (isinstance(cmd, str) and "timer.sh" in cmd):
+            continue
+        rem = _timer_remaining(res.get(tc.tool_id, ""))
+        if rem is None:
+            continue
+        anchors.append((tc.idx, max(0.0, (budget - rem) - 30.0)))
+    return sorted(anchors)
+
+
+def elapsed_from_timer(events: list[dict], cut: int, budget: int,
+                       total: int | None) -> float | None:
+    """Elapsed at the cut, anchored on the run's own timer.sh readings and
+    distributed WITHIN an anchor bracket by the step-count shape. None if the run
+    never called timer.sh (then `reconstruct` falls back to the approximation)."""
+    anchors = timer_anchors(events, budget)
+    if not anchors:
+        return None
+    h = lambda i: elapsed_at(events, i, total)   # heuristic shape between anchors
+    before = [a for a in anchors if a[0] <= cut]
+    after = [a for a in anchors if a[0] >= cut]
+    if before and before[-1][0] == cut:
+        return before[-1][1]
+    A = before[-1] if before else None
+    B = after[0] if after else None
+    if A and B:                       # interpolate between bracketing anchors
+        ha, hb, hc = h(A[0]), h(B[0]), h(cut)
+        frac = (hc - ha) / (hb - ha) if hb > ha else (cut - A[0]) / max(B[0] - A[0], 1)
+        return A[1] + frac * (B[1] - A[1])
+    if A:                             # cut after last anchor -> extrapolate to total
+        end = len(events)
+        ha, he, hc = h(A[0]), h(end), h(cut)
+        ceil = total if (total and total > A[1]) else budget
+        frac = (hc - ha) / (he - ha) if he > ha else 0.0
+        return min(A[1] + frac * (ceil - A[1]), budget)
+    hb, hc = h(B[0]), h(cut)          # cut before first anchor
+    frac = (hc / hb) if hb > 0 else (cut / max(B[0], 1))
+    return frac * B[1]
+
+
 def reconstruct(traj: config.Trajectory, cut: int) -> dict:
     """Everything the runner needs to write a faithful timer.sh at the cut.
 
@@ -132,11 +197,17 @@ def reconstruct(traj: config.Trajectory, cut: int) -> dict:
     total = parse_time_taken(traj)
     budget = traj.num_hours * 3600
 
+    # priority: real per-event timestamps > the run's own timer.sh readings
+    # (real wall-clock anchors) > step-count approximation (last resort).
     ts_elapsed = elapsed_from_timestamps(events, cut)
     if ts_elapsed is not None:
         elapsed, method = ts_elapsed, "timestamps"
     else:
-        elapsed, method = elapsed_at(events, cut, total), "approximation"
+        tmr = elapsed_from_timer(events, cut, budget, total)
+        if tmr is not None:
+            elapsed, method = tmr, "timer_anchored"
+        else:
+            elapsed, method = elapsed_at(events, cut, total), "approximation"
 
     elapsed = min(elapsed, budget)
     return {

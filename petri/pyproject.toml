@@ -9,4 +9,5 @@ dependencies = [
     "anthropic",
     "openai",
     "python-dotenv",
+    "matplotlib>=3.11.0",
 ]

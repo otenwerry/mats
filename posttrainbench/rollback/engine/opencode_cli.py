@@ -21,7 +21,7 @@ import json
 import shutil
 from pathlib import Path
 
-from .. import config
+from .. import config, contract
 from ..session import recon_opencode
 from ..workspace import forward, backward
 from .base import Engine
@@ -47,6 +47,8 @@ class OpenCodeEngine(Engine):
         sess = recon_opencode.build_session(spec, job_home)
         shutil.copy2(_SOLVE_SRC, job_home / "agent_solve.sh")
         (job_home / "agent_solve.sh").chmod(0o755)
+        prep_cmds, prep_source = config.effective_prep_commands(spec.trajectory)
+        timeout = contract.timeout_contract(spec.trajectory.num_hours, elapsed_seconds)
 
         # The original gateway model (opencode/minimax-m2.5-free) left the
         # OpenCode Zen catalog; the default continuation route is OpenRouter's
@@ -72,8 +74,22 @@ class OpenCodeEngine(Engine):
             "cut_before_event": spec.cut_before_event,
             "policy_model": spec.policy_model,
             "policy_model_recorded": spec.trajectory.policy_model_recorded,
+            "agent": spec.trajectory.agent,
+            # scaffold + auth so the box injects the right policy credentials
+            # (opencode authenticates the policy via the OpenRouter API key).
+            "scaffold": spec.trajectory.scaffold,
+            "auth": spec.trajectory.auth,
+            "container": spec.trajectory.container,  # apptainer image basename
+            # the HF base model the agent fine-tunes — the box uses this to
+            # locate the cached weights when SMOKE scoring needs a model present
+            # (after a 1-step smoke there's no trained final_model yet).
+            "model_to_train": spec.trajectory.model_to_train,
             "elapsed_seconds": elapsed_seconds,
             "num_hours": spec.trajectory.num_hours,
+            "prompt_contract": contract.prompt_contract(spec.condition, spec.trajectory.scaffold),
+            "timeout_contract": timeout,
+            "remaining_seconds": timeout["remaining_seconds_at_cut"],
+            "agent_timeout_minutes": timeout["agent_timeout_minutes"],
             "session_id": sess["session_id"],
             "storage_dir": sess["storage_dir"],
             "opencode_version": sess["opencode_version"],
@@ -81,13 +97,31 @@ class OpenCodeEngine(Engine):
             # control = shared stem; treatment = stem + reminder (differ by
             # exactly the reminder). Sent via stdin by the solve script.
             "resume_prompt": spec.resume_prompt,
+            # bash run on the GPU box in task/ BEFORE the agent, to materialize
+            # model weights the stripped archive lacks (e.g. rerun pre-cut
+            # training). curated-if-present-else-derived (P4d); prep_source marks
+            # provenance. Empty for cuts before any training. See config.py.
+            "prep_commands": prep_cmds,
+            "prep_source": prep_source,
+            "require_prep_fidelity": bool(prep_cmds) and contract.REQUIRE_PREP_FIDELITY,
+            # dir (under task/) holding the servable model to score — "final_model"
+            # for full-model trainers, "final_model_merged" for LoRA+merge runs.
+            "eval_model_dir": spec.trajectory.eval_model_dir,
+            # --limit for our eval; bounded for slow LLM-graded benchmarks.
+            "eval_limit": spec.trajectory.eval_limit,
+            # original pre-cut score; the on-box fidelity gate aborts the run
+            # before the agent if the re-trained prep diverges from this.
+            "precut_baseline": config.precut_baseline(spec.trajectory),
+            "workspace_audit": _workspace_audit(ws),
+            "session_caveats": _session_caveats(sess),
         }
         (job_home / "run_config.json").write_text(json.dumps(cfg, indent=1))
         return {"workspace": ws, "session": sess, "config": cfg}
 
     def launch_command(self, spec: config.ExperimentSpec, job_home: Path) -> list[str]:
         cfg = json.loads((job_home / "run_config.json").read_text())
-        budget_min = spec.trajectory.num_hours * 60 + 5
+        budget_min = cfg.get("agent_timeout_minutes") or contract.agent_timeout_minutes(
+            spec.trajectory.num_hours, cfg.get("elapsed_seconds", 0))
         return [
             "timeout", "--signal=TERM", "--kill-after=30s", f"{budget_min}m",
             "apptainer", "exec", "--nv", "-c",
@@ -114,3 +148,17 @@ class OpenCodeEngine(Engine):
             "${POST_TRAIN_BENCH_CONTAINERS_DIR}/" + Path(self.container_sif).name,
             "bash", "/home/ben/agent_solve.sh",
         ]
+
+
+def _workspace_audit(ws: dict) -> dict:
+    return {
+        "strategy": ws.get("strategy"),
+        "stripped_stale_eval": ws.get("stripped_stale_eval", []),
+        "flagged_modified_after_cut": ws.get("flagged_modified_after_cut", []),
+        "kept_by_name_timestamp": ws.get("kept_by_name_timestamp", []),
+        "removed_after_cut_count": len(ws.get("removed_after_cut", []) or []),
+    }
+
+
+def _session_caveats(sess: dict) -> list[str]:
+    return []

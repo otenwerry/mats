@@ -45,7 +45,7 @@ JUDGE_MODEL = os.environ.get("PTB_JUDGE_MODEL", "claude-sonnet-4-6")
 # a backward build gives the validator the real script files for routing +
 # script-content grounding (same sandbox the live engine would use)
 SANDBOX = (config.BUILD_ROOT / config.TRAJECTORY.run_name
-           / f"backward_control_cut{config.CUT_BEFORE_EVENT}" / "task")
+           / f"backward_prompt1_cut{config.CUT_BEFORE_EVENT}" / "task")
 
 _SCORE_RE = re.compile(
     r"(?:accuracy|score|mean|metric|reward|pass@?\d*)[\"'\s:=]*([01]?\.\d+|\d{1,3}(?:\.\d+)?%?)",
