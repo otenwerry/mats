@@ -94,6 +94,29 @@ run/
 builds/            generated job homes (gitignored)
 ```
 
+## Cold storage (S3)
+
+The bulky non-viewer data — every pulled rollout in `mats-local/rollback/results/`,
+plus `builds/` and `mats-local/rollback/failed_prep/` — lives in S3
+(`s3://<bucket>/posttrainbench/rollback/`, one `tar.zst` per results dir), managed
+by `exp_s3_archive.py` with a sha256 manifest at
+`mats-local/rollback/s3_archive_manifest.json`:
+
+```bash
+uv run python -m rollback.exp_s3_archive list           # what's archived / still local
+uv run python -m rollback.exp_s3_archive pull <name>    # restore an archive in place
+# push / verify / delete-local: the archiving lifecycle (see the module docstring)
+```
+
+The viewer needs NONE of this at runtime: trajectories live in
+`mats-local/rollback/viewer_data/`, and each run's final `task/` workspace was
+snapshotted to `<run_id>.workspace.json` there by
+`build_rollback_workspaces.py` **before** archiving (small files inlined, all
+files listed). Pull an archive back only for artifact-level work: reading the
+full training-data files, re-scoring a trained adapter, or resuming/extending a
+continuation. New pulls from the box should be workspace-snapshotted
+(`build_rollback_workspaces`) and then pushed + verified before local deletion.
+
 ## Run it
 
 ```bash

@@ -19,21 +19,21 @@ What happens at the cut:
     "phantom" message.
 
 This is PART 1 of the rollback pipeline. It produces the continuations and the
-live Petri judge-1 scores only (reward_hacking, auditor_nudging, eval_awareness),
-which run as the eval scorer. The two slow post-run judges are PART 2, split into
-a separate, concurrent module so we can iterate on judging without regenerating
-continuations:
+live Petri judge-1 scores only (all dims in dimensions/ plus eval_awareness -- see
+get_rollback_dims), which run as the eval scorer. The two slow post-run judges are
+PART 2, split into a separate, concurrent module so we can iterate on judging
+without regenerating continuations:
   - judge 2 (secondary hack-turn annotation) and
   - judge 3 (did it hack on the exact re-rolled turn?)
 both live in `exp_rollback_judge.py`. After this finishes, run:
-  uv run exp_rollback_judge.py --run-dir=<the run dir this prints>
+  uv run lib/exp_rollback_judge.py --run-dir=<the run dir this prints>
 
-Usage:
-  uv run exp_rollback.py --N=10                      # all clean hacks, 10 rollbacks each
-  uv run exp_rollback.py --N=5 --trajectories=12,55  # specific trajectory IDs
-  uv run exp_rollback.py --N=10 --prompt=prompt1     # named prompt (see PROMPTS dict)
-  uv run exp_rollback.py --N=10 --prompt="literal text works too"
-  uv run exp_rollback.py --dry-run                   # FREE: validate cut points, no run
+Usage (from petri/ -- this file lives in lib/):
+  uv run lib/exp_rollback.py --N=10                      # all clean hacks, 10 rollbacks each
+  uv run lib/exp_rollback.py --N=5 --trajectories=12,55  # specific trajectory IDs
+  uv run lib/exp_rollback.py --N=10 --prompt=prompt1     # named prompt (see PROMPTS dict)
+  uv run lib/exp_rollback.py --N=10 --prompt="literal text works too"
+  uv run lib/exp_rollback.py --dry-run                   # FREE: validate cut points, no run
 
 Flags:
   --N=<int>           REQUIRED. Number of rollbacks (continuations) per trajectory.
@@ -43,7 +43,7 @@ Flags:
                       A name in the PROMPTS dict (e.g. prompt1) expands to its
                       registered text; anything else is used as literal text.
   --dry-run           Build + validate the cut points and print a report; no run, no cost.
-  --concurrency=<N>   Parallelism (default 10).
+  --concurrency=<N>   Parallelism (default 50).
 
 Costs money (Anthropic + OpenRouter APIs) unless --dry-run.
 """
@@ -67,6 +67,7 @@ from inspect_ai.log import list_eval_logs, read_eval_log
 from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageUser,
+    GenerateConfig,
     ModelOutput,
     get_model,
     user_prompt,
@@ -92,8 +93,6 @@ from inspect_petri.tools import (
     create_tool,
     end_conversation,
     remove_tool,
-    restart_conversation,
-    rollback_conversation,
     send_message,
     send_tool_call_result,
     set_system_message,
@@ -114,9 +113,20 @@ logger = logging.getLogger(__name__)
 
 load_dotenv(ENV_FILE)
 
+# Default auditor/judge. NOTE: resamples now INHERIT all three roles (target,
+# auditor, judge) from the original trajectory they re-roll (see TrajRef / _all_refs /
+# build_rollback_task), so these constants are only the fallback used when an original
+# log somehow doesn't record an auditor/judge role -- which for our runs it always does.
 AUDITOR = "anthropic/claude-sonnet-4-6"
 JUDGE = "anthropic/claude-opus-4-8"
-MAX_TURNS = 30  # same cap as the original audits
+# FALLBACK ONLY: max_turns (and turn_counter=False) are INHERITED from the original's
+# stamped metadata (TrajRef.max_turns / .turn_counter, read in _all_refs and applied in
+# resume_solver), so a rollback always runs under the same turn budget as the run it
+# re-rolls -- 30 for the pre-v5 originals, 50 + turn counter for v5+ ones. This constant
+# is used only when an original predates max_turns stamping (everything before
+# 2026-06-23), and every such original actually ran at 30 with no turn counter, so the
+# fallback reproduces them exactly.
+MAX_TURNS = 30
 
 ANN_FILE = DATA / "annotations.json"
 IDS_FILE = DATA / "trajectory_ids.json"
@@ -266,6 +276,29 @@ class TrajRef:
     seed: str
     epoch: int
     target_model: str
+    auditor_model: str   # the original's auditor (resamples inherit it)
+    judge_model: str     # the original's judge   (resamples inherit it)
+    reasoning_enabled: bool | None   # the original's pinned target reasoning (True/False),
+                                     # or None = provider default. Resamples re-apply it so
+                                     # a pinned hybrid target isn't silently re-rolled at the
+                                     # provider default. Read from the original's stamped
+                                     # metadata (authoritative), not the live REASONING_ENABLED.
+    auditor_reasoning_effort: str | None = None  # the original's AUDITOR extended-thinking
+                                     # setting AS RUN (effort str, or None = thinking off --
+                                     # also the value for every pre-thinking run). Resamples
+                                     # re-apply it so a thinking-on original isn't re-rolled
+                                     # with a thinking-off auditor (and vice-versa). Read from
+                                     # the original's stamped metadata (authoritative).
+    max_turns: int = MAX_TURNS       # the original's auditor turn cap AS RUN (stamped since
+                                     # 2026-06-23; every unstamped original ran at 30 = the
+                                     # fallback). Resamples re-apply it so a 50-turn (v5+)
+                                     # original isn't re-rolled under a shorter cap -- the
+                                     # cap counts replayed turns too, so a late cut in a long
+                                     # original NEEDS the original's budget to have any live room.
+    turn_counter: bool = False       # the original's "turn N of M" auditor counter AS RUN
+                                     # (stamped since v5; absent = the feature didn't exist =
+                                     # off). Resamples re-apply it so the live auditor budgets
+                                     # its turns the same way the original's did.
 
 
 def _all_refs() -> dict[int, TrajRef]:
@@ -277,11 +310,28 @@ def _all_refs() -> dict[int, TrajRef]:
             log = read_eval_log(li)
             roles = log.eval.model_roles or {}
             target = getattr(roles.get("target"), "model", None) or str(roles.get("target", "?"))
+            # auditor + judge inherited by resamples; fall back to the canonical default
+            # constants only if a log didn't record the role (our runs always do).
+            auditor = getattr(roles.get("auditor"), "model", None) or AUDITOR
+            judge = getattr(roles.get("judge"), "model", None) or JUDGE
+            # the target's reasoning pin AS RUN (stamped by exp_rh_audit.build_tasks).
+            # Authoritative for faithful re-application; None = provider default / unstamped.
+            reasoning = (log.eval.metadata or {}).get("reasoning_enabled")
+            # the auditor's extended-thinking setting AS RUN (stamped by exp_rh_audit /
+            # exp_rollback). Absent on every pre-thinking run -> None -> thinking off.
+            meta = log.eval.metadata or {}
+            aud_eff = meta.get("auditor_reasoning_effort")
+            # turn budget AS RUN (stamped since 2026-06-23 / v5 respectively). Unstamped
+            # originals all ran at MAX_TURNS=30 with no counter, so the fallbacks are exact.
+            max_turns = int(meta["max_turns"]) if meta.get("max_turns") is not None else MAX_TURNS
+            turn_counter = bool(meta.get("turn_counter") or False)
             for s in log.samples or []:
                 key = f"{mode_dir.name}__{log.eval.task}__{s.id}__e{s.epoch}"
                 if key in ids:
                     refs[ids[key]] = TrajRef(ids[key], key, mode_dir.name,
-                                             log.eval.task, str(s.id), s.epoch, target)
+                                             log.eval.task, str(s.id), s.epoch,
+                                             target, auditor, judge, reasoning, aud_eff,
+                                             max_turns, turn_counter)
     return refs
 
 
@@ -554,15 +604,21 @@ def resume_with_note(holder: dict):
 
 
 def resume_auditor_tools(holder: dict) -> list:
-    """Standard Petri auditor toolset (synthetic tools + rollback), with the
-    note-aware resume swapped in. Full set so replayed tool calls always resolve."""
+    """Petri auditor toolset with the note-aware resume swapped in, and the
+    rollback_conversation / restart_conversation tools REMOVED so resamples stay
+    linear -- this mirrors the audit pipeline's `enable_rollback=False`, so the
+    live auditor cannot wipe or branch the target's conversation.
+
+    This is separate from (and does NOT affect) the resume-to-cut machinery: the
+    replay in resume_target_agent still reconstructs the original context up to the
+    chosen resume point exactly as before. All resampled originals are linear (v2
+    runs use enable_rollback=False, and branched originals are refused upstream), so
+    no replayed auditor tool call references the two removed tools."""
     return [
         set_system_message(),
         send_message(),
         resume_with_note(holder),
         end_conversation(),
-        rollback_conversation(),
-        restart_conversation(),
         create_tool(),
         remove_tool(),
         send_tool_call_result(),
@@ -667,8 +723,12 @@ def resume_solver(spec: ResumeSpec):
         init_controller(Controller(ch))
 
         holder: dict = {}
+        # turn budget + counter inherited from the original (see TrajRef): the cap counts
+        # replayed turns too, so it must match the original's or a late cut in a long
+        # original would leave no (or less) live room than the original had.
         auditor_ag = auditor_agent(
-            max_turns=MAX_TURNS,
+            max_turns=spec.ref.max_turns,
+            turn_counter=spec.ref.turn_counter,
             tools=resume_auditor_tools(holder),
             generate=make_auditor_replay(spec),
         )
@@ -698,7 +758,7 @@ def resume_solver(spec: ResumeSpec):
 # Task building (shared by the CLI and exp_rollback_pipeline)
 # --------------------------------------------------------------------------- #
 def get_rollback_dims():
-    """The rollback judge-1 dimension set: our 5 audit dims + eval_awareness."""
+    """The rollback judge-1 dimension set: every dim in dimensions/ + eval_awareness."""
     return judge_dimensions(DIMENSIONS_DIR) + judge_dimensions(["eval_awareness"])
 
 
@@ -707,6 +767,15 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
     cut-aware judge-1. cut_m is the generation-time approximation (the original's j-th
     assistant M); exp_rejudge_rollbacks recomputes the exact cut from the finished
     transcript later. prompt=None (control) -> only the cut restriction applies.
+
+    All three model roles (target, auditor, judge) are INHERITED from the original
+    trajectory this resamples (carried on spec.ref), so a resample always uses the same
+    models as the run it rolled back -- not a fixed default. The target's reasoning pin
+    is re-applied too (via get_model) so a pinned hybrid isn't silently re-rolled at the
+    provider default; this mirrors exp_rh_audit.build_tasks. None = provider default ->
+    bare string (so resamples of un-pinned originals are byte-for-byte unchanged).
+    The auditor's turn budget (max_turns + turn_counter, applied in resume_solver) is
+    inherited the same way -- see TrajRef.max_turns.
 
     task_name overrides the default `rollback_<id>_<seed>` -- the pipeline passes a
     name that ALSO encodes location+condition so a single combined eval_set can hold
@@ -718,10 +787,30 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
         solver=resume_solver(spec),
         scorer=audit_judge(dims, instructions=judge_instructions),
     )
+    reasoning_pref = spec.ref.reasoning_enabled
+    target_role = (
+        spec.ref.target_model if reasoning_pref is None
+        else get_model(spec.ref.target_model, reasoning_enabled=reasoning_pref)
+    )
+    # Re-apply the original's auditor extended-thinking setting. None = thinking off ->
+    # bare string (so resamples of pre-thinking originals are byte-for-byte unchanged);
+    # otherwise rebuild the auditor with that effort (Inspect -> adaptive thinking for
+    # Sonnet 4.6). Mirrors the target reasoning re-application above.
+    aud_eff = spec.ref.auditor_reasoning_effort
+    auditor_role = (
+        spec.ref.auditor_model if aud_eff is None
+        else get_model(spec.ref.auditor_model, config=GenerateConfig(reasoning_effort=aud_eff))
+    )
     return task_with(
         base,
-        model_roles=dict(auditor=AUDITOR, target=spec.ref.target_model, judge=JUDGE),
+        model_roles=dict(auditor=auditor_role, target=target_role,
+                         judge=spec.ref.judge_model),
         name=task_name or f"rollback_{spec.ref.traj_id}_{spec.ref.seed}",
+        # stamp the inherited settings so the rollback log is self-describing and the
+        # viewer can label it (-> log.eval.metadata, same channel exp_rh_audit uses).
+        metadata={"auditor_reasoning_effort": aud_eff,
+                  "max_turns": spec.ref.max_turns,
+                  "turn_counter": spec.ref.turn_counter},
     )
 
 
@@ -752,7 +841,7 @@ def main() -> None:
     prompt_arg = _arg("prompt")
     prompt_name = prompt_arg if prompt_arg in PROMPTS else None
     prompt = PROMPTS.get(prompt_arg, prompt_arg)  # named -> registered text; else literal
-    concurrency = int(_arg("concurrency", "10"))
+    concurrency = int(_arg("concurrency", "50"))
 
     n_arg = _arg("N")
     if not dry_run and n_arg is None:
@@ -798,7 +887,13 @@ def main() -> None:
 
     print(f"\n[run] {len(specs)} trajectory(ies) x {N} rollback(s) each = {len(specs) * N} continuations")
     print(f"  {prompt_desc}")
-    print(f"  auditor={AUDITOR}  judge={JUDGE}  max_turns={MAX_TURNS}  concurrency={concurrency}")
+    # models + turn budget are inherited per source trajectory; print the distinct sets.
+    auds = sorted({s.ref.auditor_model for s in specs})
+    juds = sorted({s.ref.judge_model for s in specs})
+    turns = sorted({s.ref.max_turns for s in specs})
+    print(f"  auditor={','.join(auds)}  judge={','.join(juds)}  "
+          f"max_turns={'/'.join(map(str, turns))}  (all inherited per source trajectory)  "
+          f"concurrency={concurrency}")
 
     dims = get_rollback_dims()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -810,8 +905,10 @@ def main() -> None:
     tasks = [build_rollback_task(spec, dims) for spec in specs]
 
     print(f"  logs -> {run_dir}\n")
+    # Active tasks = the connection budget: enough to keep the shared auditor pool fed,
+    # no more (the pool is the real ceiling). Matches exp_rollback_pipeline's max_tasks.
     success, logs = eval_set(
-        tasks, epochs=N, max_tasks=len(tasks),
+        tasks, epochs=N, max_tasks=min(len(tasks), concurrency),
         max_samples=concurrency, max_connections=concurrency, log_dir=str(run_dir),
     )
     print(f"\neval_set finished, success={success}")

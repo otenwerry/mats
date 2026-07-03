@@ -30,12 +30,12 @@ By DEFAULT it annotates ONLY the continuations the viewer highlights red (a rewa
 full or degenerate) -- those are the ones we care about and it keeps cost down. Pass
 --include-nonred to annotate every continuation instead.
 
-Usage:
-  uv run exp_rollback_judge.py --all                            # red rows across every run dir (default)
-  uv run exp_rollback_judge.py --run-dir=rollback-before-control-5x-20260618-235138
-  uv run exp_rollback_judge.py --run-dir=<dir> --concurrency=10
-  uv run exp_rollback_judge.py --run-dir=<dir> --force          # re-judge (re-spend) the red rows
-  uv run exp_rollback_judge.py --all --include-nonred           # ALL rows, not just red
+Usage (from petri/ -- this file lives in lib/):
+  uv run lib/exp_rollback_judge.py --all                            # red rows across every run dir (default)
+  uv run lib/exp_rollback_judge.py --run-dir=rollback-before-control-5x-20260618-235138
+  uv run lib/exp_rollback_judge.py --run-dir=<dir> --concurrency=50
+  uv run lib/exp_rollback_judge.py --run-dir=<dir> --force          # re-judge (re-spend) the red rows
+  uv run lib/exp_rollback_judge.py --all --include-nonred           # ALL rows, not just red
 
 Costs money (Anthropic API). `--run-dir` may be a bare dir name (resolved under
 mats-local/petri/logs/) or an absolute path.
@@ -70,7 +70,7 @@ from exp_rollback import PROMPTS
 load_dotenv(DATA.parent.parent / "mats" / ".env")  # mats/.env (ANTHROPIC_API_KEY)
 
 DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_CONCURRENCY = 10
+DEFAULT_CONCURRENCY = 50
 PRICES = {"claude-opus-4-8": (5.0, 25.0), "claude-sonnet-4-6": (3.0, 15.0)}
 
 

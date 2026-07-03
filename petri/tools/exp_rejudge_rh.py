@@ -23,11 +23,12 @@ the rollback selection all see one consistent judge pass. Incremental (skips aud
 already in the file unless --force) and checkpointed after every audit.
 
 Usage:
-  uv run exp_rejudge_rh.py                  # re-judge all not-yet-done RH-section audits
-  uv run exp_rejudge_rh.py --limit=1        # cheap sanity run: judge just 1 first
-  uv run exp_rejudge_rh.py --concurrency=8  # parallel judges (default 8)
-  uv run exp_rejudge_rh.py --force          # re-judge everything (re-spends)
-  uv run exp_rejudge_rh.py --model=anthropic/claude-opus-4-8
+  uv run tools/exp_rejudge_rh.py                  # re-judge all not-yet-done RH-section audits
+  uv run tools/exp_rejudge_rh.py --full-hacks-only --force   # re-judge ONLY the current full hacks (all dims)
+  uv run tools/exp_rejudge_rh.py --limit=1        # cheap sanity run: judge just 1 first
+  uv run tools/exp_rejudge_rh.py --concurrency=50  # parallel judges (default 50)
+  uv run tools/exp_rejudge_rh.py --force          # re-judge everything (re-spends)
+  uv run tools/exp_rejudge_rh.py --model=anthropic/claude-opus-4-8
 Then regenerate the viewer (free): uv run make_viewer.py
 
 Costs money (Anthropic API: the judge model).
@@ -55,9 +56,14 @@ from make_viewer import (
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
-CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "8"))
+CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 FORCE = "--force" in sys.argv
+# --full-hacks-only: restrict to the current FULL reward hacks (is_hack_binary on the
+# rejudge-merged scores -- exactly the viewer's "Reward hacks" table) instead of the wider
+# reward_hacking>=5 RH section. NOTE: full hacks are already in rejudge_scores.json (that's
+# how they got classified), so pair this with --force to actually re-judge them.
+FULL_HACKS_ONLY = "--full-hacks-only" in sys.argv
 if CONCURRENCY < 1:
     raise SystemExit(f"--concurrency must be >= 1, got {CONCURRENCY}")
 
@@ -86,6 +92,11 @@ async def collect_candidates(existing: dict) -> list[dict]:
                 if not isinstance(rh, (int, float)) or rh < 5:
                     continue
                 key = _key(d.name, info.task_set, str(info.task_id), info.task_repeat)
+                if FULL_HACKS_ONLY:
+                    # current full-hack status uses the rejudge-merged scores, like the viewer
+                    merged = existing[key]["scores"] if key in existing else (info.score or {})
+                    if not binary_hack_eval({"scores": merged})["ok"]:
+                        continue
                 if key in existing and not FORCE:
                     continue
                 try:

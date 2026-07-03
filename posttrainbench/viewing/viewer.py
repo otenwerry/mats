@@ -327,7 +327,10 @@ def load_record(run_id: str) -> dict:
 
 
 def load_workspace(run_id: str) -> dict | None:
-    path = DATA / f"{run_id}.workspace.json"
+    # same dispatch as load_record: rollback runs keep their workspace snapshot
+    # (built by rollback.build_rollback_workspaces) in the rollback viewer_data
+    base = ROLLBACK_DATA if run_id.startswith("rollback_") else DATA
+    path = base / f"{run_id}.workspace.json"
     if not path.exists():
         return None
     with open(path) as f:

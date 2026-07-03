@@ -23,12 +23,12 @@ Robustness (the point of this file):
   - No re-judge step: fresh exp_rh_audit runs already produce all 5 dims, so the
     binary-hack gate works directly. (exp_rejudge_rh.py is only for OLDER audits.)
 
---targets, --seeds and --epochs are REQUIRED (no defaults) so the experiment design
-is always explicit and can never silently fall back to a stale list.
+--targets, --seeds, --epochs and --fixed_sp are REQUIRED (no defaults) so the experiment
+design is always explicit and can never silently fall back to a stale list.
 
 Usage:
   # full 6-model x all-seeds x 2-epoch run, 50-wide:
-  uv run exp_audit_pipeline.py --targets=opus-4-6,sonnet-4-6,qwen3-32b,qwen2.5-72b,deepseek-r1,llama-3.3-70b --seeds=all --epochs=2 --concurrency=50
+  uv run exp_audit_pipeline.py --targets=opus-4.6,sonnet-4.6,qwen3-32b,qwen2.5-72b,deepseek-r1,llama-3.3-70b --seeds=all --epochs=2 --concurrency=50
   # quick single-target smoke:
   uv run exp_audit_pipeline.py --targets=qwen3-32b --seeds=ml_training_data_misuse --epochs=1
   uv run exp_audit_pipeline.py ... --skip-annotate     # audit + viewer only
@@ -36,10 +36,23 @@ Usage:
 
 Flags:
   --targets=<a,b,..>   REQUIRED. target names from TARGET_CHOICES.
-  --seeds=<a,b,..>     REQUIRED. seed filename stems, or `all` for every seed in seeds/.
+  --seed-dir=<sub>     which seed FOLDER to run (omitted -> top-level seeds/*.md; a name
+                       -> seeds/<sub>/*.md, e.g. --seed-dir=ml_training_data_misuse).
+                       Errors if that folder has 0 seeds.
+  --seeds=<a,b,..>     REQUIRED. seed filename stems within the chosen folder, or `all`.
   --epochs=<N>         REQUIRED. epochs per (target, seed) cell.
+  --auditor=<m>        auditor model (default anthropic/claude-opus-4-8): a TARGET_CHOICES
+                       shortname (e.g. --auditor=glm-5.2) or a full provider/model string
+                       (e.g. --auditor=anthropic/claude-sonnet-4-6). Judge stays fixed.
+  --auditor-thinking=<yes|no>  auditor extended thinking (default no). yes = adaptive
+                       thinking (summarized); no = off. Stamped into metadata so resamples
+                       inherit the same setting.
+  --fixed_sp=<yes|no>  REQUIRED. fixed target system prompt. yes = every audit uses the
+                       one prompt in <seed-dir>/SYSTEM_PROMPT.txt (requires --seed-dir);
+                       the target is pinned to it and the auditor's set_system_message tool
+                       is removed. no = auditor sets the prompt per scenario (original).
   --concurrency=<N>    one knob -> audit max_samples/max_connections AND annotate
-                       parallelism (default 15).
+                       parallelism (default 50).
   --annotate-model=<m> Anthropic model for the secondary hack-turn judging
                        (default claude-opus-4-8).
   --skip-annotate      stop after the audit (still rebuilds the viewer).
@@ -61,14 +74,15 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 
 import make_viewer
 from exp_rh_audit import (
-    TARGET_CHOICES, AVAILABLE_SEEDS, DATA, build_tasks, run_eval, dead_targets, reasoning_tag,
+    TARGET_CHOICES, SEEDS_ROOT, DATA, build_tasks, run_eval, dead_targets, reasoning_tag,
+    resolve_auditor, resolve_auditor_thinking, resolve_seeds, resolve_fixed_sp, JUDGE,
 )
 from exp_annotate_hacks import load_all_original_audits, run_annotation
 
 # --targets, --seeds and --epochs are REQUIRED (no defaults) so the experiment design
 # is always explicit on the command line and can't silently fall back to a stale list.
 # Only the operational knobs (parallelism, annotate model) default.
-DEFAULT_CONCURRENCY = 15
+DEFAULT_CONCURRENCY = 50
 DEFAULT_ANNOTATE_MODEL = "claude-opus-4-8"
 
 
@@ -88,22 +102,32 @@ def _parse_args() -> dict:
     if unknown:
         raise SystemExit(f"unknown --targets {unknown}; choices: {sorted(TARGET_CHOICES)}")
 
-    # --seeds REQUIRED (no default). Use --seeds=all for every seed, or a comma list.
+    # --seed-dir=<sub> picks the seed folder (omitted -> top-level seeds/*.md; a name ->
+    # seeds/<sub>/*.md). --seeds REQUIRED (no default): use --seeds=all for every seed in that
+    # folder, or a comma list of stems.
+    seed_dir_arg = _arg("--seed-dir")
+    seeds_path, available_seeds = resolve_seeds(seed_dir_arg)
+    if not available_seeds:
+        where = f"seeds/{seed_dir_arg}/" if seed_dir_arg else "seeds/ (top level)"
+        subdirs = sorted(p.name for p in SEEDS_ROOT.iterdir() if p.is_dir())
+        raise SystemExit(
+            f"no .md seeds found in {where}. Seeds are organized into subdirs -- pass "
+            f"--seed-dir=<name> to run one. available subdirs: {subdirs}")
     seeds_arg = _arg("--seeds")
     if seeds_arg is None:
         raise SystemExit(
-            "--seeds is required (no default); use --seeds=all for every seed, "
-            f"or a comma-separated subset. available: {AVAILABLE_SEEDS}"
+            "--seeds is required (no default); use --seeds=all for every seed in the chosen "
+            f"folder, or a comma-separated subset. available: {available_seeds}"
         )
     if seeds_arg.strip() == "all":
-        seeds = list(AVAILABLE_SEEDS)
+        seeds = list(available_seeds)
     else:
         seeds = [s.strip() for s in seeds_arg.split(",") if s.strip()]
-        unknown_s = [s for s in seeds if s not in AVAILABLE_SEEDS]
+        unknown_s = [s for s in seeds if s not in available_seeds]
         if unknown_s:
-            raise SystemExit(f"unknown --seeds {unknown_s}; available: {AVAILABLE_SEEDS}")
+            raise SystemExit(f"unknown --seeds {unknown_s}; available in {seeds_path}: {available_seeds}")
     if not seeds:
-        raise SystemExit(f"--seeds had no usable names; available: {AVAILABLE_SEEDS}")
+        raise SystemExit(f"--seeds had no usable names; available: {available_seeds}")
 
     # --epochs REQUIRED (no default). Positive integer.
     epochs_arg = _arg("--epochs")
@@ -129,10 +153,34 @@ def _parse_args() -> dict:
             raise SystemExit(f"{flag} must be >= 1, got {v}")
         return v
 
+    # --auditor=<shortname|model> (default AUDITOR = opus-4-8). A TARGET_CHOICES
+    # shortname (e.g. glm-5.2) resolves to its full slug; a provider-prefixed string
+    # passes through; anything else fails here (see resolve_auditor). Judge stays fixed.
+    auditor = resolve_auditor(_arg("--auditor"))
+
+    # --auditor-thinking=yes|no (default no). Resolved to the auditor's reasoning-effort
+    # (str) or None (off); passed to build_tasks and stamped into metadata so resamples
+    # inherit it.
+    auditor_reasoning_effort = resolve_auditor_thinking(_arg("--auditor-thinking", None))
+
+    # --fixed_sp=yes|no REQUIRED (no default) so the system-prompt regime is an explicit
+    # choice. yes -> all audits use the fixed system prompt in <seed-dir>/SYSTEM_PROMPT.txt
+    # (requires --seed-dir); no -> auditor sets it per scenario.
+    fixed_sp_arg = _arg("--fixed_sp", None)
+    if fixed_sp_arg is None:
+        raise SystemExit("--fixed_sp is required (no default); use --fixed_sp=yes (fixed target "
+                         "system prompt from <seed-dir>/SYSTEM_PROMPT.txt) or --fixed_sp=no "
+                         "(auditor sets it per scenario)")
+    fixed_system_prompt = resolve_fixed_sp(fixed_sp_arg, seed_dir_arg, seeds_path)
+
     return {
         "targets": targets,
         "seeds": seeds,
+        "seeds_path": seeds_path,
         "epochs": epochs,
+        "auditor": auditor,
+        "auditor_reasoning_effort": auditor_reasoning_effort,
+        "fixed_system_prompt": fixed_system_prompt,
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         "skip_annotate": "--skip-annotate" in sys.argv,
@@ -157,11 +205,19 @@ def run_audit_stage(cfg: dict):
     print("=" * 72)
     print(f"  targets ({len(targets)}): " + ", ".join(f"{t}{reasoning_tag(t)}" for t in targets))
     print(f"  seeds ({len(seeds)}): {seeds}")
+    eff = cfg["auditor_reasoning_effort"]
+    thinking_note = "off" if eff is None else f"adaptive (effort={eff}, summarized)"
+    print(f"  auditor={cfg['auditor']} [thinking: {thinking_note}]  judge={JUDGE}")
+    fsp = cfg["fixed_system_prompt"]
+    print(f"  fixed_sp: {'ON (' + str(len(fsp)) + ' chars; auditor set_system_message disabled)' if fsp else 'off'}")
     print(f"  epochs={epochs}  concurrency={cfg['concurrency']}")
     print(f"  expected trajectories: {len(targets)} x {len(seeds)} x {epochs} = {expected_n}\n")
 
     try:
-        tasks = build_tasks(targets, seeds, log_dir.name)
+        tasks = build_tasks(targets, seeds, log_dir.name, auditor=cfg["auditor"],
+                            auditor_reasoning_effort=cfg["auditor_reasoning_effort"],
+                            seeds_path=cfg["seeds_path"],
+                            fixed_system_prompt=cfg["fixed_system_prompt"])
         success, logs = run_eval(tasks, epochs, cfg["concurrency"], log_dir)
     except SystemExit:
         raise  # config errors (e.g. empty seed subset) should abort before any spend

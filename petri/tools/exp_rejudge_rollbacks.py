@@ -23,10 +23,10 @@ the continuations we're keeping. Output is merged into mats-local/petri/rejudge_
 the rollbacks page picks up the fresh scores on the next `uv run make_viewer.py`.
 
 Usage:
-  uv run exp_rejudge_rollbacks.py                 # re-judge all surviving continuations not yet done
-  uv run exp_rejudge_rollbacks.py --concurrency=24   # more parallelism (default 16)
-  uv run exp_rejudge_rollbacks.py --limit=5       # cheap sanity batch
-  uv run exp_rejudge_rollbacks.py --force         # re-judge everything (re-spends)
+  uv run tools/exp_rejudge_rollbacks.py                 # re-judge all surviving continuations not yet done
+  uv run tools/exp_rejudge_rollbacks.py --concurrency=24   # override parallelism (default 50)
+  uv run tools/exp_rejudge_rollbacks.py --limit=5       # cheap sanity batch
+  uv run tools/exp_rejudge_rollbacks.py --force         # re-judge everything (re-spends)
 
 Costs money (Anthropic API: the judge model).
 """
@@ -59,7 +59,7 @@ _LOC_PROMPT_KEY = {"begin": "begin", "middle": "middle", "before": "prompt1", "a
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
-CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "16"))
+CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 FORCE = "--force" in sys.argv
 if CONCURRENCY < 1:

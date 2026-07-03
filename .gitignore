@@ -16,3 +16,6 @@ wheels/
 # claude stuff
 .claude/settings.local.json
 .agents/settings.local.json
+
+# whatever
+.DS_Store

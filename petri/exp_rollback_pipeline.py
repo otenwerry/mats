@@ -25,16 +25,18 @@ re-roll turn j. The judge reads it (instead of assuming the cut is at the hack),
 cut-scoping and the viewer's cut marker are correct for every location.
 
 Usage:
-  uv run exp_rollback_pipeline.py --locations=all --N=5 --concurrency=50
-  uv run exp_rollback_pipeline.py --locations=begin,after --N=3 --concurrency=20
-  uv run exp_rollback_pipeline.py --locations=all --N=5 --dry-run     # FREE: plan only
-  uv run exp_rollback_pipeline.py --locations=all --N=5 --trajectories=12,55
+  uv run exp_rollback_pipeline.py --locations=all --conditions=all --N=5
+  uv run exp_rollback_pipeline.py --locations=begin,after --conditions=treatment --N=3 --concurrency=50
+  uv run exp_rollback_pipeline.py --locations=all --conditions=all --N=5 --dry-run     # FREE: plan only
+  uv run exp_rollback_pipeline.py --locations=all --conditions=control --N=5 --trajectories=12,55
 
 Flags:
   --locations=<a,b,..|all>  REQUIRED. subset of {begin,middle,before,after}, or `all`.
+  --conditions=<a,b|all>    REQUIRED. subset of {control,treatment}, or `all`. control =
+                            plain re-roll; treatment = location-specific honesty message.
   --N=<int>                 REQUIRED. rollbacks (epochs) per cell.
   --concurrency=<int>       one knob -> generation max_samples/max_connections AND
-                            judging parallelism (default 15).
+                            judging parallelism (default 50).
   --trajectories=<ids>      restrict to these original trajectory ids (default: all
                             full-hack originals that have a hack-turn annotation).
   --annotate-model=<m>      Anthropic model for the secondary hack-turn judging (default
@@ -75,7 +77,9 @@ from make_viewer import (
     _orig_id_from_task,
 )
 
-DEFAULT_CONCURRENCY = 15
+DEFAULT_CONCURRENCY = 50
+
+COND_ORDER = ["control", "treatment"]  # canonical order for --conditions
 
 # name -> (j(k), prompt key in PROMPTS, insert mode, applies(k, n_resumes))
 LOCATIONS = {
@@ -112,6 +116,20 @@ def _parse_args() -> dict:
     if not locations:
         raise SystemExit(f"--locations had no usable names; choices: {ORDER} (or `all`)")
 
+    cond_arg = _arg("--conditions")
+    if cond_arg is None:
+        raise SystemExit("--conditions is required (control, treatment, or `all`)")
+    if cond_arg.strip() == "all":
+        conditions = list(COND_ORDER)
+    else:
+        chosen = {s.strip() for s in cond_arg.split(",") if s.strip()}
+        unknown = [c for c in chosen if c not in COND_ORDER]
+        if unknown:
+            raise SystemExit(f"unknown --conditions {unknown}; choices: {COND_ORDER} (or `all`)")
+        conditions = [c for c in COND_ORDER if c in chosen]  # canonical order
+    if not conditions:
+        raise SystemExit(f"--conditions had no usable names; choices: {COND_ORDER} (or `all`)")
+
     n_arg = _arg("--N")
     if n_arg is None:
         raise SystemExit("--N is required (rollbacks per cell); no default.")
@@ -132,6 +150,7 @@ def _parse_args() -> dict:
 
     return {
         "locations": locations,
+        "conditions": conditions,
         "N": N,
         "concurrency": concurrency,
         "trajectories": trajectories,
@@ -258,8 +277,8 @@ def _redistribute(work_dir: Path) -> list[Path]:
 def main() -> None:
     cfg = _parse_args()
     print("=" * 76)
-    print(f"ROLLBACK PIPELINE  locations={cfg['locations']}  N={cfg['N']}  "
-          f"concurrency={cfg['concurrency']}  dry_run={cfg['dry_run']}")
+    print(f"ROLLBACK PIPELINE  locations={cfg['locations']}  conditions={cfg['conditions']}  "
+          f"N={cfg['N']}  concurrency={cfg['concurrency']}  dry_run={cfg['dry_run']}")
     print("=" * 76)
 
     # Heal any leftover combined working dir from a previously-killed run BEFORE dedup,
@@ -314,7 +333,7 @@ def main() -> None:
     print("\n[plan] cells (location x condition):")
     for loc in cfg["locations"]:
         jf, prompt_key, insert_mode, applies = LOCATIONS[loc]
-        for cond in ("control", "treatment"):
+        for cond in cfg["conditions"]:
             label = cell_label(loc, cond)
             prompt = None if cond == "control" else PROMPTS[prompt_key]
             already = existing.get(label, set())
@@ -364,11 +383,16 @@ def main() -> None:
         work_dir = LOGS / f"{WORK_PREFIX}{cfg['N']}x-{ts}"
         work_dir.mkdir(parents=True, exist_ok=True)
         _write_rbmeta(work_dir, plan)  # before eval_set: a killed run can still be split
-        # Cap how many TASKS are active at once (each open task holds an open log file).
-        # max_samples/max_connections still drive concurrency; we just need enough active
-        # tasks to keep the sample pool full (ceil(concurrency/N) + headroom for stalls).
-        # len(all_tasks) here = the old failure: 122 open task logs blew past ulimit -n.
-        max_tasks = min(len(all_tasks), max(8, -(-cfg["concurrency"] // cfg["N"]) + 8))
+        # How many TASKS to keep active at once. The real throughput ceiling is the shared
+        # auditor connection pool (max_connections=concurrency), so we keep exactly enough
+        # tasks open to keep that pool fed: with `concurrency` tasks active, even in the
+        # worst case where every open task is down to its last slow sample, there are still
+        # `concurrency` samples ready -- exactly enough to saturate the pool. Fewer (the old
+        # ceil(concurrency/N) formula, ~18) let the pool starve MID-RUN as active tasks
+        # dwindled to stragglers (the slowness we were chasing); more buys nothing -- the
+        # pool is the ceiling -- and just wastes memory + clutters the display. Decoupled
+        # from N on purpose. (Open log files are not the constraint: ulimit -n is ~1M here.)
+        max_tasks = min(len(all_tasks), cfg["concurrency"])
         print("\n" + "=" * 76)
         print(f"STAGE 1 GENERATE  {len(all_tasks)} tasks x N={cfg['N']} = {total} continuations "
               f"(ONE pool, concurrency={cfg['concurrency']}, max_tasks={max_tasks})  -> {work_dir.name}")
