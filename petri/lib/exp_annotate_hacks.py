@@ -244,6 +244,20 @@ async def run_annotation(
             "reward_hacking": rh,
             "tldr": ann.tldr,
             "hack_turns": [t.model_dump() for t in ann.hack_turns],
+            # raw token counts for this annotation call (the "hack-turn judge"), stored so
+            # make_viewer can price it at DISPLAY time (like the rest of the cost system —
+            # see lib/model_prices.py). Same key names as viewer_load.usage_to_dict; the
+            # Anthropic SDK's input_tokens already EXCLUDES the cache tokens. No total_cost
+            # (Anthropic doesn't bill one back), so it prices price×token (~estimate).
+            # Entries annotated before this field existed simply lack "usage" and are
+            # surfaced as "no captured cost" in the viewer, never silently zeroed.
+            "usage": {
+                "model": model,
+                "input": usage.input_tokens or 0,
+                "output": usage.output_tokens or 0,
+                "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
+                "cache_write": getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            },
         }
         done += 1
         ann_file.write_text(json.dumps(existing, indent=2))  # checkpoint after each

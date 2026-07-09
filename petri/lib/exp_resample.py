@@ -64,9 +64,11 @@ from inspect_petri import audit, audit_solver, auditor_agent, auditor_tools
 import make_viewer
 from make_viewer import RESAMPLE_PREFIX, load_originals_by_id, load_mode, page_name
 from petri_paths import DATA, LOGS, ENV_FILE, DIMENSIONS_DIR
+from model_routing import route  # provider routing (see lib/model_routing.py)
 from exp_rh_audit import (
-    DIMENSIONS, JUDGE, SEEDS_ROOT,
+    DIMENSIONS, JUDGE, SEEDS_ROOT, REASONING_EFFORT, build_target_model,
     fixed_system_prompt_target, fixed_sp_seed_preamble,
+    is_pinned_seed_dir, assemble_pinned_seed,
 )
 
 load_dotenv(ENV_FILE)
@@ -87,14 +89,17 @@ _BIG_REFERENCE_CHARS = 1_500_000
 @dataclass
 class OriginalRef:
     traj_id: int
-    seed: str                       # seed filename stem
-    seed_dir: str                   # dir holding <seed>.md (passed to audit())
+    seed: str                       # seed filename stem, or pinned seed dir name
+    seed_dir: str                   # dir holding <seed>.md, or the pinned seed dir itself
+    condition: str | None           # pinned-seed run condition (e.g. allow|correct); None = plain seed
     target_model: str
     target_name: str | None
     auditor_model: str
     auditor_reasoning_effort: str | None
     judge_model: str
-    reasoning_enabled: bool | None
+    reasoning: bool                 # native target reasoning AS RUN (from metadata)
+    reasoning_effort: str | None    # thinking depth used when reasoning was on
+    reasoning_enabled: bool | None  # legacy/back-compat (OpenRouter kwarg); no longer load-bearing
     strict_tools: bool | None
     max_turns: int
     turn_counter: bool
@@ -125,15 +130,21 @@ def _read_task_metadata(run_dir: str, task: str) -> dict:
 
 
 def _resolve_seed_dir(seed_stem: str) -> str:
-    """Directory containing <seed_stem>.md (audit() loads a whole dir, we subset by id).
-    Errors on 0 or >1 matches so a resample never silently runs the wrong seed text."""
-    matches = sorted(SEEDS_ROOT.glob(f"**/{seed_stem}.md"))
+    """Seed source for a sample id: either the directory containing <seed_stem>.md (plain
+    seeds; audit() loads a whole dir, we subset by id) or a PINNED seed dir named
+    <seed_stem> (core.md + conditions/; the sample id is the dir name). Errors on 0 or >1
+    matches so a resample never silently runs the wrong seed text."""
+    md = sorted(SEEDS_ROOT.glob(f"**/{seed_stem}.md"))
+    pinned = sorted(d for d in SEEDS_ROOT.glob(f"**/{seed_stem}")
+                    if d.is_dir() and is_pinned_seed_dir(d))
+    matches = [m.parent for m in md] + pinned
     if len(matches) == 0:
-        raise SystemExit(f"seed '{seed_stem}.md' not found under {SEEDS_ROOT}")
+        raise SystemExit(f"seed '{seed_stem}' not found under {SEEDS_ROOT} "
+                         f"(neither {seed_stem}.md nor a pinned dir named {seed_stem})")
     if len(matches) > 1:
-        raise SystemExit(f"seed '{seed_stem}.md' is ambiguous ({[str(m) for m in matches]}); "
+        raise SystemExit(f"seed '{seed_stem}' is ambiguous ({[str(m) for m in matches]}); "
                          "cannot pick the right seed text for a faithful resample")
-    return str(matches[0].parent)
+    return str(matches[0])
 
 
 async def load_original_refs(wanted_ids: list[int]) -> dict[int, OriginalRef]:
@@ -161,10 +172,16 @@ async def load_original_refs(wanted_ids: list[int]) -> dict[int, OriginalRef]:
         seed = a["seed"]
         refs[tid] = OriginalRef(
             traj_id=tid, seed=seed, seed_dir=_resolve_seed_dir(seed),
-            target_model=meta["target_model"], target_name=meta.get("target_name"),
-            auditor_model=meta.get("auditor") or a.get("auditor"),
+            condition=meta.get("condition"),
+            target_model=route(meta["target_model"]), target_name=meta.get("target_name"),
+            auditor_model=route(meta.get("auditor") or a.get("auditor")),
             auditor_reasoning_effort=meta.get("auditor_reasoning_effort"),
-            judge_model=meta.get("judge") or JUDGE,
+            judge_model=route(meta.get("judge") or JUDGE),
+            # reasoning AS RUN: prefer the new `reasoning` bool; back-compat for old logs =
+            # derive from the legacy reasoning_enabled (True -> on, else off).
+            reasoning=bool(meta["reasoning"]) if "reasoning" in meta
+            else (meta.get("reasoning_enabled") is True),
+            reasoning_effort=meta.get("reasoning_effort") or REASONING_EFFORT,
             reasoning_enabled=meta.get("reasoning_enabled"),
             strict_tools=meta.get("strict_tools"),
             max_turns=int(meta["max_turns"]), turn_counter=bool(meta["turn_counter"]),
@@ -233,6 +250,23 @@ def faithful_instructions(reference_blob: str) -> str:
     )
 
 
+def original_seed_sample(ref: OriginalRef, base_dataset) -> "Sample":
+    """The Sample carrying `ref`'s seed text, rebuilt the way the original run built it.
+    PINNED seed dir: audit()'s glob only saw core.md, so assemble the real seed (core +
+    the original's stamped condition + inlined pinned files) ourselves -- exactly what
+    exp_rh_audit.build_tasks does at launch. Plain dir: subset audit()'s dataset by id."""
+    if is_pinned_seed_dir(ref.seed_dir):
+        if not ref.condition:
+            raise SystemExit(
+                f"original #{ref.traj_id} runs pinned seed dir {ref.seed_dir} but stamped no "
+                "`condition` metadata; cannot reassemble its seed text faithfully.")
+        return assemble_pinned_seed(ref.seed_dir, ref.condition)
+    sample = next((s for s in base_dataset if s.id == ref.seed), None)
+    if sample is None:
+        raise SystemExit(f"seed '{ref.seed}' not present in {ref.seed_dir}")
+    return sample
+
+
 # --------------------------------------------------------------------------- #
 # Building the resample task (a fresh audit with the auditor primed)
 # --------------------------------------------------------------------------- #
@@ -248,9 +282,7 @@ def build_resample_task(ref: OriginalRef, dims=DIMENSIONS):
         turn_counter=ref.turn_counter,
         enable_rollback=False,
     )
-    sample = next((s for s in base.dataset if s.id == ref.seed), None)
-    if sample is None:
-        raise SystemExit(f"seed '{ref.seed}' not present in {ref.seed_dir}")
+    sample = original_seed_sample(ref, base.dataset)
 
     seed_text = sample.input
     if ref.fixed_sp:
@@ -272,16 +304,11 @@ def build_resample_task(ref: OriginalRef, dims=DIMENSIONS):
         ref.auditor_model if aud_eff is None
         else get_model(ref.auditor_model, config=GenerateConfig(reasoning_effort=aud_eff))
     )
-    # Target role: re-apply reasoning pin + strict_tools (OpenRouter targets need
-    # strict_tools=False; inherit the stamped value, else derive from the provider).
-    tkw: dict = {}
-    if ref.reasoning_enabled is not None:
-        tkw["reasoning_enabled"] = ref.reasoning_enabled
-    if ref.strict_tools is not None:
-        tkw["strict_tools"] = ref.strict_tools
-    elif ref.target_model.startswith("openrouter/"):
-        tkw["strict_tools"] = False
-    target_role = get_model(ref.target_model, **tkw) if tkw else ref.target_model
+    # Target role: rebuild via the SAME helper build_tasks used, driven by the reasoning
+    # setting AS RUN, so the resample configures the target byte-identically (reasoning
+    # config + strict_tools per provider).
+    target_role, tgt_reasoning_enabled, tgt_strict_tools = build_target_model(
+        ref.target_model, reasoning_on=ref.reasoning, effort=ref.reasoning_effort)
 
     # fixed_sp: swap the solver so the auditor has no set_system_message and the target is
     # driven by the fixed prompt (mirrors exp_rh_audit.build_tasks). None = audit() default.
@@ -309,8 +336,10 @@ def build_resample_task(ref: OriginalRef, dims=DIMENSIONS):
             # inherited config, stamped so the resample log is self-describing
             "target_name": ref.target_name,
             "target_model": ref.target_model,
-            "reasoning_enabled": ref.reasoning_enabled,
-            "strict_tools": tkw.get("strict_tools"),
+            "reasoning": ref.reasoning,
+            "reasoning_effort": ref.reasoning_effort if ref.reasoning else None,
+            "reasoning_enabled": tgt_reasoning_enabled,
+            "strict_tools": tgt_strict_tools,
             "auditor": ref.auditor_model,
             "auditor_reasoning_effort": aud_eff,
             "judge": ref.judge_model,

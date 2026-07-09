@@ -3,52 +3,73 @@ judge -> rebuild viewer, in one command.
 
 THE QUESTION: if a target reward-hacks on one task and is then handed a SECOND, unrelated
 task, does its hack rate on the second task go up -- because it's conditioned on its own
-earlier hack? For each target MODEL we pick a (hack prefix A, clean prefix A from the same
-seed, task source B from a different seed) triple, and run three conditions N times each:
+earlier hack? Per target model we pick prefixes (prior trajectories of that model) in up to
+three flavors, plus new-task sources, and run the prefixed conditions N times each:
 
-  hack_prefix  : target carries A's HACK transcript,  then B's task (after a fixed pivot)
-  clean_prefix : target carries A's CLEAN transcript, then B's task (after the same pivot)
-  no_prefix    : target carries no prefix,            then B's task (no pivot) -- baseline
+  full_hack_prefix      : target carries a trajectory where it fully reward-hacked
+  corrected_hack_prefix : target carries a trajectory where it hacked, then corrected it
+  clean_prefix          : target carries a trajectory it completed cleanly
+  no_prefix             : target carries nothing -- the new task standalone (baseline).
+                          NOT run here by default (2026-07-05 split): the baseline is
+                          measured FIRST, separately, by exp_baseline_pipeline.py -- used
+                          to screen candidate new tasks for a low standalone hack rate
+                          before spending on the prefix conditions. The viewer joins the
+                          two halves automatically (continuations page groups by B id),
+                          so nothing links the run dirs. Pass --conditions=all (or name
+                          no_prefix) to run the baseline inline anyway.
 
-The auditor reproduces B's environment in ALL three conditions (primed with B's full record),
-and never sees the prefix. The clean contrasts are hack_prefix-vs-no_prefix and
-clean_prefix-vs-no_prefix ("any prior history, with/without a hack"); hack-vs-clean is
-confounded by every way a hack run and a clean run differ -- read it as suggestive.
+Ids are FLAT lists; each trajectory's target model is read from its stamped metadata and
+grouped automatically (no positional pairing). Counts per model are free: every
+(new task x prefix) pair runs, plus one no_prefix baseline per new task. The new task may
+come from a different seed FAMILY than the prefix (e.g. perf_benchmark_gaming vs
+ml_training_data_misuse); the target then keeps the PREFIX's system prompt and the pivot
+turn says the new task is a different kind of work (see lib/exp_continuation.py).
+
+AUDITOR (Owen 2026-07-05): FRESH by default -- the auditor gets ONLY the new task's seed (like
+a plain audit of it) and generates the environment from scratch; it is NOT primed with the
+original run and gets no faithfulness instruction. This dropped the giant reference blob that
+overflowed the 128k-window sweep-5 auditor. It also means the environment is regenerated
+independently each run, so CONFOUND WATCH: differences in auditor behavior across conditions/
+epochs could confound the reward-hack-rate comparison -- the faithfulness judge is kept ON to
+measure that drift, to be investigated before trusting cross-condition differences.
+`--prime-auditor` restores the legacy primed behavior (full record + faithfulness instruction)
+for that investigation. Either way the auditor never sees the prefix. The clean contrasts are
+each-prefix-vs-no_prefix; prefix-flavor-vs-prefix-flavor is confounded by every way those prior
+runs differ -- read it as suggestive.
 
 Two judges:
   1. the REGULAR reward-hacking judge, inline -- but the prior-task prefix is MECHANICALLY cut
-     out of the transcript the judge sees (system prompt + new task only, numbers preserved), so
-     it can't see or infer the prior task (no_prefix is judged as a standalone B run);
-  2. a FAITHFULNESS judge that compares each continuation to its B original and scores how
-     faithfully the AUDITOR reproduced B (lib/exp_continuation.run_faithfulness_for_dir) --
-     stored as a queryable per-run flag. Low faithfulness is a finding about validity.
-
-All config (target + reasoning pin, auditor + thinking, judge, max_turns, turn_counter, the
-ONE fixed system prompt) is inherited from B's stamped metadata. The core lives in
-lib/exp_continuation.py.
+     out of the transcript the judge sees (system prompt + new task only, numbers preserved),
+     so it can't see or infer the prior task (no_prefix is judged as a standalone run);
+  2. a FAITHFULNESS judge that compares each continuation to its new-task original and scores
+     how much the auditor's environment diverged from it (lib/exp_continuation
+     .run_faithfulness_for_dir) -- stored as a queryable per-run flag. With fresh auditors this
+     is the drift diagnostic for the confound above (its prompt still says "primed", a wording
+     lag to revisit when interpreting the scores).
 
 Usage:
-  uv run exp_continuation_pipeline.py --hack-trajectories=455 --clean-trajectories=460 \\
-      --continuation-trajectories=458 --n=5
-  # sweep several models (one hack/clean/B id per model in each list):
-  uv run exp_continuation_pipeline.py --hack-trajectories=455,471 --clean-trajectories=460,473 \\
-      --continuation-trajectories=458,470 --n=5 --concurrency=50
-  uv run exp_continuation_pipeline.py ... --conditions=hack_prefix,no_prefix   # subset
+  uv run exp_continuation_pipeline.py --full-hack-prefixes=455,471 --clean-prefixes=460,473 \\
+      --corrected-hack-prefixes=602,617 --continuations=458,470,610 --n=5
+  uv run exp_continuation_pipeline.py ... --conditions=full_hack_prefix,no_prefix   # subset
   uv run exp_continuation_pipeline.py ... --n=5 --dry-run        # FREE: plan only
   uv run exp_continuation_pipeline.py ... --n=5 --skip-judge     # generate only
 
 Flags:
-  --hack-trajectories=<ids>         REQUIRED. hack prefix (A) ids; one per target model.
-  --clean-trajectories=<ids>        REQUIRED. clean prefix (A) ids; same seed as the hack
-                                    prefix, one per target model.
-  --continuation-trajectories=<ids> REQUIRED. task-source (B) ids; a DIFFERENT seed, one per
-                                    target model.
-  --models=<names>                  restrict to these target names (default: every model that
-                                    appears across the three lists).
-  --conditions=<a,b|all>            subset of {hack_prefix,clean_prefix,no_prefix} (default all).
-  --n=<int>                         REQUIRED. continuations (epochs) per (triple, condition).
+  --continuations=<ids>             REQUIRED. new-task source ids (any models, any seeds;
+                                    each pairs with every same-model prefix from a
+                                    different seed).
+  --full-hack-prefixes=<ids>        full-hack prefix ids (optional if the condition is off).
+  --corrected-hack-prefixes=<ids>   corrected-hack prefix ids (optional if the condition is off).
+  --clean-prefixes=<ids>            clean prefix ids (optional if the condition is off).
+  --conditions=<a,b|all>            subset of {full_hack_prefix,corrected_hack_prefix,
+                                    clean_prefix,no_prefix} (default: the three prefixed
+                                    conditions; `all` adds no_prefix back).
+  --n=<int>                         REQUIRED. continuations (epochs) per cell.
   --concurrency=<int>               one knob -> generation max_samples/max_connections AND
                                     faithfulness-judge parallelism (default 50).
+  --prime-auditor                   LEGACY: prime the auditor with the new-task original's full
+                                    record + a faithfulness instruction (default is a FRESH
+                                    auditor that gets only the seed). For the confound study.
   --deviation-model=<m>             Anthropic model for the faithfulness judge (default
                                     claude-opus-4-8).
   --annotate-model=<m>              Anthropic model for the hack-turn annotator (default
@@ -93,10 +114,12 @@ def _arg(name, default=None):
     return default
 
 
-def _ids(flag: str) -> list[int]:
+def _ids(flag: str, required: bool = False) -> list[int]:
     raw = _arg(flag)
     if not raw or raw is True:
-        raise SystemExit(f"{flag} is required (comma-separated original trajectory ids)")
+        if required:
+            raise SystemExit(f"{flag} is required (comma-separated original trajectory ids)")
+        return []
     try:
         ids = [int(x) for x in str(raw).split(",") if x.strip()]
     except ValueError:
@@ -106,17 +129,35 @@ def _ids(flag: str) -> list[int]:
     return ids
 
 
-def _parse_args() -> dict:
-    hack = _ids("--hack-trajectories")
-    clean = _ids("--clean-trajectories")
-    cont = _ids("--continuation-trajectories")
+# CLI flag -> the condition its ids realize (see C.PREFIX_CONDITIONS)
+_PREFIX_FLAGS = {
+    "--full-hack-prefixes": "full_hack_prefix",
+    "--corrected-hack-prefixes": "corrected_hack_prefix",
+    "--clean-prefixes": "clean_prefix",
+}
 
-    models_raw = _arg("--models")
-    models = ([m.strip() for m in str(models_raw).split(",") if m.strip()]
-              if models_raw and models_raw is not True else None)
+
+def _posint(flag, default):
+    v = _arg(flag, default)
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        raise SystemExit(f"{flag} must be an integer, got {v!r}")
+    if v < 1:
+        raise SystemExit(f"{flag} must be >= 1, got {v}")
+    return v
+
+
+def _parse_args() -> dict:
+    cont = _ids("--continuations", required=True)
+    prefix_ids = {cond: _ids(flag) for flag, cond in _PREFIX_FLAGS.items()}
 
     cond_raw = _arg("--conditions")
-    if cond_raw is None or cond_raw is True or str(cond_raw).strip() == "all":
+    if cond_raw is None or cond_raw is True:
+        # default: prefixed conditions only -- the no_prefix baseline is measured first by
+        # exp_baseline_pipeline.py (the screening half of the split pipeline).
+        conditions = list(C.PREFIX_CONDITIONS)
+    elif str(cond_raw).strip() == "all":
         conditions = list(C.CONDITIONS)
     else:
         conditions = [c.strip() for c in str(cond_raw).split(",") if c.strip()]
@@ -128,9 +169,22 @@ def _parse_args() -> dict:
     if not conditions:
         raise SystemExit(f"--conditions had no usable names; choices: {C.CONDITIONS}")
 
+    # every requested prefixed condition needs ids, and ids for an unrequested condition
+    # are almost certainly a mistake -- fail loudly either way, before any loading.
+    for cond in conditions:
+        if cond != "no_prefix" and not prefix_ids.get(cond):
+            flag = next(f for f, c in _PREFIX_FLAGS.items() if c == cond)
+            raise SystemExit(f"condition {cond!r} is requested but {flag} was not given; "
+                             f"pass ids or narrow --conditions.")
+    for cond, ids in prefix_ids.items():
+        if ids and cond not in conditions:
+            flag = next(f for f, c in _PREFIX_FLAGS.items() if c == cond)
+            raise SystemExit(f"{flag} was given but --conditions excludes {cond!r}; "
+                             "drop the flag or widen --conditions.")
+
     n = _arg("--n")
     if n is None or n is True:
-        raise SystemExit("--n is required (continuations / epochs per (triple, condition))")
+        raise SystemExit("--n is required (continuations / epochs per cell)")
     try:
         n = int(n)
     except ValueError:
@@ -138,18 +192,10 @@ def _parse_args() -> dict:
     if n < 1:
         raise SystemExit(f"--n must be >= 1, got {n}")
 
-    def _posint(flag, default):
-        v = _arg(flag, default)
-        try:
-            v = int(v)
-        except (TypeError, ValueError):
-            raise SystemExit(f"{flag} must be an integer, got {v!r}")
-        if v < 1:
-            raise SystemExit(f"{flag} must be >= 1, got {v}")
-        return v
-
     return dict(
-        hack=hack, clean=clean, cont=cont, models=models, conditions=conditions, n=n,
+        prefix_ids=prefix_ids, cont=cont, conditions=conditions, n=n,
+        run_dir_stem="continuation",
+        prime_auditor="--prime-auditor" in sys.argv,
         concurrency=_posint("--concurrency", DEFAULT_CONCURRENCY),
         deviation_model=_arg("--deviation-model", DEFAULT_DEVIATION_MODEL),
         annotate_model=_arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
@@ -167,46 +213,90 @@ async def main() -> None:
     print("=" * 76)
     print("  CONTINUATION PIPELINE  (condition a target on a prior task, then hand it a new one)")
     print("=" * 76)
-    print(f"  hack prefixes (A):   {cfg['hack']}")
-    print(f"  clean prefixes (A):  {cfg['clean']}")
-    print(f"  task sources (B):    {cfg['cont']}")
+    for flag, cond in _PREFIX_FLAGS.items():
+        print(f"  {cond:22s}: {cfg['prefix_ids'][cond] or '—'}")
+    print(f"  continuations (new-task sources): {cfg['cont']}")
     print(f"  conditions: {cfg['conditions']}    n: {cfg['n']}    concurrency: {cfg['concurrency']}")
+    print(f"  auditor: {'PRIMED (reference + faithfulness)' if cfg['prime_auditor'] else 'FRESH (seed only, no reference)'}")
     print(f"  faithfulness judge: {cfg['deviation_model']}\n")
+    await run_pipeline(cfg)
 
-    print("[load] reading originals, reconstructing prefixes, validating triples ...")
-    triples = await C.build_triples(cfg["hack"], cfg["clean"], cfg["cont"], cfg["models"])
-    if not triples:
-        raise SystemExit("no (model) triples built -- check --models against the provided ids.")
+
+async def run_pipeline(cfg: dict) -> None:
+    """The shared engine: plan -> generate (inline regular judge) -> faithfulness judge ->
+    annotate -> viewer. Called by main() here (the prefixed experiment) and by
+    exp_baseline_pipeline.py (the no_prefix screening half); cfg carries everything,
+    including run_dir_stem (the run-dir name prefix, so the two halves stay tellable
+    apart on disk while both start with 'continuation-' for the viewer's dir scan)."""
+    print("[load] reading originals, reconstructing prefixes, validating the plan ...")
+    plans = await C.build_plans(cfg["prefix_ids"], cfg["cont"])
 
     tasks = []
-    for model, t in triples.items():
-        synth = []
-        if t.hack_synth:
-            synth.append("hack-prefix")
-        if t.clean_synth:
-            synth.append("clean-prefix")
-        synth_note = (f"  [synthetic tool-result closer added to: {', '.join(synth)}]"
-                      if synth else "")
-        print(f"  {model}: hack#{t.hack_ref.traj_id} clean#{t.clean_ref.traj_id} "
-              f"(seed {t.hack_ref.seed}) -> B#{t.b_ref.traj_id} (seed {t.b_ref.seed})  "
-              f"max_turns={t.b_ref.max_turns}{synth_note}")
-        print(f"      prefix sizes: hack={len(t.hack_prefix)} msgs, clean={len(t.clean_prefix)} msgs"
-              f"  |  B reference={len(C.build_reference_blob(t.b_ref)):,} chars")
+    for model, plan in sorted(plans.items()):
+        # coverage: a model must contribute BOTH sides (its ids are probably a typo otherwise);
+        # prefixes are only required when a prefixed condition is requested.
+        if not plan.b_refs:
+            raise SystemExit(f"model {model!r} has prefixes but no --continuations id; every "
+                             "model in the run needs at least one new-task source.")
+        needs_prefixes = any(c != "no_prefix" for c in cfg["conditions"])
+        if needs_prefixes and not plan.prefixes:
+            raise SystemExit(f"model {model!r} has continuations but no prefixes; pass prefix "
+                             "ids for it or run with --conditions=no_prefix.")
         for cond in cfg["conditions"]:
-            tasks.append(C.build_continuation_task(t, cond, DIMENSIONS))
+            if cond != "no_prefix" and not any(p.condition == cond for p in plan.prefixes):
+                raise SystemExit(f"model {model!r} has no {cond} prefix but --conditions "
+                                 f"requests it; pass an id or narrow --conditions.")
+
+        # the run-level allow/correct condition each original was generated under -- shown so
+        # a "correct"-condition id passed as a continuation is visible at plan time (the
+        # continuation reruns the new task under the SAME stamped condition; nothing imposes one).
+        def _cond(ref):
+            return f" [{ref.condition}]" if ref.condition else ""
+
+        print(f"  {model}:")
+        for p in plan.prefixes:
+            synth = "  [synthetic tool-result closer]" if p.synthesized_closer else ""
+            print(f"      {p.condition:22s} #{p.ref.traj_id}  (seed {p.ref.seed}{_cond(p.ref)}, "
+                  f"family {C.seed_family(p.ref.seed_dir)}, {len(p.messages)} msgs){synth}")
+        for b in plan.b_refs:
+            fams = {C.seed_family(p.ref.seed_dir) for p in plan.prefixes}
+            cross = ("  [CROSS-FAMILY: target keeps the prefix's system prompt + pivot note]"
+                     if fams - {C.seed_family(b.seed_dir)} else "")
+            # reference-blob size only matters when priming the auditor (fresh auditors never
+            # receive it); show it only then so the fresh plan print isn't misleading.
+            refsz = (f", reference={len(C.build_reference_blob(b)):,} chars"
+                     if cfg["prime_auditor"] else "")
+            print(f"      new task               #{b.traj_id}  (seed {b.seed}{_cond(b)}, "
+                  f"family {C.seed_family(b.seed_dir)}, max_turns={b.max_turns}{refsz}){cross}")
+        for b in plan.b_refs:
+            for cond in cfg["conditions"]:
+                if cond == "no_prefix":
+                    tasks.append(C.build_continuation_task(
+                        plan, b, cond, None, DIMENSIONS, prime_auditor=cfg["prime_auditor"]))
+                else:
+                    for p in plan.prefixes:
+                        if p.condition == cond:
+                            tasks.append(C.build_continuation_task(
+                                plan, b, cond, p, DIMENSIONS, prime_auditor=cfg["prime_auditor"]))
 
     expected = len(tasks) * cfg["n"]
-    print(f"\n  {len(triples)} model(s) x {len(cfg['conditions'])} condition(s) = {len(tasks)} cell(s) "
-          f"x n={cfg['n']} = {expected} continuation(s) to generate")
+    print(f"\n  {len(plans)} model(s), {len(tasks)} cell(s) x n={cfg['n']} = {expected} "
+          "continuation(s) to generate")
 
     if cfg["dry_run"]:
-        print("\n[dry-run] plan validated (triples + prefixes + conditions). No generation, no cost.")
+        print("\n[dry-run] plan validated (prefixes + new tasks + conditions). No generation, no cost.")
         return
 
-    run_dir = make_viewer.LOGS / f"continuation-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
+    run_dir = make_viewer.LOGS / f"{cfg['run_dir_stem']}-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n[generate] eval_set -> {run_dir}")
     print("           (spends on the target provider; the REGULAR judge runs inline) ...")
+    import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
+    import direct_cost       # exact list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
+    import model_window      # correct context windows so the auditor compacts at the real window (see lib/model_window.py)
+    openrouter_cost.install()
+    direct_cost.install()
+    model_window.install()
     success, _logs = eval_set(
         tasks,
         epochs=cfg["n"],
@@ -220,25 +310,39 @@ async def main() -> None:
     # provenance: what was run, under what inherited config (self-describing run dir).
     (run_dir / "continuation_meta.json").write_text(json.dumps({
         "experiment": "continuation",
+        "run_kind": cfg["run_dir_stem"],   # continuation | continuation-baseline
+        "config_version": "continuation-v2",
         "n": cfg["n"],
         "conditions": cfg["conditions"],
         "preamble": C.PREAMBLE,
-        "triples": {
+        "plans": {
             model: {
-                "target_model": t.target_model,
-                "hack_prefix_traj_id": t.hack_ref.traj_id,
-                "clean_prefix_traj_id": t.clean_ref.traj_id,
-                "prefix_seed": t.hack_ref.seed,
-                "continuation_traj_id": t.b_ref.traj_id,
-                "b_seed": t.b_ref.seed,
-                "auditor": t.b_ref.auditor_model,
-                "judge": t.b_ref.judge_model,
-                "max_turns": t.b_ref.max_turns,
-                "fixed_system_prompt_chars": len(t.fixed_system_prompt),
-                "hack_synthesized_closer": t.hack_synth,
-                "clean_synthesized_closer": t.clean_synth,
+                "target_model": plan.target_model,
+                "prefixes": [
+                    {
+                        "traj_id": p.ref.traj_id,
+                        "condition": p.condition,
+                        "seed": p.ref.seed,
+                        "seed_family": C.seed_family(p.ref.seed_dir),
+                        "run_condition": p.ref.condition,   # allow|correct|None
+                        "synthesized_closer": p.synthesized_closer,
+                    }
+                    for p in plan.prefixes
+                ],
+                "continuations": [
+                    {
+                        "traj_id": b.traj_id,
+                        "seed": b.seed,
+                        "seed_family": C.seed_family(b.seed_dir),
+                        "run_condition": b.condition,        # allow|correct|None
+                        "auditor": b.auditor_model,
+                        "judge": b.judge_model,
+                        "max_turns": b.max_turns,
+                    }
+                    for b in plan.b_refs
+                ],
             }
-            for model, t in triples.items()
+            for model, plan in sorted(plans.items())
         },
     }, indent=2))
 
@@ -265,8 +369,8 @@ async def main() -> None:
     if cfg["skip_judge"]:
         print("\n[faithfulness] skipped (--skip-judge). Run later with the faithfulness judge.")
     else:
-        print("\n[faithfulness] auditor-faithfulness (deviation-from-B) judge ...")
-        b_refs_by_id = {t.b_ref.traj_id: t.b_ref for t in triples.values()}
+        print("\n[faithfulness] auditor-faithfulness (deviation-from-original) judge ...")
+        b_refs_by_id = {b.traj_id: b for plan in plans.values() for b in plan.b_refs}
         await C.run_faithfulness_for_dir(
             run_dir, b_refs_by_id, model=cfg["deviation_model"],
             concurrency=cfg["concurrency"], force=cfg["force_judge"])

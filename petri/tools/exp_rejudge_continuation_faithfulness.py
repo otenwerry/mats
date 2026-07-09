@@ -66,9 +66,10 @@ async def main() -> None:
     conditions = None
     if cond_raw:
         conditions = {c.strip() for c in cond_raw.split(",") if c.strip()}
-        unknown = conditions - set(C.CONDITIONS)
+        unknown = conditions - C.KNOWN_CONDITIONS
         if unknown:
-            raise SystemExit(f"unknown --conditions {sorted(unknown)}; choices: {C.CONDITIONS}")
+            raise SystemExit(f"unknown --conditions {sorted(unknown)}; "
+                             f"choices: {sorted(C.KNOWN_CONDITIONS)}")
 
     # build {B traj id -> OriginalRef} from the B ids referenced by this dir's task names.
     audits = await load_mode(run_dir)

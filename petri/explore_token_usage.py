@@ -8,12 +8,12 @@ from pathlib import Path
 from inspect_ai.log import read_eval_log
 
 LOGS = Path("/Users/owenterry/supermats/mats-local/petri/logs")
-DIRS = [
-    "v2-5targets-3ep-20260629-225553",   # Opus auditor baseline
-    "v2-5targets-1ep-20260629-183349",
-    "v2-4targets-1ep-20260702-143507",   # GLM auditor
-    "v2-4targets-1ep-20260702-152119",   # DeepSeek auditor
-    "v2-4targets-1ep-20260702-160733",   # Kimi auditor
+DIRS = sys.argv[1:] or [
+    "v2-5targets-allow-4ep-20260705-011507",     # 140 trajectories, deepseek auditor
+    "v2-5targets-correct-4ep-20260705-011500",   # 140 trajectories
+    "v2-opus-4.6-allow-8ep-20260705-183258",     # 8 opus trajectories
+    "v2-deepseek-v4-pro-allow-8ep-20260705-183305",  # 8 deepseek trajectories
+    "continuation-5x-20260630-160044",           # the one real continuation run
 ]
 
 for d in DIRS:

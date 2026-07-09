@@ -108,6 +108,10 @@ _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
 # reuse make_viewer's loaders so transcript numbering matches the viewer exactly
 from make_viewer import DATA, LOGS, load_mode, page_name
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from model_routing import route  # provider routing (see lib/model_routing.py)
+from exp_rh_audit import build_target_model, REASONING_EFFORT  # shared target reasoning config
+import direct_cost               # list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
+import model_window               # correct Inspect's context windows so the auditor compacts at the real window (see lib/model_window.py)
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +122,7 @@ load_dotenv(ENV_FILE)
 # build_rollback_task), so these constants are only the fallback used when an original
 # log somehow doesn't record an auditor/judge role -- which for our runs it always does.
 AUDITOR = "anthropic/claude-sonnet-4-6"
-JUDGE = "anthropic/claude-opus-4-8"
+JUDGE = route("anthropic/claude-opus-4-8")
 # FALLBACK ONLY: max_turns (and turn_counter=False) are INHERITED from the original's
 # stamped metadata (TrajRef.max_turns / .turn_counter, read in _all_refs and applied in
 # resume_solver), so a rollback always runs under the same turn budget as the run it
@@ -278,11 +282,13 @@ class TrajRef:
     target_model: str
     auditor_model: str   # the original's auditor (resamples inherit it)
     judge_model: str     # the original's judge   (resamples inherit it)
-    reasoning_enabled: bool | None   # the original's pinned target reasoning (True/False),
-                                     # or None = provider default. Resamples re-apply it so
-                                     # a pinned hybrid target isn't silently re-rolled at the
-                                     # provider default. Read from the original's stamped
-                                     # metadata (authoritative), not the live REASONING_ENABLED.
+    reasoning: bool                  # native target reasoning AS RUN (from metadata). Resamples
+                                     # rebuild the target via build_target_model with this, so a
+                                     # reasoning-on original isn't re-rolled with reasoning off.
+    reasoning_effort: str | None     # thinking depth used when reasoning was on (else None).
+    reasoning_enabled: bool | None   # legacy/back-compat (OpenRouter reasoning_enabled kwarg
+                                     # as stamped); no longer load-bearing -- build_target_model
+                                     # derives it from `reasoning` + the provider.
     auditor_reasoning_effort: str | None = None  # the original's AUDITOR extended-thinking
                                      # setting AS RUN (effort str, or None = thinking off --
                                      # also the value for every pre-thinking run). Resamples
@@ -309,17 +315,23 @@ def _all_refs() -> dict[int, TrajRef]:
         for li in list_eval_logs(str(mode_dir)):
             log = read_eval_log(li)
             roles = log.eval.model_roles or {}
-            target = getattr(roles.get("target"), "model", None) or str(roles.get("target", "?"))
+            target = route(getattr(roles.get("target"), "model", None) or str(roles.get("target", "?")))
             # auditor + judge inherited by resamples; fall back to the canonical default
-            # constants only if a log didn't record the role (our runs always do).
-            auditor = getattr(roles.get("auditor"), "model", None) or AUDITOR
-            judge = getattr(roles.get("judge"), "model", None) or JUDGE
-            # the target's reasoning pin AS RUN (stamped by exp_rh_audit.build_tasks).
-            # Authoritative for faithful re-application; None = provider default / unstamped.
-            reasoning = (log.eval.metadata or {}).get("reasoning_enabled")
+            # constants only if a log didn't record the role (our runs always do). route()
+            # sends anthropic/openai slugs to their first-party API (see model_routing).
+            auditor = route(getattr(roles.get("auditor"), "model", None) or AUDITOR)
+            judge = route(getattr(roles.get("judge"), "model", None) or JUDGE)
+            # the target's reasoning AS RUN (stamped by exp_rh_audit.build_tasks). Prefer the
+            # new `reasoning` bool; back-compat for old logs = derive from legacy
+            # reasoning_enabled (True -> on). Effort defaults to the current constant when
+            # unstamped (only used when reasoning is on).
+            meta = log.eval.metadata or {}
+            reasoning_on = (bool(meta["reasoning"]) if "reasoning" in meta
+                            else (meta.get("reasoning_enabled") is True))
+            reasoning_effort_val = meta.get("reasoning_effort") or REASONING_EFFORT
+            reasoning_enabled_legacy = meta.get("reasoning_enabled")
             # the auditor's extended-thinking setting AS RUN (stamped by exp_rh_audit /
             # exp_rollback). Absent on every pre-thinking run -> None -> thinking off.
-            meta = log.eval.metadata or {}
             aud_eff = meta.get("auditor_reasoning_effort")
             # turn budget AS RUN (stamped since 2026-06-23 / v5 respectively). Unstamped
             # originals all ran at MAX_TURNS=30 with no counter, so the fallbacks are exact.
@@ -330,8 +342,9 @@ def _all_refs() -> dict[int, TrajRef]:
                 if key in ids:
                     refs[ids[key]] = TrajRef(ids[key], key, mode_dir.name,
                                              log.eval.task, str(s.id), s.epoch,
-                                             target, auditor, judge, reasoning, aud_eff,
-                                             max_turns, turn_counter)
+                                             target, auditor, judge, reasoning_on,
+                                             reasoning_effort_val, reasoning_enabled_legacy,
+                                             aud_eff, max_turns, turn_counter)
     return refs
 
 
@@ -787,11 +800,11 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
         solver=resume_solver(spec),
         scorer=audit_judge(dims, instructions=judge_instructions),
     )
-    reasoning_pref = spec.ref.reasoning_enabled
-    target_role = (
-        spec.ref.target_model if reasoning_pref is None
-        else get_model(spec.ref.target_model, reasoning_enabled=reasoning_pref)
-    )
+    # Rebuild the target via the SAME helper build_tasks used, from the reasoning setting AS
+    # RUN, so the rollback configures the target byte-identically (reasoning + strict_tools per
+    # provider). (Also fixes a latent gap: the old path never set strict_tools on OpenRouter.)
+    target_role, tgt_reasoning_enabled, tgt_strict_tools = build_target_model(
+        spec.ref.target_model, reasoning_on=spec.ref.reasoning, effort=spec.ref.reasoning_effort)
     # Re-apply the original's auditor extended-thinking setting. None = thinking off ->
     # bare string (so resamples of pre-thinking originals are byte-for-byte unchanged);
     # otherwise rebuild the auditor with that effort (Inspect -> adaptive thinking for
@@ -809,6 +822,10 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
         # stamp the inherited settings so the rollback log is self-describing and the
         # viewer can label it (-> log.eval.metadata, same channel exp_rh_audit uses).
         metadata={"auditor_reasoning_effort": aud_eff,
+                  "reasoning": spec.ref.reasoning,
+                  "reasoning_effort": spec.ref.reasoning_effort if spec.ref.reasoning else None,
+                  "reasoning_enabled": tgt_reasoning_enabled,
+                  "strict_tools": tgt_strict_tools,
                   "max_turns": spec.ref.max_turns,
                   "turn_counter": spec.ref.turn_counter},
     )
@@ -905,6 +922,10 @@ def main() -> None:
     tasks = [build_rollback_task(spec, dims) for spec in specs]
 
     print(f"  logs -> {run_dir}\n")
+    import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
+    openrouter_cost.install()
+    direct_cost.install()    # exact list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
+    model_window.install()   # correct context windows so the auditor compacts at the real window, not 128k (see lib/model_window.py)
     # Active tasks = the connection budget: enough to keep the shared auditor pool fed,
     # no more (the pool is the real ceiling). Matches exp_rollback_pipeline's max_tasks.
     success, logs = eval_set(

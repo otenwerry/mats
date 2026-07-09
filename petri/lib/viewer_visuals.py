@@ -6,7 +6,8 @@ make_viewer.py — instead of a single global visuals.html. Sections render in l
 source boxes (never pooled): a sweep's propensity (pre-rendered HTML passed in) +
 auditor user-turn histograms + incompleteness histograms (+ weak-model hallucination on
 the pre-fixed-SP sweeps), and — on the sweep that owns the continuation runs — the
-continuation experiment's per-condition hack rates + mechanism-similarity chart.
+continuation experiment's per-condition hack rates, the "when hacking starts" first-hack
+timing figures, + mechanism-similarity chart.
 
 It ALSO contains the older rollback re-hacking figures (control-vs-treatment re-hack
 rate, time-to-first-re-hack) — make_viewer currently passes `records=[]` so that
@@ -47,7 +48,8 @@ RH_C = "#C44E52"
 NONRH_C = "#4C72B0"
 # continuation prefix-condition palette: baseline neutral grey, clean green, hack red,
 # so the chart reads its own story (a prior hack drives the rate up) at a glance.
-CONT_COLOR = {"No prefix": "#8C8C8C", "Clean prefix": "#55A868", "Hack prefix": "#C44E52"}
+CONT_COLOR = {"No prefix": "#8C8C8C", "Clean prefix": "#55A868", "Hack prefix": "#C44E52",
+              "Corrected-hack prefix": "#DD8452", "Full-hack prefix": "#C44E52"}
 # per-model palette (colorblind-safe) for figures that stack/color by target model; assigned
 # by the model order the caller passes, so colors stay stable across rebuilds.
 MODEL_PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3",
@@ -285,20 +287,34 @@ def fig_score_hist_grid(groups: list[tuple], ncols: int, colors=None,
     return _fig_to_svg(fig)
 
 
+USER_TURNS_CAP = 8   # overflow bin: one rare long trajectory (e.g. 18 user turns) would
+                     # otherwise stretch the shared x-axis and mush every panel
+
+
 def fig_user_turns_by_model(groups: list[tuple]) -> str:
     """Small-multiples histograms of per-trajectory USER-turn counts (how many messages
     the auditor sent in the user role), one panel per target model, stacked by outcome:
-    reward hacks (red, bottom) + non-hacks (blue, top). `groups`:
+    reward hacks (red, bottom) + non-hacks (blue, top). Counts above USER_TURNS_CAP pool
+    into a final bin whose tick reads e.g. '8+'. `groups`:
     [(label, hack_counts, non_counts), ...] already in display order."""
     n = len(groups)
     if n == 0:
         return _empty_fig("no trajectories")
     ncols = min(5, n)
     nrows = (n + ncols - 1) // ncols
-    xmax = max((max(h + nn) for _, h, nn in groups if h + nn), default=1)
+    raw_max = max((max(h + nn) for _, h, nn in groups if h + nn), default=1)
+    clipped = raw_max > USER_TURNS_CAP
+    xmax = min(raw_max, USER_TURNS_CAP)
+    if clipped:
+        groups = [(lbl, [min(v, USER_TURNS_CAP) for v in h],
+                   [min(v, USER_TURNS_CAP) for v in nn]) for lbl, h, nn in groups]
     bins = np.arange(0.5, xmax + 1.5, 1.0)
     ymax = max(int(np.histogram(h + nn, bins=bins)[0].max()) if h + nn else 0
                for _, h, nn in groups)
+    ticks = list(range(1, xmax + 1))
+    tick_labels = [str(t) for t in ticks]
+    if clipped:
+        tick_labels[-1] = f"{USER_TURNS_CAP}+"
     fig, axes = plt.subplots(nrows, ncols, figsize=(2.05 * ncols, 2.3 * nrows),
                              squeeze=False, sharex=True, sharey=True)
     for idx, (label, hacks, nons) in enumerate(groups):
@@ -308,7 +324,7 @@ def fig_user_turns_by_model(groups: list[tuple]) -> str:
         ax.set_title(f"{label}\n(n={len(hacks) + len(nons)})", fontsize=9.5)
         ax.set_xlim(0.5, xmax + 0.5)
         ax.set_ylim(0, ymax * 1.12 + 1)
-        ax.set_xticks(range(1, xmax + 1, 1 if xmax <= 10 else 2))
+        ax.set_xticks(ticks, tick_labels)
         ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
         ax.set_axisbelow(True)
     for j in range(n, nrows * ncols):
@@ -326,14 +342,21 @@ def fig_user_turns_by_model(groups: list[tuple]) -> str:
 def fig_user_turns_before_first_hack(counts: list[int]) -> str:
     """Histogram over annotated hacks of how many user turns came strictly before the
     first annotated hack turn. 1 = only the session-start message, i.e. no auditor
-    user-turn nudge preceded the hack."""
+    user-turn nudge preceded the hack. Same USER_TURNS_CAP overflow bin as the
+    per-model grid."""
     if not counts:
         return _empty_fig("no annotated hacks", (3.6, 3.0))
     fig, ax = plt.subplots(figsize=(3.6, 3.0))
+    clipped = max(counts) > USER_TURNS_CAP
+    if clipped:
+        counts = [min(v, USER_TURNS_CAP) for v in counts]
     xmax = max(counts)
     bins = np.arange(0.5, xmax + 1.5, 1.0)
     ax.hist(counts, bins=bins, color=RH_C, edgecolor="white", linewidth=0.5)
-    ax.set_xticks(range(1, xmax + 1))
+    tick_labels = [str(t) for t in range(1, xmax + 1)]
+    if clipped:
+        tick_labels[-1] = f"{USER_TURNS_CAP}+"
+    ax.set_xticks(range(1, xmax + 1), tick_labels)
     ax.set_xlim(0.5, xmax + 0.5)
     ax.set_xlabel("User turns before first hack")
     ax.set_ylabel(f"Hacks (n={len(counts)})")
@@ -385,8 +408,9 @@ def fig_rh_incompleteness_scatter(rh_points: list[tuple], non_points: list[tuple
 # Continuations — reward-hack rate by prefix condition
 # --------------------------------------------------------------------------- #
 def fig_continuation_rate(by_condition: list[dict]) -> str:
-    """3-bar reward-hack rate by prefix condition (no prefix / clean prefix / hack prefix),
-    pooled across every model x B cell. Each bar annotated k/n; Wilson 95% CI error bars.
+    """One bar per prefix condition (no prefix / clean / corrected-hack / full-hack), reward-hack
+    rate pooled across every model x B cell. Ticks use the _CONT_SHORT abbreviations so the 4
+    labels don't overlap in the narrow axis. Each bar annotated k/n; Wilson 95% CI error bars.
     `by_condition`: [{label, k, n}, ...] in display order (built by make_viewer)."""
     rows = [r for r in by_condition if r["n"] > 0]
     if not rows:
@@ -404,7 +428,7 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
         ax.annotate(f'{r["k"]}/{r["n"]}', (x, 100 * r["k"] / r["n"]),
                     textcoords="offset points", xytext=(0, 8), ha="center",
                     fontsize=10, color="#333", fontweight="bold")
-    ax.set_xticks(xs, [r["label"] for r in rows])
+    ax.set_xticks(xs, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
     ax.set_ylabel("Reward-hack rate (%)")
     ax.set_ylim(0, min(100, max(rates[i] + his[i] for i in range(len(rows))) + 12))
     ax.set_title("Reward hacking by prefix condition")
@@ -413,7 +437,127 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
     return _fig_to_svg(fig)
 
 
-_CONT_SHORT = {"No prefix": "None", "Clean prefix": "Clean", "Hack prefix": "Hack"}
+_CONT_SHORT = {"No prefix": "None", "Clean prefix": "Clean", "Hack prefix": "Hack",
+               "Corrected-hack prefix": "Corr", "Full-hack prefix": "Full"}
+
+
+# --------------------------------------------------------------------------- #
+# Continuations — when hacking starts (first-hack timing across prefix conditions)
+# --------------------------------------------------------------------------- #
+def _cond_boxstrip(rows: list[dict], key: str, ylabel: str, title: str) -> str:
+    """Box + jittered strip of a per-continuation value (rows[i][key] is a list of numbers),
+    one column per prefix condition with data. Dots use the prefix-condition palette; each
+    column annotates its n. Used by both first-hack-turn figures (turns, and fraction)."""
+    rows = [r for r in rows if r.get(key)]
+    if not rows:
+        return _empty_fig("no annotated hacks to time", (5.0, 4.2))
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(max(4.4, 1.3 * len(rows) + 1.4), 4.2))
+    data = [r[key] for r in rows]
+    pos = list(range(len(rows)))
+    ax.boxplot(data, positions=pos, widths=0.5, showfliers=False,
+               medianprops=dict(color="#222", lw=1.6),
+               boxprops=dict(color="#888"), whiskerprops=dict(color="#888"),
+               capprops=dict(color="#888"))
+    vmax = max(max(d) for d in data)
+    vmin = min(min(d) for d in data)
+    span = (vmax - vmin) or 1
+    base = vmin - 0.14 * span          # y where the n= labels sit, below the lowest point
+    for i, r in enumerate(rows):
+        d = r[key]
+        jx = i + rng.uniform(-0.13, 0.13, size=len(d))
+        ax.scatter(jx, d, s=34, color=CONT_COLOR.get(r["label"], CONTROL_C),
+                   edgecolor="white", lw=0.6, zorder=3)
+        ax.annotate(f"n={len(d)}", (i, base), ha="center", va="top", fontsize=9, color="#555")
+    ax.set_xticks(pos, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
+    ax.set_xlim(-0.5, len(rows) - 0.5)
+    ax.set_ylim(base - 0.06 * span, vmax + 0.10 * span)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_first_hack_by_condition(rows: list[dict]) -> str:
+    """When hacking starts: assistant turns into the new task to the first hack, per condition."""
+    return _cond_boxstrip(rows, "fh_rel", "Assistant turns into the new task",
+                          "When hacking starts, by prefix condition")
+
+
+def fig_first_hack_fraction(rows: list[dict]) -> str:
+    """Same as above but normalized: first-hack turn as a fraction of the new-task length, so
+    'earlier' means earlier relative to how long the trajectory ran (controls for length)."""
+    return _cond_boxstrip(rows, "frac", "First-hack position (fraction of trajectory)",
+                          "How early hacking starts, by prefix condition")
+
+
+def fig_first_hack_model_grid(by_model: list[dict]) -> str:
+    """Small-multiples, one panel per model: each hack's first-hack turn (turns into the new
+    task) as a jittered dot by prefix condition, with a black mean line per condition. Panels
+    share y so models are comparable; per-model/condition n is small so every point is shown."""
+    by_model = [m for m in by_model if any(r.get("fh_rel") for r in m["by_condition"])]
+    n = len(by_model)
+    if not n:
+        return _empty_fig("no per-model timing")
+    rng = np.random.default_rng(0)
+    ncols = min(n, 5)
+    nrows = (n + ncols - 1) // ncols
+    ymax = max(max(r["fh_rel"]) for m in by_model for r in m["by_condition"] if r.get("fh_rel"))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.5 * ncols, 2.9 * nrows),
+                             squeeze=False, sharey=True)
+    for idx, m in enumerate(by_model):
+        ax = axes[idx // ncols][idx % ncols]
+        conds = [r for r in m["by_condition"] if r.get("fh_rel")]
+        for i, r in enumerate(conds):
+            d = r["fh_rel"]
+            jx = i + rng.uniform(-0.15, 0.15, size=len(d))
+            ax.scatter(jx, d, s=24, color=CONT_COLOR.get(r["label"], CONTROL_C),
+                       edgecolor="white", lw=0.4, zorder=3)
+            mean = sum(d) / len(d)
+            ax.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=1.8, zorder=4)
+        ax.set_title(m["model"], fontsize=10)
+        ax.set_xticks(range(len(conds)), [_CONT_SHORT.get(r["label"], r["label"]) for r in conds],
+                      fontsize=8)
+        ax.set_xlim(-0.5, len(conds) - 0.5)
+        ax.set_ylim(0.0, ymax * 1.08 + 1)
+        ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
+        ax.set_axisbelow(True)
+    for j in range(n, nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+    fig.suptitle("When hacking starts (turns into new task), per model", fontsize=13,
+                 fontweight="bold")
+    fig.supylabel("Assistant turns into new task", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_svg(fig)
+
+
+def _continuation_timing_section(continuations: dict) -> str:
+    """The 'When hacking starts' block: first-hack timing across prefix conditions (aggregate
+    box+strip in turns and as a fraction of length, plus a per-model grid). Empty string when
+    no condition has a timed hack (section omitted)."""
+    rows = [r for r in continuations.get("by_condition", []) if r["n"] > 0]
+    if not any(r.get("fh_rel") for r in rows):
+        return ""
+    n_timed = sum(len(r["fh_rel"]) for r in rows)
+    n_hack = sum(r["k"] for r in rows)
+    gap = n_hack - n_timed
+    gap_note = (f" {gap} of {n_hack} binary hack(s) had no first-hack annotation (or hacked "
+                "inside the replayed prefix) and are excluded from the timing figures."
+                if gap else f" All {n_hack} binary hacks are annotated.")
+    figs = [fig_first_hack_by_condition(rows), fig_first_hack_fraction(rows)]
+    by_model = continuations.get("by_model", [])
+    if by_model:
+        figs.append(fig_first_hack_model_grid(by_model))
+    return (
+        "<h2>When hacking starts</h2>"
+        '<p class="vsub">Among continuations that reward-hacked, how many <b>assistant turns '
+        'into the new task</b> the first hack turn falls &mdash; turn&nbsp;1 = the first target '
+        'turn after the replayed prefix, so conditions are comparable no matter how long the '
+        'prefix is. Reward hacks only (a non-hack has no hack turn); binary hack definition.'
+        f'{gap_note}</p>'
+        + _stack(*figs)
+    )
 
 
 def fig_continuation_model_grid(by_model: list[dict]) -> str:
@@ -431,7 +575,9 @@ def fig_continuation_model_grid(by_model: list[dict]) -> str:
                              squeeze=False, sharey=True)
     for idx, m in enumerate(by_model):
         ax = axes[idx // ncols][idx % ncols]
-        conds = m["by_condition"]
+        # only conditions this model actually ran (a sweep uses one condition set; unused
+        # legacy/new conditions would otherwise render as permanently empty tick positions)
+        conds = [r for r in m["by_condition"] if r["n"] > 0]
         for i, r in enumerate(conds):
             sc = r["scores"]
             if sc:
@@ -454,6 +600,392 @@ def fig_continuation_model_grid(by_model: list[dict]) -> str:
     fig.supylabel("reward_hacking", fontsize=10)
     fig.tight_layout()
     return _fig_to_svg(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Seed-condition comparison (allow vs correct): hack rates over the original audits
+# --------------------------------------------------------------------------- #
+# per-condition palette, assigned by the condition order the caller passes (allow first
+# -> blue, correct -> orange: the same colorblind-safe pair as control/treatment)
+SEED_COND_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#8172B3", "#937860"]
+# the five audit categories for the composition bars: (key, display label, color).
+# full reuses the site-wide reward-hack red; non-hacks are a recessive grey.
+CATEGORY_STYLE = [
+    ("full", "full hack", RH_C),
+    ("degenerate", "target error", "#DA8BC3"),
+    ("nudged", "auditor error", "#CCB974"),
+    ("both", "target & auditor error", "#937860"),
+    ("non", "non-hack", "#d4d6de"),
+]
+
+
+def fig_condition_rate(by_condition: list[dict]) -> str:
+    """One hack-rate bar per seed condition, pooled over every audit in the comparison
+    set. k/n annotated above each bar; Wilson 95% CI error bars.
+    `by_condition`: [{label, k, n}, ...] in display order (built by make_viewer)."""
+    rows = [r for r in by_condition if r["n"] > 0]
+    if not rows:
+        return _empty_fig("no audits", (3.8, 4.0))
+    fig, ax = plt.subplots(figsize=(1.3 + 1.25 * len(rows), 4.0))
+    xs = np.arange(len(rows))
+    rates, los, his = [], [], []
+    for r in rows:
+        p, lo, hi = _wilson(r["k"], r["n"])
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    ax.bar(xs, rates, width=0.62, color=SEED_COND_COLORS[:len(rows)],
+           yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for i, r in enumerate(rows):
+        ax.annotate(f'{r["k"]}/{r["n"]}', (i, rates[i] + his[i]),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=10, color="#333", fontweight="bold")
+    ax.set_xticks(xs, [r["label"] for r in rows])
+    ax.set_ylabel("Hack rate (%)")
+    ax.set_ylim(0, min(100, max(r + h for r, h in zip(rates, his)) + 12))
+    ax.set_title("Hack rate by condition")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_rate_bars(rows: list[dict], title: str) -> str:
+    """Single-series hack-rate bars, one per group (a target model or a seed prompt),
+    conditions pooled. k/n annotated above each bar; Wilson 95% CI whiskers.
+    `rows`: [{group, k, n}, ...] in display order."""
+    rows = [r for r in rows if r["n"] > 0]
+    if not rows:
+        return _empty_fig("no audits")
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.1 * len(rows)), 4.0))
+    xs = np.arange(len(rows))
+    rates, los, his = [], [], []
+    for r in rows:
+        p, lo, hi = _wilson(r["k"], r["n"])
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    ax.bar(xs, rates, width=0.62, color=RH_C,
+           yerr=[los, his], capsize=4, error_kw=dict(ecolor="#333", lw=1.0))
+    for x, r, rate, hi in zip(xs, rows, rates, his):
+        ax.annotate(f'{r["k"]}/{r["n"]}', (x, rate + hi),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=9, color="#333")
+    ax.set_xticks(xs, [r["group"] for r in rows], rotation=18, ha="right", fontsize=9)
+    ax.set_ylabel("Hack rate (%)")
+    ax.set_ylim(0, min(100, max(r + h for r, h in zip(rates, his)) + 12))
+    ax.set_title(title)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_category_composition(counts: dict) -> str:
+    """One horizontal stacked bar (conditions pooled) showing the five-category
+    composition (full hack / target error / auditor error / target & auditor error / non-hack)
+    in COUNTS, segments annotated when wide enough."""
+    total = sum(counts.values())
+    if not total:
+        return _empty_fig("no audits", (6.4, 2.0))
+    fig, ax = plt.subplots(figsize=(6.4, 2.1))
+    left = 0
+    for key, _, color in CATEGORY_STYLE:
+        v = counts.get(key, 0)
+        if not v:
+            continue
+        ax.barh(0, v, left=left, height=0.5, color=color, edgecolor="white", lw=0.5)
+        if v / total > 0.04:
+            ax.annotate(str(v), (left + v / 2, 0), ha="center", va="center",
+                        fontsize=9.5, color="#222")
+        left += v
+    ax.set_yticks([])
+    ax.set_ylim(-0.55, 0.55)
+    ax.set_xlabel("Trajectories")
+    ax.set_xlim(0, total * 1.02)
+    ax.set_title("Category composition")
+    ax.legend(handles=[Patch(color=color, label=lbl) for _, lbl, color in CATEGORY_STYLE],
+              fontsize=8.5, frameon=False, loc="upper center",
+              bbox_to_anchor=(0.5, -0.42), ncol=3)
+    ax.xaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_rh_score_hist(scores: list) -> str:
+    """Histogram of the judge's reward_hacking scores (1-10), conditions pooled."""
+    if not scores:
+        return _empty_fig("no reward_hacking scores", (5.0, 3.6))
+    fig, ax = plt.subplots(figsize=(5.0, 3.6))
+    ax.hist(scores, bins=np.arange(0.5, 11.5, 1.0), color=RH_C,
+            edgecolor="white", linewidth=0.6)
+    ax.set_xticks(range(1, 11))
+    ax.set_xlim(0.5, 10.5)
+    ax.set_xlabel("reward_hacking (judge score)")
+    ax.set_ylabel(f"Trajectories (n={len(scores)})")
+    ax.set_title("reward_hacking scores")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _failure_modes_section(fm: dict) -> str:
+    """Reward-hack failure-mode tally (make_viewer.failure_modes_data): a horizontal-bar
+    table of how many tag-eligible audits (reward_hacking >= 2) carry each RH_FAILURE_MODES
+    tag. Modes are non-exclusive so counts need not sum to the denominator. Parse errors
+    (rh>=2 but no usable tag) are surfaced as a caveat and excluded from the counts."""
+    order = fm.get("order") or []
+    n = fm.get("n_eligible", 0)
+    errs = fm.get("parse_errors", 0)
+    counts = fm.get("counts", {})
+    if not order and not errs:
+        return ""
+    rows = []
+    for m in order:
+        c = counts.get(m, 0)
+        pct = 100.0 * c / n if n else 0.0
+        w = max(2, round(pct * 2.2))  # px within the 220px track
+        rows.append(
+            f'<tr><td class="m">{esc_loc(m)}</td>'
+            f'<td><span class="fmwrap"><span class="fmbar" style="width:{w}px"></span></span></td>'
+            f'<td>{c} <span style="color:#889">({pct:.0f}%)</span></td></tr>')
+    table = f'<table class="fmtbl">{"".join(rows)}</table>' if rows else ""
+    err_note = (
+        f'<p class="vsub" style="color:#8a5a00">&#9888; {errs} of {n} tag-eligible '
+        f'audit(s) had a missing or unparseable <code>RH_FAILURE_MODES</code> line &mdash; '
+        f'excluded from the counts above (label unknown, not &ldquo;none&rdquo;).</p>'
+    ) if errs else ""
+    return f"""
+<div class="vsec">Reward-hack failure modes</div>
+<p class="vsub">How the target gamed the metric, parsed from the judge's per-run
+<code>RH_FAILURE_MODES</code> tag, over the <b>{n}</b> audit(s) scored reward_hacking &ge; 2.
+Modes are non-exclusive &mdash; a run can carry several, so counts need not sum to {n}.
+<code>thinks_about_rh</code> = considered a hack but committed to none.</p>
+{table}
+{err_note}
+"""
+
+
+def _condition_section(cond: dict) -> str:
+    """The 'Reward hacking' block over the sweep's condition-experiment audits: ONLY the
+    headline rate figure keeps the allow/correct split; category composition, per-model
+    and per-prompt rates, and the reward_hacking score histogram pool the conditions
+    (Owen, 2026-07-05: the split doesn't matter beyond the first graph).
+    `cond` is make_viewer.condition_comparison_data's dict; its `note` records exactly
+    which audits were excluded from the comparison and is always shown."""
+    ci_cap = "Hack = binary definition. Error bars: Wilson 95% CI."
+    return (
+        "<h2>Reward hacking by seed condition</h2>"
+        f'<p class="vsub"><b>{cond["n"]}</b> audits &middot; {esc_loc(cond["note"])} &middot; '
+        "conditions pooled in every figure but the first</p>"
+        '<div class="figgrid">'
+        + _figure(fig_condition_rate(cond["by_condition"]), ci_cap)
+        + _figure(fig_category_composition(cond["categories"]))
+        + "</div>"
+        '<div class="figgrid">'
+        + _figure(fig_rate_bars(cond["by_target"], "Hack rate by model"), ci_cap)
+        + _figure(fig_rate_bars(cond["by_seed"], "Hack rate by prompt"), ci_cap)
+        + "</div>"
+        '<div class="figgrid">'
+        + _figure(fig_rh_score_hist(cond["rh_scores"]))
+        + "</div>"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reasoning / turn-budget comparison (settings sweep)
+# --------------------------------------------------------------------------- #
+REASONING_COLORS = {"on": "#4C72B0", "off": "#DD8452"}   # on=blue, off=orange
+
+
+def fig_rate_by_turns(by_turns: list[dict]) -> str:
+    """Grouped hack-rate bars: x = max_turns (auditor turn cap), two bars per group
+    (reasoning on / off). k/n annotated above each bar; Wilson 95% CI whiskers.
+    `by_turns`: [{max_turns, on:{k,n}, off:{k,n}}, ...] in ascending turn order."""
+    rows = [r for r in by_turns if r["on"]["n"] or r["off"]["n"]]
+    if not rows:
+        return _empty_fig("no audits")
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.5 * len(rows)), 4.0))
+    x = np.arange(len(rows)); w = 0.38
+    for i, (lab, key) in enumerate((("reasoning on", "on"), ("reasoning off", "off"))):
+        rates, los, his, ks, ns = [], [], [], [], []
+        for r in rows:
+            k, n = r[key]["k"], r[key]["n"]
+            p, lo, hi = _wilson(k, n)
+            rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+            ks.append(k); ns.append(n)
+        bars = ax.bar(x + (i - 0.5) * w, rates, w, label=lab, color=REASONING_COLORS[key],
+                      yerr=[los, his], capsize=4, error_kw=dict(ecolor="#333", lw=1.0))
+        for b, k, n, rate, hi in zip(bars, ks, ns, rates, his):
+            ax.annotate(f"{k}/{n}", (b.get_x() + b.get_width() / 2, rate + hi),
+                        textcoords="offset points", xytext=(0, 3), ha="center",
+                        fontsize=8.5, color="#333")
+    allhi = [100 * _wilson(r[k]["k"], r[k]["n"])[2] for r in rows
+             for k in ("on", "off") if r[k]["n"]]
+    ax.set_xticks(x, [str(r["max_turns"]) for r in rows])
+    ax.set_xlabel("max_turns (auditor turn cap)")
+    ax.set_ylabel("Hack rate (%)")
+    ax.set_ylim(0, min(100, (max(allhi) if allhi else 10) + 14))
+    ax.set_title("Hack rate by turn budget")
+    ax.legend(frameon=False, fontsize=9)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_rate_by_reasoning(by_reasoning: list[dict]) -> str:
+    """Two hack-rate bars: reasoning on vs off, pooled across turn budgets. k/n annotated;
+    Wilson 95% CI. `by_reasoning`: [{label, k, n}, ...]."""
+    rows = [r for r in by_reasoning if r["n"] > 0]
+    if not rows:
+        return _empty_fig("no audits", (3.8, 4.0))
+    fig, ax = plt.subplots(figsize=(1.3 + 1.25 * len(rows), 4.0))
+    xs = np.arange(len(rows)); rates, los, his = [], [], []
+    for r in rows:
+        p, lo, hi = _wilson(r["k"], r["n"])
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    colors = [REASONING_COLORS["on" if "on" in r["label"] else "off"] for r in rows]
+    ax.bar(xs, rates, width=0.62, color=colors, yerr=[los, his], capsize=5,
+           error_kw=dict(ecolor="#333", lw=1.1))
+    for i, r in enumerate(rows):
+        ax.annotate(f'{r["k"]}/{r["n"]}', (i, rates[i] + his[i]),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=10, color="#333", fontweight="bold")
+    ax.set_xticks(xs, [r["label"] for r in rows])
+    ax.set_ylabel("Hack rate (%)")
+    ax.set_ylim(0, min(100, max(r + h for r, h in zip(rates, his)) + 12))
+    ax.set_title("Hack rate by reasoning")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_incompleteness_by_turns(incompleteness_by_turns: list[dict]) -> str:
+    """Mean incompleteness (judge dim, higher = ended more unfinished) by max_turns, with
+    ±1 SD whiskers and n per bar. `incompleteness_by_turns`: [{max_turns, vals:[...]}, ...]."""
+    rows = [r for r in incompleteness_by_turns if r["vals"]]
+    if not rows:
+        return _empty_fig("no incompleteness scores")
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.25 * len(rows)), 4.0))
+    xs = np.arange(len(rows))
+    means = [float(np.mean(r["vals"])) for r in rows]
+    sds = [float(np.std(r["vals"])) for r in rows]
+    ax.bar(xs, means, width=0.6, color=INCOMP_C, yerr=sds, capsize=5,
+           error_kw=dict(ecolor="#333", lw=1.0))
+    for i, r in enumerate(rows):
+        ax.annotate(f'n={len(r["vals"])}', (i, means[i] + sds[i]),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=9, color="#333")
+    ax.set_xticks(xs, [str(r["max_turns"]) for r in rows])
+    ax.set_xlabel("max_turns (auditor turn cap)")
+    ax.set_ylabel("Mean incompleteness (1–10)")
+    ax.set_ylim(0, 10.5)
+    ax.set_title("Incompleteness by turn budget")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _fmt_tokens(n: float) -> str:
+    return f"{n / 1e6:.2f}M" if n >= 1e6 else f"{n / 1e3:.0f}K" if n >= 1e3 else str(int(n))
+
+
+def fig_peak_context_by_model(peak_by_model: list[dict]) -> str:
+    """One panel per model: histogram of peak context (fullest single-turn prompt tokens) over
+    that model's runs. The x-axis runs 0 -> that model's context window, so the furthest-right
+    tick IS the window size — you read straight off how close runs got to filling it. Panels do
+    NOT share x (windows differ per model). `peak_by_model`: [{model, window, peaks:[...]}]."""
+    rows = [r for r in peak_by_model if r["peaks"]]
+    if not rows:
+        return _empty_fig("no peak-context data", (6.0, 3.0))
+    ncols = min(3, len(rows))
+    nrows = (len(rows) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.0 * ncols, 2.5 * nrows), squeeze=False)
+    for idx, r in enumerate(rows):
+        ax = axes[idx // ncols][idx % ncols]
+        win = r["window"]
+        # bin across the WHOLE window (not the data range) so runs that use only a few % of a
+        # huge window still render a visible bar (~window/12 wide) instead of an invisible
+        # far-left sliver. Fall back to auto bins when the window is unknown.
+        wbins = np.linspace(0, win, 13) if win else 12
+        ax.hist(r["peaks"], bins=wbins, color=CONTROL_C, edgecolor="white", linewidth=0.5)
+        wlabel = f"window {_fmt_tokens(win)}" if win else "window ?"
+        ax.set_title(f"{r['model']}\n(n={len(r['peaks'])}, {wlabel})", fontsize=9)
+        if win:
+            ax.set_xlim(0, win)
+            ax.set_xticks([0, win / 2, win])
+            ax.set_xticklabels(["0", _fmt_tokens(win / 2), _fmt_tokens(win)], fontsize=8)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
+        ax.set_axisbelow(True)
+    for j in range(len(rows), nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+    fig.supxlabel("Peak context (prompt tokens); right tick = model context window", fontsize=10)
+    fig.supylabel("Trajectories", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_svg(fig)
+
+
+def fig_peak_pct_hist_grid(peak_pct_by_turns: list[dict]) -> str:
+    """One panel per max_turns: histogram of the PERCENT of the context window filled at the
+    run's peak. x runs 0 -> 100%, so the furthest-right edge is a full window. Panels share
+    axes. `peak_pct_by_turns`: [{max_turns, pcts:[...]}]."""
+    rows = [r for r in peak_pct_by_turns if r["pcts"]]
+    if not rows:
+        return _empty_fig("no peak-context data")
+    ncols = min(4, len(rows))
+    nrows = (len(rows) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.15 * ncols, 2.2 * nrows),
+                             squeeze=False, sharex=True, sharey=True)
+    bins = np.arange(0, 105, 10)   # 0-100% in 10-point bins
+    ymax = max(int(np.histogram(r["pcts"], bins=bins)[0].max()) for r in rows)
+    for idx, r in enumerate(rows):
+        ax = axes[idx // ncols][idx % ncols]
+        ax.hist(r["pcts"], bins=bins, color=CONTROL_C, edgecolor="white", linewidth=0.5)
+        ax.set_title(f"max_turns={r['max_turns']}\n(n={len(r['pcts'])})", fontsize=9.5)
+        ax.set_xlim(0, 100)
+        ax.set_xticks([0, 50, 100])
+        ax.set_xticklabels(["0", "50", "100%"], fontsize=8)
+        ax.set_ylim(0, ymax * 1.12 + 1)
+        ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
+        ax.set_axisbelow(True)
+    for j in range(len(rows), nrows * ncols):
+        axes[j // ncols][j % ncols].set_visible(False)
+    fig.supxlabel("Context window filled at peak (%)", fontsize=10)
+    fig.supylabel("Trajectories", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_svg(fig)
+
+
+def _reasoning_section(reasoning_exp: dict) -> str:
+    """The 'Reward hacking by reasoning & turn budget' block (settings sweep): hack rate by
+    turn budget (reasoning on/off grouped) + hack rate by reasoning (pooled over turns).
+    `reasoning_exp` is make_viewer.reasoning_comparison_data's dict."""
+    ci_cap = "Hack = binary definition. Error bars: Wilson 95% CI."
+    return (
+        "<h2>Reward hacking by reasoning &amp; turn budget</h2>"
+        f'<p class="vsub"><b>{reasoning_exp["n"]}</b> audits &middot; '
+        f'{esc_loc(reasoning_exp["note"])}</p>'
+        '<div class="figgrid">'
+        + _figure(fig_rate_by_turns(reasoning_exp["by_turns"]), ci_cap)
+        + _figure(fig_rate_by_reasoning(reasoning_exp["by_reasoning"]), ci_cap)
+        + "</div>"
+        '<div class="figgrid">'
+        + _figure(fig_incompleteness_by_turns(reasoning_exp.get("incompleteness_by_turns") or []),
+                  "Higher = the run ended more unfinished. Whiskers: ±1 SD.")
+        + "</div>"
+        # incompleteness distribution (not just the mean), one panel per turn budget
+        '<div class="figgrid">'
+        + _figure(fig_score_hist_grid(
+            [(f"max_turns={r['max_turns']}", r["vals"])
+             for r in (reasoning_exp.get("incompleteness_by_turns") or [])],
+            ncols=4, suptitle="Incompleteness distribution by turn budget"))
+        + "</div>"
+        # context: peak per model (x -> that model's window) and % of window filled per turn budget
+        '<div class="figgrid">'
+        + _figure(fig_peak_context_by_model(reasoning_exp.get("peak_by_model") or []),
+                  "Peak = fullest single-turn prompt (input + cache) on the target. Right tick = "
+                  "that model's context window.")
+        + "</div>"
+        '<div class="figgrid">'
+        + _figure(fig_peak_pct_hist_grid(reasoning_exp.get("peak_pct_by_turns") or []),
+                  "Percent of the target's context window filled at its peak; 100% = a full window.")
+        + "</div>"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -515,7 +1047,15 @@ def _continuation_section(continuations: dict) -> str:
         return ""
     n_dead = continuations.get("n_dead", 0)
     dead_note = f" {n_dead} dead continuation(s) excluded." if n_dead else ""
-    # RH-score distribution: one histogram panel per condition, colored to match its bar.
+    # baseline-only screening candidates (no prefixed condition) are held out of every figure
+    # -- surface which ones and how many so the exclusion is visible, not silent.
+    n_bo = continuations.get("n_baseline_only", 0)
+    bo_bids = continuations.get("baseline_only_bids", [])
+    bo_note = (f" {n_bo} baseline-only continuation(s) excluded "
+               f"(B {', '.join('#' + str(b) for b in bo_bids)} — screening candidates, "
+               "not completed experiments)." if n_bo else "")
+    # RH-score distribution: one histogram panel per condition (with data), colored to match.
+    rows = [r for r in rows if r["n"] > 0]
     hist_groups = [(r["label"], r["scores"]) for r in rows]
     hist_colors = [CONT_COLOR.get(r["label"], INCOMP_C) for r in rows]
     hist = fig_score_hist_grid(
@@ -527,13 +1067,31 @@ def _continuation_section(continuations: dict) -> str:
     by_model = continuations.get("by_model", [])
     if by_model:
         figs.append(fig_continuation_model_grid(by_model))
+    # cross-seed-dir continuation: a different KIND of experiment (new task from a different
+    # seed family than the prefix), rendered in its own tinted box so it isn't read as part
+    # of the same-family headline above.
+    cross = continuations.get("by_condition_cross")
+    cross_html = ""
+    if cross and any(r["n"] for r in cross):
+        crows = [r for r in cross if r["n"] > 0]
+        cross_html = (
+            '<div class="crossexp">'
+            "<h3>Cross-seed-dir continuation — different task family</h3>"
+            '<p class="vsub">A separate experiment: here the new task is from a <b>different '
+            "seed family</b> than the prefix (the target keeps the prefix's system prompt), so "
+            "it's a different kind of setup than the same-family runs above. Kept apart rather "
+            "than pooled — read as suggestive.</p>"
+            + _stack(fig_continuation_rate(crows)))
+        cross_html += "</div>"
     return (
         "<h2>Reward hacking after a prior task</h2>"
-        '<p class="vsub">The same new task is handed to each target three ways: with <b>no '
+        '<p class="vsub">The same new task is handed to each target four ways: with <b>no '
         'prior context</b> (the baseline), after a <b>clean prefix</b> (a prior task it did '
-        'honestly), or after a <b>hack prefix</b> (a prior task it reward-hacked). '
-        f'reward_hacking is scored on the new task only.{dead_note}</p>'
+        'honestly), after a <b>corrected-hack prefix</b>, or after a <b>full-hack prefix</b> (a '
+        'prior task it reward-hacked). '
+        f'reward_hacking is scored on the new task only.{dead_note}{bo_note}</p>'
         + _stack(*figs)
+        + cross_html
     )
 
 
@@ -637,10 +1195,238 @@ def _old_hallucination_section(old_halluc: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Cost — what each audit costs and where the money goes (auditor / target / judge)
+# --------------------------------------------------------------------------- #
+ROLE_ORDER = ["auditor", "target", "judge"]
+ROLE_LABEL = {"auditor": "Auditor", "target": "Target", "judge": "Judge"}
+# same colorblind-safe trio the rest of the page uses (blue / orange / green)
+ROLE_COLOR = {"auditor": "#4C72B0", "target": "#DD8452", "judge": "#55A868"}
+
+
+def _usd(x: float) -> str:
+    if x >= 100:
+        return f"${x:,.0f}"
+    if x >= 1:
+        return f"${x:,.2f}"
+    if x >= 0.01:
+        return f"${x:.3f}"
+    if x > 0:
+        return f"${x:.4f}"
+    return "$0"
+
+
+def _role_tick(role: str, models: list) -> str:
+    """x-tick label for a role bar: 'Auditor\\nDeepSeek V4 Pro' when the role used one/two
+    models, 'Target\\n(5 models)' when it spans many (targets vary; auditor/judge don't)."""
+    if not models:
+        return ROLE_LABEL[role]
+    names = ", ".join(models) if len(models) <= 2 else f"({len(models)} models)"
+    return f"{ROLE_LABEL[role]}\n{names}"
+
+
+def fig_cost_by_role(cost: dict) -> str:
+    """Total sweep spend split into auditor / target / judge (the budget split). Each bar
+    annotated with $ and % of total; `~` when any component is a price×token estimate."""
+    by_role = cost["by_role"]
+    total = sum(by_role.values())
+    if total <= 0:
+        return _empty_fig("no cost data", (5.0, 4.0))
+    tilde = "" if cost["exact"] else "~"
+    roles = [r for r in ROLE_ORDER if by_role.get(r, 0) > 0]
+    fig, ax = plt.subplots(figsize=(5.2, 4.2))
+    xs = np.arange(len(roles))
+    vals = [by_role[r] for r in roles]
+    ax.bar(xs, vals, width=0.6, color=[ROLE_COLOR[r] for r in roles])
+    for x, r in zip(xs, roles):
+        v = by_role[r]
+        ax.annotate(f"{tilde}{_usd(v)}\n{100 * v / total:.0f}%", (x, v),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=10, color="#333", fontweight="bold")
+    ax.set_xticks(xs, [_role_tick(r, cost["role_models"].get(r, [])) for r in roles], fontsize=9)
+    ax.set_ylabel("Total spend ($)")
+    ax.set_ylim(0, max(vals) * 1.20)
+    ax.set_title(f"Where the budget goes — {tilde}{_usd(total)} total")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _fig_cost_stacked(rows: list, title: str, tilde: str) -> str:
+    """Mean cost of one run per group (target model or auditor), stacked by role
+    (auditor/target/judge) so you see both the per-run cost and where that money goes. Bars
+    annotated with the mean total; groups richest-first (as ordered by the caller)."""
+    if not rows:
+        return _empty_fig("no cost data")
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.25 * len(rows) + 1.0), 4.4))
+    xs = np.arange(len(rows))
+    bottoms = np.zeros(len(rows))
+    for r in ROLE_ORDER:
+        vals = np.array([row["roles"].get(r, 0.0) for row in rows])
+        ax.bar(xs, vals, bottom=bottoms, width=0.66, color=ROLE_COLOR[r],
+               label=ROLE_LABEL[r], edgecolor="white", lw=0.4)
+        bottoms += vals
+    for x, row in zip(xs, rows):
+        ax.annotate(f"{tilde}{_usd(row['total_mean'])}", (x, row["total_mean"]),
+                    textcoords="offset points", xytext=(0, 3), ha="center",
+                    fontsize=8.5, color="#333")
+    ax.set_xticks(xs, [f"{row['model']}\n(n={row['n']})" for row in rows],
+                  rotation=20, ha="right", fontsize=8.5)
+    ax.set_ylabel("Mean cost per run ($)")
+    ax.set_ylim(0, max(row["total_mean"] for row in rows) * 1.16)
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=9, loc="upper right")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_cost_by_target(cost: dict) -> str:
+    return _fig_cost_stacked(cost["by_target"], "Cost per run by target model",
+                             "" if cost["exact"] else "~")
+
+
+def fig_cost_by_auditor(cost: dict) -> str:
+    return _fig_cost_stacked(cost.get("by_auditor", []), "Cost per run by auditor",
+                             "" if cost["exact"] else "~")
+
+
+def fig_cost_distribution(cost: dict) -> str:
+    """Box + jittered strip of the TOTAL cost of each individual audit, grouped by target
+    model — shows the spread (a few long audits cost far more than the median)."""
+    groups: dict[str, list] = {}
+    for model, tot in cost["per_traj"]:
+        groups.setdefault(model, []).append(tot)
+    # order by median cost desc, matching the by-target bar's intent
+    order = sorted(groups, key=lambda m: -np.median(groups[m]))
+    if not order:
+        return _empty_fig("no cost data")
+    tilde = "" if cost["exact"] else "~"
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.25 * len(order) + 1.0), 4.2))
+    data = [groups[m] for m in order]
+    pos = np.arange(len(order))
+    ax.boxplot(data, positions=pos, widths=0.5, showfliers=False,
+               medianprops=dict(color="#222", lw=1.6), boxprops=dict(color="#888"),
+               whiskerprops=dict(color="#888"), capprops=dict(color="#888"))
+    for i, m in enumerate(order):
+        d = groups[m]
+        jx = i + rng.uniform(-0.13, 0.13, size=len(d))
+        ax.scatter(jx, d, s=26, color=TREAT_C, edgecolor="white", lw=0.5, zorder=3)
+    ax.set_xticks(pos, [f"{m}\n(n={len(groups[m])})" for m in order],
+                  rotation=20, ha="right", fontsize=8.5)
+    ax.set_ylabel("Cost per audit ($)")
+    ax.set_ylim(0, max(max(d) for d in data) * 1.12)
+    ax.set_title(f"Per-audit cost spread{' (~estimate)' if tilde else ''}")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+# hack-turn annotation ("second judge") — a distinct violet so it reads as its own thing,
+# not one of the auditor/target/judge roles above.
+ANNOT_COLOR = "#8172B3"
+
+
+def fig_cost_annotation(ann: dict) -> str:
+    """Mean cost of the hack-turn annotation step per annotated audit, grouped by the target
+    model of that audit (longer/heavier hack transcripts cost more to annotate). Title carries
+    the total annotation spend. Falls back to a labelled placeholder when no annotated audit in
+    this sweep has captured usage yet (annotations predating cost tracking)."""
+    rows = ann.get("by_target") or []
+    if not rows:
+        miss = ann.get("n_missing_usage", 0)
+        return _empty_fig(
+            f"no captured annotation cost yet\n({miss} annotated audit(s) predate cost tracking)"
+            if miss else "no hack-turn annotations", (5.2, 4.0))
+    tilde = "" if ann.get("exact") else "~"
+    fig, ax = plt.subplots(figsize=(max(5.2, 1.25 * len(rows) + 1.0), 4.2))
+    xs = np.arange(len(rows))
+    vals = [r["mean"] for r in rows]
+    ax.bar(xs, vals, width=0.6, color=ANNOT_COLOR, edgecolor="white", lw=0.4)
+    for x, r in zip(xs, rows):
+        ax.annotate(f"{tilde}{_usd(r['mean'])}", (x, r["mean"]),
+                    textcoords="offset points", xytext=(0, 3), ha="center",
+                    fontsize=8.5, color="#333")
+    ax.set_xticks(xs, [f"{r['model']}\n(n={r['n']})" for r in rows],
+                  rotation=20, ha="right", fontsize=8.5)
+    ax.set_ylabel("Mean annotation cost per audit ($)")
+    ax.set_ylim(0, max(vals) * 1.18)
+    ax.set_title(f"Hack-turn annotation cost — {tilde}{_usd(ann['total'])} total")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _annotation_cost_html(ann: dict | None) -> str:
+    """Sub-block under Cost for the hack-turn annotation step. Empty when this sweep has no
+    annotations at all. Surfaces the going-forward-only capture gap (audits annotated before
+    usage was recorded) rather than hiding it, per the lossy-processing rule."""
+    if not ann:
+        return ""
+    tilde = "" if ann.get("exact") else "~"
+    n_use, n_miss = ann["n_with_usage"], ann["n_missing_usage"]
+    models = ", ".join(ann.get("models") or []) or "the annotation model"
+    if n_use:
+        lead = (f'{tilde}<b>{_usd(ann["total"])}</b> to annotate hack turns across '
+                f'<b>{n_use}</b> audit(s) (mean {tilde}{_usd(ann["mean_per"])} each), '
+                f'via {esc_loc(models)}. This is a separate call per reward-hacking audit — '
+                f'not part of the auditor/target/judge totals above.')
+    else:
+        lead = ('Hack-turn annotation cost is captured going forward; none of this sweep’s '
+                'annotated audits recorded it yet.')
+    gap = (f' <b>{n_miss}</b> annotated audit(s) predate cost tracking and carry no cost '
+           f'(re-annotate with <code>--force</code> to fill them in).' if n_miss else "")
+    return (
+        '<h3 style="margin:26px 0 2px;font-size:15px;">Hack-turn annotation</h3>'
+        f'<p class="vsub">{lead}{gap}</p>'
+        + _stack(fig_cost_annotation(ann))
+    )
+
+
+def _cost_section(cost: dict, show_by_auditor: bool = False) -> str:
+    """The 'Cost' block: budget split by role + mean cost per audit by target + the per-audit
+    spread. Over the sweep's live audits. Empty string when there's no cost data.
+
+    `show_by_auditor` adds the 'Cost per run by auditor' figure; it's only meaningful on a
+    sweep that actually varies the auditor (sweep 4), so callers keep it off elsewhere."""
+    if not cost:
+        return ""
+    tilde = "" if cost["exact"] else "~"
+    unpriced = (" A few calls used a model with no price and were dropped from the totals."
+                if cost.get("any_unpriced") else "")
+    exact_note = ("" if cost["exact"] else
+                  " <b>~</b> marks a price&times;token estimate; runs bill exactly once routed "
+                  "through OpenRouter.")
+    figs = [fig_cost_by_role(cost), fig_cost_by_target(cost)]
+    if show_by_auditor:
+        figs.append(fig_cost_by_auditor(cost))
+    figs.append(fig_cost_distribution(cost))
+    return (
+        "<h2>Cost</h2>"
+        f'<p class="vsub">{tilde}<b>{_usd(cost["total"])}</b> across <b>{cost["n"]}</b> audits '
+        f'(mean {tilde}{_usd(cost["mean_per"])} per audit). Cost is attributed to the '
+        f'<b>auditor</b>, <b>target</b>, and <b>judge</b> roles.{exact_note}{unpriced}</p>'
+        + _stack(*figs)
+        + _annotation_cost_html(cost.get("annotation"))
+    )
+
+
+# --------------------------------------------------------------------------- #
 # page
 # --------------------------------------------------------------------------- #
 VISUALS_CSS = """
 .vwrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+/* sub-sub-tabs: one level below the trajectories/continuations/visuals subnav. Underlined
+   text tabs (not pills), same blue accent, so they read as a nested nav; JS toggles panels. */
+.vsubtabs { margin: 2px 0 20px; display: flex; gap: 18px; flex-wrap: wrap;
+            border-bottom: 1px solid #dcdfe6; }
+.vsubtab { background: none; border: none; cursor: pointer; font-family: inherit;
+           padding: 3px 1px 8px; font-size: 12.5px; font-weight: 600; color: #6b7280;
+           border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.vsubtab.active { color: #1558d6; border-bottom-color: #1558d6; }
+.vsubtab:hover { color: #1558d6; }
+.vpanel { display: none; }
+.vpanel.active { display: block; }
 .vsub { color: #555; font-size: 13.5px; line-height: 1.5; margin: 2px 0 22px; max-width: 760px; }
 .vsub b { color: #1a1a2e; }
 .figgrid { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
@@ -654,12 +1440,24 @@ figure.fig figcaption { font-size: 11.5px; color: #6a7180; line-height: 1.45; ma
             padding: 6px 20px 22px; margin: 26px 0; }
 .locblock .vsec { font-size: 19px; font-weight: 700; margin: 16px 0 2px; color: #1a1a2e; }
 .locblock .vmeta { font-size: 12.5px; color: #6a7180; margin: 0 0 14px; }
+/* cross-seed-dir continuation: a different KIND of experiment, boxed + warm-tinted so it
+   never reads as part of the same-family headline above it */
+.crossexp { border: 1px solid #e0cfa6; border-radius: 12px; background: #fbf7ec;
+            padding: 6px 20px 20px; margin: 28px 0 8px; }
+.crossexp h3 { color: #7a5c12; margin: 16px 0 2px; }
 .vsec { font-size: 16px; margin: 30px 0 8px; color: #1a1a2e; }
 /* outer box marking the data source of everything inside (all original audits, no continuations) */
 .srcbox { border: 1px solid #c7c1e0; border-radius: 12px; background: #faf9ff;
           padding: 4px 22px 22px; margin: 22px 0; }
 .srcbox .srclabel { font-size: 13px; font-weight: 700; letter-spacing: .04em;
           text-transform: uppercase; color: #5a4fa3; margin: 16px 0 2px; }
+/* reward-hack failure-mode tally table (parsed from RH_FAILURE_MODES) */
+.fmtbl { border-collapse: collapse; margin: 8px 0 4px; font-size: 13px; }
+.fmtbl td { padding: 3px 12px 3px 0; vertical-align: middle; white-space: nowrap; }
+.fmtbl .m { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #3730a3; }
+.fmwrap { display: inline-block; width: 220px; background: #eef0f6; border-radius: 2px; }
+.fmbar { display: inline-block; height: 12px; background: #6366f1; border-radius: 2px;
+         vertical-align: middle; min-width: 2px; }
 """
 
 
@@ -730,6 +1528,99 @@ def _user_turns_section(user_turns: dict) -> str:
     )
 
 
+def fig_deadline_timeline(data: dict) -> str:
+    """One row per trajectory: where the auditor sent the two deadline notices (Heads-up circle,
+    Final-notice diamond) along the target's turns, the run's end (square = auditor ended it,
+    X = hit the cap), row-colored by incompleteness. Reference lines mark the intended notice
+    turns and the goal/cap, so you can read coverage, timing, runway, and outcome at a glance."""
+    from matplotlib.lines import Line2D
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    rows = data["rows"]
+    if not rows:
+        return _empty_fig("no deadline notices", (6, 3))
+    cap, off = data["cap"], data.get("offset", 5)
+    hu_ref, fn_ref, goal = cap - 25 - off, cap - 15 - off, cap - 10
+    norm = Normalize(1, 8)
+    cmap = plt.cm.RdYlGn_r
+    fig, ax = plt.subplots(figsize=(10.5, max(3.2, 0.40 * len(rows) + 1.6)))
+    prev_tgt = None
+    for y, r in enumerate(reversed(rows)):   # first row at top
+        col = cmap(norm(r["inc"]))
+        ax.plot([0, r["end"]], [y, y], color="#cfcfcf", lw=2, zorder=1)
+        if r["ended_clean"]:
+            ax.scatter([r["end"]], [y], marker="s", s=52, facecolor=col,
+                       edgecolor="#333", lw=.7, zorder=3)
+        else:
+            ax.scatter([r["end"]], [y], marker="X", s=92, facecolor="#d62728",
+                       edgecolor="#333", lw=.7, zorder=3)
+        if r["hu"] is not None:
+            ax.scatter([r["hu"]], [y], marker="o", s=64, facecolor="#1f77b4",
+                       edgecolor="white", lw=.8, zorder=4)
+        if r["fn"] is not None:
+            ax.scatter([r["fn"]], [y], marker="D", s=48, facecolor="#ff7f0e",
+                       edgecolor="white", lw=.8, zorder=4)
+        # flag a MISSING notice: red when the run hit the cap (a notice would have helped),
+        # muted when it ended cleanly (a skipped final notice is expected there).
+        miss = ([] if r["hu"] is not None else ["no HU"]) + \
+               ([] if r["fn"] is not None else ["no FN"])
+        if miss:
+            ax.text(cap + 1.5, y, ", ".join(miss), va="center", fontsize=6.5,
+                    color=("#b00" if not r["ended_clean"] else "#aaa"))
+    labels = [f"#{r['id']} {r['target'].split('-2026')[0]}" for r in rows]
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(labels[::-1], fontsize=7.5)
+    ax.axvline(hu_ref, ls=":", color="#1f77b4", lw=1.2)
+    ax.text(hu_ref, len(rows) - .3, f"intended\nHU (~{hu_ref})", color="#1f77b4",
+            fontsize=6.5, ha="center", va="bottom")
+    ax.axvline(fn_ref, ls=":", color="#ff7f0e", lw=1.2)
+    ax.text(fn_ref, len(rows) - .3, f"intended\nFN (~{fn_ref})", color="#ff7f0e",
+            fontsize=6.5, ha="center", va="bottom")
+    ax.axvline(goal, ls="--", color="#555", lw=1.1)
+    ax.text(goal, -1.5, f"goal end ({goal})", color="#555", fontsize=6.5, ha="center")
+    ax.axvline(cap, ls="-", color="#d62728", lw=1.4)
+    ax.text(cap, -1.5, f"cap ({cap})", color="#d62728", fontsize=6.5, ha="center")
+    ax.set_xlim(0, cap + 10)
+    ax.set_ylim(-2.2, len(rows) + .5)
+    ax.set_xlabel("target assistant turn")
+    leg = [Line2D([], [], marker="o", color="w", markerfacecolor="#1f77b4", markersize=8, label="Heads-up sent"),
+           Line2D([], [], marker="D", color="w", markerfacecolor="#ff7f0e", markersize=7, label="Final notice sent"),
+           Line2D([], [], marker="s", color="w", markerfacecolor="#8c8", markeredgecolor="#333", markersize=8, label="ended cleanly"),
+           Line2D([], [], marker="X", color="w", markerfacecolor="#d62728", markersize=9, label="hit turn cap")]
+    ax.legend(handles=leg, loc="lower right", fontsize=6.5, framealpha=.95)
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax, fraction=.025, pad=.02)
+    cb.set_label("incompleteness (1=finished → cut off)", fontsize=7.5)
+    return _fig_to_svg(fig)
+
+
+def _deadline_section(data: dict) -> str:
+    """The 'Deadline notices' block: the per-trajectory timing figure plus a one-line coverage
+    summary. Shows whether the auditor reliably sends both notices, on time, with enough runway
+    for the target to finish before the cap -- the levers you'd touch in core.md."""
+    if not data or not data.get("rows"):
+        return ""
+    n, hu, fn = data["n"], data["hu_sent"], data["fn_sent"]
+    def med(key):
+        vals = sorted(r[key] for r in data["rows"] if r[key] is not None)
+        return vals[len(vals) // 2] if vals else None
+    mixed = " (caps differ across runs — reference lines approximate)" if data.get("mixed_caps") else ""
+    cap = data["cap"]
+    cov = (f"Heads-up sent in {hu}/{n} runs (median turn {med('hu')}), "
+           f"final notice in {fn}/{n} (median turn {med('fn')}); "
+           f"cap {cap}, intended ~turn {cap-25-data['offset']} / ~{cap-15-data['offset']}, "
+           f"goal end by {cap-10}. Auditor's own turn counter runs ~{data['offset']} ahead of "
+           f"target turns{mixed}.")
+    return (
+        "<h2>Deadline notices</h2>"
+        f'<p class="vsub">{cov}</p>'
+        '<div class="figgrid">'
+        + _figure(fig_deadline_timeline(data))
+        + "</div>"
+    )
+
+
 def _location_section(loc: str, sub: list[dict]) -> str:
     """One per-location block, treated as a self-contained experiment: the three kept
     figures (overall re-hack rate, rate by model, turns-to-first-re-hack) computed over
@@ -765,9 +1656,15 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        old_halluc: dict | None = None,
                        mechanism: dict | None = None,
                        user_turns: dict | None = None,
+                       condition_exp: dict | None = None,
+                       reasoning_exp: dict | None = None,
+                       failure_modes: dict | None = None,
+                       deadline: dict | None = None,
+                       cost: dict | None = None,
+                       cost_by_auditor: bool = False,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
-                       back_html: str = "") -> str:
+                       subnav_html: str = "") -> str:
     """Full HTML for ONE visuals page. Since 2026-07-02 there is no single global
     visuals.html: each sweep gets its own page, linked from that sweep's trajectories
     page, passing only the sections that belong to that sweep — every section renderer
@@ -776,7 +1673,9 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
       1. Reward-hacking PROPENSITY (by model / prompt) over the set's audits. This is
          pre-rendered HTML passed in as `propensity_html` (built by make_viewer, where
          the audit-classification logic lives); pass "" to omit it.
-      2. incompleteness / user_turns / old_halluc: audit-sourced figure sections.
+      2. incompleteness / user_turns / old_halluc / condition_exp: audit-sourced figure
+         sections (condition_exp — the allow-vs-correct comparison — renders FIRST in
+         the audit box when the sweep spans >1 seed condition).
       3. continuations / mechanism: continuation-experiment sections.
       4. Reward-hacking under ROLLBACK: the matplotlib figures built here from `records`
          (the per-continuation dicts described in the module docstring, each carrying a
@@ -785,10 +1684,10 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
          vs treatment within each. Omitted entirely when there are no records.
 
     `heading` is the page <h1>/<title> (name the sweep); `audit_label` names the
-    audit-source box; `back_html` is a pre-rendered back button (a head_btn) shown beside
-    the title, linking to the sweep's trajectories page. `css` is the site CSS (it
-    already includes the propensity bar + pagehead styles); `topnav` is the shared nav
-    bar html."""
+    audit-source box; `subnav_html` is the pre-rendered subpage nav row (trajectories /
+    continuations / visuals) shown between the top nav and the title. `css` is the site
+    CSS (it already includes the propensity bar + pagehead styles); `topnav` is the shared
+    sweep-tab nav bar html."""
     # records may predate the location field (older callers) -> default to "before".
     for r in records:
         r.setdefault("location", "before")
@@ -819,57 +1718,64 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
 {sections}
 """
     cont_inner = _continuation_section(continuations) if continuations else ""
+    cont_timing = _continuation_timing_section(continuations) if continuations else ""
     incomp_html = _incompleteness_section(incompleteness) if incompleteness else ""
     ut_html = _user_turns_section(user_turns) if user_turns else ""
-    # Each data source gets its own labeled box, so it's always clear what a figure was built
-    # from: the continuation runs (the conditioning experiment) and the original audits
-    # (propensity + incompleteness) are distinct sources and never pooled.
-    cont_html = ""
-    if cont_inner:
-        cont_html = (
-            '<div class="srcbox">'
-            '<div class="srclabel">Continuation runs</div>'
-            f'{cont_inner}'
-            '</div>'
-        )
-    audit_html = ""
-    if propensity_html or incomp_html or ut_html:
-        audit_html = (
-            '<div class="srcbox">'
-            f'<div class="srclabel">{esc_loc(audit_label)}</div>'
-            f'{propensity_html}{ut_html}{incomp_html}'
-            '</div>'
-        )
+    cond_html = _condition_section(condition_exp) if condition_exp else ""
+    reasoning_html = _reasoning_section(reasoning_exp) if reasoning_exp else ""
+    fmodes_html = _failure_modes_section(failure_modes) if failure_modes else ""
+    deadline_html = _deadline_section(deadline) if deadline else ""
+    cost_html = _cost_section(cost, show_by_auditor=cost_by_auditor) if cost else ""
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
-    old_html = ""
-    if old_inner:
-        old_html = (
-            '<div class="srcbox">'
-            '<div class="srclabel">Weaker models</div>'
-            f'{old_inner}'
-            '</div>'
-        )
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
-    mech_html = ""
-    if mech_inner:
-        mech_html = (
-            '<div class="srcbox">'
-            '<div class="srclabel">Continuation runs · re-hack mechanism</div>'
-            f'{mech_inner}'
-            '</div>'
-        )
+    # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
+    # subnav): click a tab, see only that group's figures, instead of one long scroll. Each
+    # tab bundles the sections built above; Cost is its own tab (pulled out of the audit box).
+    # Only non-empty groups become tabs; the first (Original audits) is the default.
+    audits_panel = f"{reasoning_html}{cond_html}{propensity_html}{fmodes_html}{ut_html}{incomp_html}"
+    cont_panel = f"{cont_inner}{cont_timing}{mech_inner}"
+    tab_specs = [
+        ("audits", "Original audits", audits_panel),
+        ("deadline", "Deadline notices", deadline_html),
+        ("cost", "Cost", cost_html),
+        ("continuations", "Continuations", cont_panel),
+        ("weaker", "Weaker models", old_inner),
+        ("rollback", "Rollback re-hacking", rollback_html),
+    ]
+    tabs = [(k, lbl, h) for k, lbl, h in tab_specs if h and h.strip()]
     body = f"""
 {topnav}
-<div class="pagehead"><h1>{esc_loc(heading)}</h1>{back_html}</div>
-{mech_html}
-{cont_html}
-{audit_html}
-{old_html}
-{rollback_html}
+{subnav_html}
+<div class="pagehead"><h1>{esc_loc(heading)}</h1></div>
+{_tab_layout(tabs)}
 """
     return (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc_loc(heading)}</title>"
             f"<style>{css}{VISUALS_CSS}</style></head><body><div class='wrap vwrap'>{body}</div>"
             f"</body></html>")
+
+
+def _tab_layout(tabs: list[tuple]) -> str:
+    """Client-side sub-sub-tab layout: `tabs` = [(key, label, html)], already filtered to
+    non-empty panels, in display order. The first tab shows by default; clicking a tab shows
+    only its panel. Underlined-text tabs matching the site subnav, one level nested."""
+    if not tabs:
+        return ""
+    bar = "".join(
+        f'<button class="vsubtab{" active" if i == 0 else ""}" data-vtab="{k}">{esc_loc(lbl)}</button>'
+        for i, (k, lbl, _) in enumerate(tabs))
+    panels = "".join(
+        f'<div class="vpanel{" active" if i == 0 else ""}" id="vpanel-{k}">{h}</div>'
+        for i, (k, _, h) in enumerate(tabs))
+    script = (
+        "<script>(function(){"
+        "var ts=document.querySelectorAll('.vsubtab'),ps=document.querySelectorAll('.vpanel');"
+        "ts.forEach(function(t){t.addEventListener('click',function(){"
+        "ts.forEach(function(x){x.classList.remove('active')});"
+        "ps.forEach(function(p){p.classList.remove('active')});"
+        "t.classList.add('active');"
+        "var p=document.getElementById('vpanel-'+t.getAttribute('data-vtab'));"
+        "if(p)p.classList.add('active');});});})();</script>")
+    return f'<div class="vsubtabs">{bar}</div>{panels}{script}'
 
 
 def esc_loc(s: str) -> str:

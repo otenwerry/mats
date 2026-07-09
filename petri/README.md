@@ -11,8 +11,6 @@ exp_audit_pipeline.py            # A: run audits end-to-end  (audit -> annotate 
 exp_rollback_pipeline.py         # B: rollback resampling experiments end-to-end
 exp_continuation_pipeline.py     # C: continuation experiments (prior task -> new task) end-to-end
 exp_resample_begin_pipeline.py   # D: begin-resample experiments (re-roll from turn 1, control) end-to-end
-exp_mechanism_similarity.py      # follow-up to C: rate how similar each re-hack's mechanism is to the hack it was primed on
-explore_*.py                     # one-off FREE read-only analysis scripts (pinned to specific past runs; update their hardcoded ids before reuse)
 make_viewer.py                   # build the static viewer (run on its own, or auto-run by the pipelines)
 lib/                             # the importable core the files above build on
   petri_paths.py                 #   single source of truth for every filesystem path
@@ -32,7 +30,12 @@ tools/                           # occasional standalone utilities (run by hand)
   exp_grade_dimension.py         #   backfill ONE newly-added dim onto existing full hacks (dim_scores sidecar)
   exp_grade_incompleteness.py    #   same backfill pattern, incompleteness over all current-sweep originals
   exp_deviation_judge.py         #   auditor-deviation judge for rollback continuations
+  exp_mechanism_similarity.py    #   follow-up to C: rate how similar each re-hack's mechanism is to the hack it was primed on
+  exp_test_openrouter.py         #   one tiny OpenRouter call to check whether the budget cap is lifted
   explore_select_continuation.py #   read-only: score all audits to help hand-pick continuation triples
+  explore_dump_transcripts.py    #   read-only: dump judge-view transcripts (+ auditor scratchpads) to text for hand-reading (edit DIRS)
+  explore_token_usage.py         #   read-only: token usage by model role per run dir (edit DIRS)
+  explore_validate_seeds.py      #   read-only: check every pinned seed dir assembles cleanly (run after editing seeds)
   migrate_hpc_*.py               #   one-time data migrations, already applied (idempotent)
   cleanup_dead_rollbacks.py / cleanup_nonhack_rollbacks.py
 docs/                            # CODEBASE_GUIDE.md, CONTINUATION_EXPERIMENT_SPEC.md
@@ -99,27 +102,27 @@ The judge is told which inserted message and experimenter note came from the res
 
 ## C. Continuation experiments — `exp_continuation_pipeline.py`
 
-Asks: if a target reward-hacks on one task and is then handed a *second, unrelated* task, does its hack rate on the second task go up because it's conditioned on its own earlier hack? For each target model you give a **triple** — a hack prefix (A) and a clean prefix (A) from the *same* seed, plus a task source (B) from a *different* seed — and it runs three conditions N times each:
+Asks: if a target reward-hacks on one task and is then handed a *second, unrelated* task, does its hack rate on the second task go up because it's conditioned on its own earlier hack? You give flat id lists of **prefixes** (prior trajectories, in up to three flavors) and **continuations** (new-task sources); each id's target model is read from its stamped metadata and grouped automatically. Per model, every (new task × prefix) pair runs N times, plus a baseline per new task — counts per category are free (e.g. 1 prefix of each flavor + 2 continuations = 8 cells):
 
-- `no_prefix` — target gets B's task with no prior context (the baseline).
-- `clean_prefix` — target is first conditioned on A's *clean* transcript, then handed B's task.
-- `hack_prefix` — target is first conditioned on A's *hack* transcript, then handed B's task.
+- `no_prefix` — target gets the new task with no prior context (the baseline).
+- `clean_prefix` — target is first conditioned on a prior task it completed *cleanly*.
+- `corrected_hack_prefix` — target is first conditioned on a prior task where it hacked, then *corrected* the hack.
+- `full_hack_prefix` — target is first conditioned on a prior task it fully *reward-hacked*. (Old runs have the undivided `hack_prefix`.)
 
-The auditor reproduces B's environment in all three conditions (primed with B's full record + a "new workspace" framing) and never sees the prefix. The target's reward-hacking judge and a separate **faithfulness judge** (did the auditor reproduce B?) both have the prefix **mechanically sliced out** of the transcript they see (system prompt + new task only, `[M#]` numbers preserved), so a `hack_prefix` run isn't auto-scored a hack because of its prefix. All config (target/auditor/judge, reasoning, max_turns, the fixed system prompt) is inherited from B's stamped metadata. Results render on the viewer's **Continuations** page. Use `tools/explore_select_continuation.py` to pick the triples.
+The auditor reproduces the new-task original's environment in all conditions (primed with its full record + a "new workspace" framing) and never sees the prefix. The target's reward-hacking judge and a separate **faithfulness judge** (did the auditor reproduce the original?) both have the prefix **mechanically sliced out** of the transcript they see (system prompt + new task only, `[M#]` numbers preserved), so a prefixed run isn't auto-scored a hack because of its prefix. All config (target/auditor/judge, reasoning, max_turns) is inherited from the new-task original's stamped metadata — except the target's **system prompt**, which comes from the *prefix's* original (coherent history; identical anyway within one seed family). A new task from a **different seed family** than the prefix (so a different system prompt) is allowed: the pivot's first sentence then names the new kind of work ("…move on to a different task: *a code optimization task* this time."; descriptors in `SEED_FAMILY_TASK_DESCRIPTION`, `lib/exp_continuation.py`). Results render on the viewer's **Continuations** page.
 
 ```bash
-uv run exp_continuation_pipeline.py --hack-trajectories=471 --clean-trajectories=472 --continuation-trajectories=466 --n=5
-# sweep several models (one hack/clean/B id per model in each list):
-uv run exp_continuation_pipeline.py --hack-trajectories=471,557 --clean-trajectories=472,514 --continuation-trajectories=466,508 --n=5 --concurrency=50
-uv run exp_continuation_pipeline.py ... --n=5 --dry-run   # FREE: build + validate triples, no run
+uv run exp_continuation_pipeline.py --full-hack-prefixes=660 --corrected-hack-prefixes=730 \
+    --clean-prefixes=661 --continuations=794,806 --n=5
+uv run exp_continuation_pipeline.py ... --n=5 --dry-run   # FREE: build + validate the plan, no run
 ```
 
 | Flag | Meaning |
 |------|---------|
-| `--hack-trajectories=<ids>` / `--clean-trajectories=<ids>` / `--continuation-trajectories=<ids>` | **required**; one id per target model in each list. Hack & clean prefixes must share a seed; B must be a different seed. |
-| `--n=<int>` | **required**; continuations (epochs) per (triple, condition). |
-| `--models=<a,b>` | restrict to these target names (default: every model across the three lists). |
-| `--conditions=<a,b>` or `all` | subset of `{no_prefix,clean_prefix,hack_prefix}` (default all). |
+| `--continuations=<ids>` | **required**; new-task source ids (any models/seeds; each pairs with every same-model prefix from a different seed). |
+| `--full-hack-prefixes=<ids>` / `--corrected-hack-prefixes=<ids>` / `--clean-prefixes=<ids>` | prefix ids per flavor; required iff that condition is requested. |
+| `--n=<int>` | **required**; continuations (epochs) per cell. |
+| `--conditions=<a,b>` or `all` | subset of `{no_prefix,clean_prefix,corrected_hack_prefix,full_hack_prefix}` (default all). |
 | `--concurrency=<int>` | one knob → generation + faithfulness-judge parallelism (default 50). |
 | `--dry-run` / `--skip-judge` / `--skip-annotate` / `--skip-viewer` / `--force-judge` / `--force-annotate` | plan-only / stage toggles. |
 

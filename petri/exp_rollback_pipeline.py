@@ -398,6 +398,10 @@ def main() -> None:
               f"(ONE pool, concurrency={cfg['concurrency']}, max_tasks={max_tasks})  -> {work_dir.name}")
         print("=" * 76)
         try:
+            import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
+            import model_window      # correct context windows so the auditor compacts at the real window (see lib/model_window.py)
+            openrouter_cost.install()
+            model_window.install()
             success, logs = eval_set(
                 all_tasks, epochs=cfg["N"], max_tasks=max_tasks,
                 max_samples=cfg["concurrency"], max_connections=cfg["concurrency"],
