@@ -667,8 +667,13 @@ CSS = """
  .flag.info{background:#eef2f6;color:#475569;border:1px solid #cbd5e1}
  .flag.warn{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
  .flag.error{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
- .cutmarklink{position:fixed;right:18px;bottom:126px;background:#ea580c;color:#fff;border:none;border-radius:8px;padding:.4rem .7rem;font-size:.82rem;font-weight:700;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.22);z-index:50}
- .cutmarklink:hover{background:#c2410c}
+ .compaction{border:1px solid #d6c3f0;background:#faf7ff;border-radius:8px;margin:.6rem 0;overflow:hidden}
+ .compaction>summary{cursor:pointer;padding:.5rem .7rem;font-size:.86rem;font-weight:700;color:#5b46a8}
+ .compaction>summary:hover{background:#f3eefc}
+ .compaction pre.content{border-top:1px solid #e7ddf7;max-height:520px}
+ .compbadge{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;margin-left:8px;vertical-align:middle}
+ .compbadge.verbatim{background:#e6f4ea;color:#1a7d33;border:1px solid #b7e1c3}
+ .compbadge.para{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
  .qablock{border:1px solid #cdd9f0;border-radius:10px;margin:1.6rem 0 .6rem;overflow:hidden}
  .qablock .qahdr{background:#1558d6;color:#fff;font-weight:700;padding:.5rem .9rem;font-size:.95rem}
  .qablock .qq{background:#f4f7ff;padding:.7rem .9rem;white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,monospace;color:#33406b;border-bottom:1px solid #e0e6f4}
@@ -972,13 +977,7 @@ CONTINUATION_HTML = ("""
  <a class="headbtn" href="/run/{{ p.run_id }}">full trajectory &rarr;</a>
 </div>
 <div class="contbanner">
- &#9851; <b>Context-reconstruction probe.</b> The model was resumed from a faithful
- reconstruction of this trajectory's context, cut immediately before
- <b>event {{ p.cut_event }}</b>{% if p.snapped %} (snapped down from requested ev{{ p.requested_turn }}){% endif %},
- then asked to describe what it remembers. Everything above the
- <b style="color:#9a3412">cut divider</b> in the transcript below is what the model saw;
- everything after it is the original continuation, which the probe never saw.
- {% if p.cost is not none %} Billed cost of this probe: <b>${{ '%.4f'|format(p.cost) }}</b>.{% endif %}
+ &#9851; Probe resumed from this trajectory's context cut before <b>event {{ p.cut_event }}</b>{% if p.snapped %} (snapped from {{ p.requested_turn }}){% endif %} — the turns below are that context; the probe question &amp; answer follow.{% if p.cost is not none %} · <b>${{ '%.4f'|format(p.cost) }}</b>{% endif %}
  {% if p.flags %}<div class="flagline">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span>{% endfor %}</div>{% endif %}
 </div>
 """ + _TRAJ_CORE_HTML + """
@@ -988,7 +987,6 @@ CONTINUATION_HTML = ("""
  <div class="qa">{{ p.answer or '(no answer recorded — see probe_out.jsonl)' }}</div>
 </div>
 <button class="totop" id="totop" title="back to top">&uarr;</button>
-{% if has_cut %}<button class="cutmarklink" onclick="var e=document.getElementById('cutmark');if(e)e.scrollIntoView({behavior:'smooth',block:'center'})">&#9986; jump to cut</button>{% endif %}
 <script>
 (function(){ var b=document.getElementById('totop');
  function upd(){ b.style.display=window.scrollY>400?'block':'none'; }
@@ -1405,12 +1403,13 @@ def index():
         has_report=(HIGHLIGHTS / "categories.json").exists())
 
 
-def _trajectory_view(run_id: str, cut_at=None, cut_label=""):
+def _trajectory_view(run_id: str, cut_at=None):
     """Every template variable for a trajectory page — shared by /run and the
-    continuation page so the latter is a faithful copy of the former.
-    `cut_at`/`cut_label` draw a probe-cut divider in the transcript. Assumes
-    run_id is in INDEX. Returns a kwargs dict (no prev/next ordering — that is
-    /run-specific and added by the caller)."""
+    continuation page. When `cut_at` is set (continuation), the transcript is
+    truncated to events[:cut_at] — the reconstructed context the probe was
+    resumed from, in order, with nothing after the cut. Assumes run_id is in
+    INDEX. Returns a kwargs dict (no prev/next ordering — that is /run-specific
+    and added by the caller)."""
     i = INDEX[run_id]
     r = RUNS[i]
     rec = load_record(run_id)
@@ -1448,6 +1447,8 @@ def _trajectory_view(run_id: str, cut_at=None, cut_label=""):
     # so trains-before-hack is verifiable by eye in the trace. Once a run has a
     # train_run_audit, failed launches get a ✗ badge and consume no number.
     events = rec.get("events", [])
+    if cut_at is not None:
+        events = events[:cut_at]   # continuation: show only the reconstructed prefix, in order
     tr_audit = hl.get("train_run_audit", {}) if hl else {}
     train_turns, k = {}, 0
     for i, ev in enumerate(events):
@@ -1527,7 +1528,7 @@ def _trajectory_view(run_id: str, cut_at=None, cut_label=""):
                 {"quote": "", "note": f"[first hack — {title}]", "kind": "cat_hack", "matched": False})
     body = rnd.render_events(events, r.get("trace_format", ""),
                              quotes, marked_turns, annotations, turn_kinds,
-                             train_turns, api_turns, cut_at=cut_at, cut_label=cut_label)
+                             train_turns, api_turns)
     ws = load_workspace(run_id)
     def _kind(t):
         v = turn_kinds.get(str(t))
@@ -2562,11 +2563,8 @@ def continuation(probe_id: str):
     probe = load_probe(PROBES_DIR / probe_id)
     if probe is None or probe["run_id"] not in INDEX:
         abort(404)
-    cut = probe["cut_event"]
-    cut_label = (f"probe cut — context was reconstructed up to here (event {cut}); "
-                 f"everything below is the original continuation the probe never saw")
-    view = _trajectory_view(probe["run_id"], cut_at=cut, cut_label=cut_label)
-    return render_template_string(CONTINUATION_HTML, p=probe, has_cut=cut is not None,
+    view = _trajectory_view(probe["run_id"], cut_at=probe["cut_event"])
+    return render_template_string(CONTINUATION_HTML, p=probe,
                                   subnav=_subnav("continuations"), **view)
 
 

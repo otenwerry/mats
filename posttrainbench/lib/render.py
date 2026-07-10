@@ -256,17 +256,36 @@ def _annotations_html(notes: list) -> str:
     return f'<div class="annos">{"".join(rows)}</div>' if rows else ""
 
 
+_COMPACT_PREAMBLE = "This session is being continued from a previous conversation"
+
+
+def _compaction_block(summary: str | None) -> str:
+    """Collapsed dropdown (closed by default) for a context compaction. `summary`
+    is the VERBATIM post-compaction summary the model saw (claude / claude_non_api
+    preserve it in the trace); None when a run compacted without a recorded
+    summary — labelled so the verbatim-vs-not distinction is never silent."""
+    if summary is not None:
+        badge = '<span class="compbadge verbatim">verbatim</span>'
+        body = f'<pre class="content">{html.escape(summary)}</pre>'
+    else:
+        badge = '<span class="compbadge para">summary not recorded</span>'
+        body = ('<pre class="content empty">(this run compacted here, but the '
+                'summary text was not preserved in the trace)</pre>')
+    return ('<details class="compaction"><summary>&#128476; context compaction '
+            '&mdash; the earlier conversation was summarized here ' + badge
+            + '</summary>' + body + '</details>')
+
+
 def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
                   annotations=None, turn_kinds=None, train_turns=None,
-                  api_turns=None, cut_at=None, cut_label="") -> str:
+                  api_turns=None) -> str:
     """`marked_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
     classifying each marked turn as 'hack' (direct hacking action, red) or
     'context' (notable but not a hack, neutral); unclassified turns default to
     'hack'. `annotations`: {turn: [{note,quote,kind}]} reviewer notes appended
-    below the relevant turn. `cut_at`: if given, draw a divider immediately
-    before this event index — everything above it was the context the probe
-    saw, everything below is the original continuation (used by the probe /
-    continuation page); the divider gets id="cutmark" for a jump button."""
+    below the relevant turn. A `compact_boundary` system event + the synthetic
+    summary user turn that follows it (+ its "compacting" status pings) are folded
+    into one collapsed compaction dropdown (see _compaction_block)."""
     hacks = set(marked_turns or ())
     anno = {int(k): v for k, v in (annotations or {}).items()}
     kinds = {}
@@ -274,10 +293,31 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
         if isinstance(v, str):
             v = {"kind": v}
         kinds[int(k)] = v
+    # fold each compaction (its `compact_boundary` event + the synthetic summary
+    # user turn right after it + its "compacting" status pings) into one collapsed
+    # dropdown; `comp_consumed` events are not rendered on their own.
+    comp_summary, comp_consumed = {}, set()
+    for n, ev in enumerate(events):
+        if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
+            summ = None
+            if n + 1 < len(events) and events[n + 1].get("type") == "user":
+                txt = "".join(b.get("text", "") for b in (events[n + 1].get("blocks") or [])
+                              if b.get("type") == "text")
+                if txt.strip().startswith(_COMPACT_PREAMBLE):
+                    summ = txt
+                    comp_consumed.add(n + 1)
+            comp_summary[n] = summ
+        elif (ev.get("type") == "system" and ev.get("subtype") == "status"
+              and (ev.get("raw") or {}).get("status") == "compacting"):
+            comp_consumed.add(n)
+
     out, last_session = [], None
     for n, ev in enumerate(events):
-        if cut_at is not None and n == cut_at:
-            out.append(f'<div class="rollbackcut" id="cutmark">{html.escape(cut_label)}</div>')
+        if n in comp_consumed:
+            continue
+        if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
+            out.append(_compaction_block(comp_summary.get(n)))
+            continue
         # rollback-experiment dividers render as distinct banners
         if ev.get("rollback_marker"):
             txt = "".join(b.get("text", "") for b in ev.get("blocks") or [])
