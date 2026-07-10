@@ -11,7 +11,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[3]
+def _find_repo_root() -> Path:
+    """Nearest ancestor holding the sibling `mats-local` data tree — robust to
+    running from a git worktree (see lib/runs.py:_find_root)."""
+    here = Path(__file__).resolve()
+    for p in here.parents:
+        if (p / "mats-local").is_dir():
+            return p
+    return here.parents[3]
+
+
+_REPO = _find_repo_root()
 RAW = Path(os.environ.get("PTB_RAW", _REPO / "mats-local" / "posttrainbench"))
 VIEWER_DATA = Path(os.environ.get("PTB_DATA", RAW / "viewer_data"))
 HIGHLIGHTS = Path(__file__).resolve().parents[1] / "highlights"

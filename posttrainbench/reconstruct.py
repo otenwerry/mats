@@ -30,7 +30,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ptb2 import recon_claude, recon_codex, recon_opencode, runs, stream  # noqa: E402
+from lib import recon_claude, recon_codex, recon_opencode, runs, stream  # noqa: E402
 
 PROBE_SUPPORT = {
     "claude": "claude --resume (supported)",

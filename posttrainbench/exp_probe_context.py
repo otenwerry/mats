@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ptb2 import recon_claude, runs, stream  # noqa: E402
+from lib import recon_claude, runs, stream  # noqa: E402
 from reconstruct import build_bundle  # noqa: E402
 
 DEFAULT_PROBE = (
@@ -129,6 +129,8 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int)
         pass
 
     result_text = None
+    cost_usd = None
+    model_usage = None
     n_events = 0
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -141,7 +143,19 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int)
         n_events += 1
         if d.get("type") == "result":
             result_text = d.get("result")
-    print(f"probe finished in {dt:.0f}s, {n_events} stream events")
+            cost_usd = d.get("total_cost_usd")
+            model_usage = d.get("modelUsage")
+    print(f"probe finished in {dt:.0f}s, {n_events} stream events"
+          + (f", cost ${cost_usd:.4f}" if isinstance(cost_usd, (int, float)) else ""))
+
+    # record the probe's Q&A and billed cost on the fidelity record so the
+    # viewer (continuations + visuals pages) can read them without re-parsing
+    # the raw stream. The claude CLI reports the exact billed cost in the
+    # result event's total_cost_usd, so this is an EXACT cost, not an estimate.
+    fidelity["probe_question"] = probe
+    fidelity["probe_answer"] = result_text
+    fidelity["cost"] = {"total_usd": cost_usd, "by_model": model_usage,
+                        "source": "billed (claude CLI total_cost_usd)"}
 
     md = [f"# Context probe: {traj.run_id} @ ev{plan.cut_event}",
           f"- model: {model}   CLI: {local_version} (original {orig_version})",
@@ -182,6 +196,10 @@ def probe_opencode(traj, parsed, plan, bundle, fidelity, probe: str, timeout: in
                           env=env, timeout=timeout)
     (out_dir / "probe_out.jsonl").write_text(proc.stdout)
     (out_dir / "probe_stderr.txt").write_text(proc.stderr)
+    # opencode's json cost format is not yet parsed here; record the question and
+    # leave cost unknown (the viewer surfaces this as an n/a rather than $0).
+    fidelity["probe_question"] = probe
+    fidelity.setdefault("cost", {"total_usd": None, "source": "unknown (opencode format)"})
     (out_dir / "fidelity.json").write_text(json.dumps(fidelity, indent=2))
     print(proc.stdout[-3000:])
     print(f"exit {proc.returncode}; outputs in {out_dir}")

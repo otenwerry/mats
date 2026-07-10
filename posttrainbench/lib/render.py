@@ -258,12 +258,15 @@ def _annotations_html(notes: list) -> str:
 
 def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
                   annotations=None, turn_kinds=None, train_turns=None,
-                  api_turns=None) -> str:
+                  api_turns=None, cut_at=None, cut_label="") -> str:
     """`marked_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
     classifying each marked turn as 'hack' (direct hacking action, red) or
     'context' (notable but not a hack, neutral); unclassified turns default to
     'hack'. `annotations`: {turn: [{note,quote,kind}]} reviewer notes appended
-    below the relevant turn."""
+    below the relevant turn. `cut_at`: if given, draw a divider immediately
+    before this event index — everything above it was the context the probe
+    saw, everything below is the original continuation (used by the probe /
+    continuation page); the divider gets id="cutmark" for a jump button."""
     hacks = set(marked_turns or ())
     anno = {int(k): v for k, v in (annotations or {}).items()}
     kinds = {}
@@ -273,6 +276,8 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
         kinds[int(k)] = v
     out, last_session = [], None
     for n, ev in enumerate(events):
+        if cut_at is not None and n == cut_at:
+            out.append(f'<div class="rollbackcut" id="cutmark">{html.escape(cut_label)}</div>')
         # rollback-experiment dividers render as distinct banners
         if ev.get("rollback_marker"):
             txt = "".join(b.get("text", "") for b in ev.get("blocks") or [])

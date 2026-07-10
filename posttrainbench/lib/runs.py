@@ -11,12 +11,25 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]          # .../supermats
+def _find_root() -> Path:
+    """Nearest ancestor holding the sibling `mats-local` data tree.
+
+    Robust to being run from a git worktree (`.claude/worktrees/<name>/...`),
+    where the old fixed `parents[3]` pointed at the worktrees dir instead of
+    `.../supermats`."""
+    here = Path(__file__).resolve()
+    for p in here.parents:
+        if (p / "mats-local").is_dir():
+            return p
+    return here.parents[3]                          # legacy fallback
+
+
+ROOT = _find_root()                                 # .../supermats
 RAW = ROOT / "mats-local" / "posttrainbench"        # read-only HF mirror
 VIEWER = RAW / "viewer_data"
-HIGHLIGHTS = ROOT / "mats" / "posttrainbench" / "highlights"
+HIGHLIGHTS = Path(__file__).resolve().parents[1] / "highlights"  # in-repo, beside this package
 PTB_REPO = ROOT / "PostTrainBench"                  # read-only harness clone
-OUT_ROOT = ROOT / "mats-local" / "posttrainbench2"  # our outputs
+OUT_ROOT = ROOT / "mats-local" / "posttrainbench2"  # our outputs (probes/reconstructions)
 
 
 def _scaffold(run_dir_name: str) -> str:

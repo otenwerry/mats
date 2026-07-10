@@ -21,13 +21,14 @@ it derives none of them. The accumulated judging layers (reassessment,
 audits, final_judge, story) render as provenance on the run page; quotes get
 <mark>ed inside the trace (see render.mark).
 
-Usage:  uv run python mats/posttrainbench/viewing/viewer.py   then open http://127.0.0.1:5001
+Usage:  uv run python posttrainbench/viewer.py   then open http://127.0.0.1:5001
+(run from the mats repo root; add ?PORT=xxxx via the PORT env var to change the port)
 """
 from __future__ import annotations
 
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "utilities"))  # shared modules (paths, locate)
+_sys.path.insert(0, str(_Path(__file__).resolve().parent / "lib"))  # shared modules (paths, locate, render, runs)
 
 import json
 import os
@@ -40,6 +41,7 @@ from flask import Flask, abort, render_template_string, request
 import locate
 import paths
 import render as rnd
+import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench2/probes)
 
 # all data/output locations come from the shared paths module (handles the
 # PTB_DATA override and the repo-relative layout)
@@ -76,7 +78,7 @@ ROLLBACK_RUNNING = ROLLBACK_DATA.parent / "running_rollouts.json"
 # the whole dir. Stale entries (a killed launch) age out via RUNNING_TTL_SEC.
 ROLLBACK_RUNNING_DIR = ROLLBACK_DATA.parent / "running"
 RUNNING_TTL_SEC = int(os.environ.get("PTB_RUNNING_TTL_SEC", str(18 * 3600)))
-ROLLBACK_MANIFEST = _Path(__file__).resolve().parents[1] / "rollback" / "trajectory_manifest.json"
+ROLLBACK_MANIFEST = _Path(__file__).resolve().parent / "rollback" / "trajectory_manifest.json"
 # Manually-parked trajectories (run_id -> reason). Same committed file the
 # rollback config reads (we can't import config here); read fresh per call so a
 # defer/un-defer shows up without a viewer restart.
@@ -648,6 +650,35 @@ CSS = """
  .rbbreak summary{cursor:pointer;padding:.35rem .6rem;font-size:.84rem;font-weight:700;color:#334155}
  .rbbreak ul{margin:.1rem 0 .5rem;padding-left:1.4rem;font-size:.8rem;color:#475569;font-family:ui-monospace,Menlo,monospace}
  .rbbreak li{margin:.1rem 0}
+ /* --- Petri-style nav + pagehead for the continuations / visuals pages --- */
+ .subnav{margin:0 0 16px;display:flex;gap:20px;flex-wrap:wrap;border-bottom:1px solid #dcdfe6}
+ .subnav a{padding:3px 1px 8px;font-size:.86rem;font-weight:600;color:#6b7280;border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer}
+ .subnav a.active{color:#1558d6;border-bottom-color:#1558d6}
+ .subnav a:hover{text-decoration:none;color:#1558d6}
+ .pagehead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:10px 0 14px}
+ .pagehead h1{margin:0}
+ .headbtn{padding:5px 13px;border-radius:6px;background:#eef0f4;font-size:.85rem;font-weight:600;white-space:nowrap;color:#1558d6}
+ .headbtn:hover{text-decoration:none;background:#e0e3ea}
+ /* continuation (probe) page */
+ .contbanner{border-radius:8px;padding:.7rem 1rem;margin:0 0 1rem;background:#eef4ff;border:1px solid #1558d6;color:#0b2a6b;font-size:.92rem}
+ .contbanner b{color:#0b2a6b}
+ .flagline{margin:.5rem 0 0;display:flex;flex-wrap:wrap;gap:.4rem}
+ .flag{display:inline-block;border-radius:4px;padding:0 7px;font-size:.72rem;font-weight:700;cursor:help}
+ .flag.info{background:#eef2f6;color:#475569;border:1px solid #cbd5e1}
+ .flag.warn{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
+ .flag.error{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
+ .cutmarklink{position:fixed;right:18px;bottom:126px;background:#ea580c;color:#fff;border:none;border-radius:8px;padding:.4rem .7rem;font-size:.82rem;font-weight:700;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.22);z-index:50}
+ .cutmarklink:hover{background:#c2410c}
+ .qablock{border:1px solid #cdd9f0;border-radius:10px;margin:1.6rem 0 .6rem;overflow:hidden}
+ .qablock .qahdr{background:#1558d6;color:#fff;font-weight:700;padding:.5rem .9rem;font-size:.95rem}
+ .qablock .qq{background:#f4f7ff;padding:.7rem .9rem;white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,monospace;color:#33406b;border-bottom:1px solid #e0e6f4}
+ .qablock .qa{padding:.8rem .9rem;white-space:pre-wrap}
+ /* visuals / cost */
+ .vsub{color:#555;font-size:.9rem;line-height:1.5;margin:2px 0 18px;max-width:760px}
+ figure.fig{margin:0 0 18px;background:#fff;border:1px solid #e3e5ec;border-radius:8px;padding:14px 16px 10px;display:inline-block;max-width:100%}
+ figure.fig svg{display:block;height:auto;max-width:100%}
+ figure.fig figcaption{font-size:.72rem;color:#6a7180;line-height:1.45;margin-top:6px;max-width:520px}
+ .costtable{max-width:900px}
 """
 
 INDEX_HTML = """
@@ -667,6 +698,8 @@ INDEX_HTML = """
 <p class="reportlink" style="margin-top:.15rem"><a href="/timing">⏱ RH timing</a></p>
 <p class="reportlink" style="margin-top:.15rem"><a href="/rates">📊 RH rates</a></p>{% endif %}
 <p class="reportlink" style="margin-top:.15rem"><a href="/rollback">🔪 rollback experiments</a></p>
+<p class="reportlink" style="margin-top:.15rem"><a href="/continuations">♻ continuations (context-reconstruction probes)</a></p>
+<p class="reportlink" style="margin-top:.15rem"><a href="/visuals">📊 visuals (probe cost)</a></p>
 <form class="filters" method="get">
  <label>experiment <select name="experiment" onchange="this.form.submit()">
    <option value="">all</option>
@@ -918,6 +951,105 @@ DETAIL_HTML = """
  });
 })();
 </script>
+</body></html>
+""".replace("__CSS__", CSS)
+
+# The continuation (probe) page reuses the trajectory page's core — metadata
+# header + judge banners + rendered transcript — sliced verbatim out of
+# DETAIL_HTML so the two can never drift. It is wrapped with a Petri-style nav +
+# a probe banner + the probe Q&A block (the transcript's `body` is rendered with
+# a cut divider by _trajectory_view(cut_at=...)).
+_TRAJ_CORE_HTML = DETAIL_HTML[DETAIL_HTML.index('<div class="hdr">'):
+                              DETAIL_HTML.index('{{ body|safe }}') + len('{{ body|safe }}')]
+
+CONTINUATION_HTML = ("""
+<!doctype html><html><head><meta charset="utf-8"><title>continuation · {{ p.run_id }} @ ev{{ p.cut_event }}</title>
+<style>__CSS__</style></head><body>
+{{ subnav|safe }}
+<div class="pagehead">
+ <h1>Continuation probe <span class="meta" style="font-weight:400">{{ p.run_id }} @ ev{{ p.cut_event }}</span></h1>
+ <a class="headbtn" href="/continuations">&larr; continuations</a>
+ <a class="headbtn" href="/run/{{ p.run_id }}">full trajectory &rarr;</a>
+</div>
+<div class="contbanner">
+ &#9851; <b>Context-reconstruction probe.</b> The model was resumed from a faithful
+ reconstruction of this trajectory's context, cut immediately before
+ <b>event {{ p.cut_event }}</b>{% if p.snapped %} (snapped down from requested ev{{ p.requested_turn }}){% endif %},
+ then asked to describe what it remembers. Everything above the
+ <b style="color:#9a3412">cut divider</b> in the transcript below is what the model saw;
+ everything after it is the original continuation, which the probe never saw.
+ {% if p.cost is not none %} Billed cost of this probe: <b>${{ '%.4f'|format(p.cost) }}</b>.{% endif %}
+ {% if p.flags %}<div class="flagline">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span>{% endfor %}</div>{% endif %}
+</div>
+""" + _TRAJ_CORE_HTML + """
+<div class="qablock">
+ <div class="qahdr">&#128172; Probe question &amp; the model's answer (from its reconstructed context only)</div>
+ <div class="qq">{{ p.question or '(question not recorded)' }}</div>
+ <div class="qa">{{ p.answer or '(no answer recorded — see probe_out.jsonl)' }}</div>
+</div>
+<button class="totop" id="totop" title="back to top">&uarr;</button>
+{% if has_cut %}<button class="cutmarklink" onclick="var e=document.getElementById('cutmark');if(e)e.scrollIntoView({behavior:'smooth',block:'center'})">&#9986; jump to cut</button>{% endif %}
+<script>
+(function(){ var b=document.getElementById('totop');
+ function upd(){ b.style.display=window.scrollY>400?'block':'none'; }
+ b.onclick=function(){ window.scrollTo({top:0,behavior:'smooth'}); };
+ window.addEventListener('scroll',upd); upd(); })();
+</script>
+</body></html>
+""").replace("__CSS__", CSS)
+
+CONTINUATIONS_LIST_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>continuations</title>
+<style>__CSS__</style></head><body>
+{{ subnav|safe }}
+<div class="pagehead"><h1>Continuations <span class="meta" style="font-weight:400">(context-reconstruction probes)</span></h1></div>
+{% if not groups %}<p class="meta">No probes yet. Run
+ <code>exp_probe_context.py --trajectory &lt;run_id&gt; --turn &lt;ev|first_hack&gt;</code> to add one;
+ it appears here automatically.</p>{% endif %}
+{% for g in groups %}
+<details class="legend" open style="margin-bottom:.7rem">
+ <summary><b>{{ g.run_id }}</b> <span class="meta">— {{ g.probes|length }} probe(s){% if g.total_cost is not none %} · ${{ '%.4f'|format(g.total_cost) }}{% endif %}</span></summary>
+ <table style="margin-top:.5rem"><thead><tr>
+  <th>probe (cut)</th><th>scaffold</th><th>flags</th><th class="num">cost</th></tr></thead><tbody>
+ {% for p in g.probes %}
+ <tr>
+  <td><a href="/continuation/{{ p.probe_id }}">ev{{ p.cut_event }}{% if p.snapped %} (snapped){% endif %}</a></td>
+  <td>{{ p.scaffold }}</td>
+  <td class="flags">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span> {% endfor %}</td>
+  <td class="num">{% if p.cost is not none %}${{ '%.4f'|format(p.cost) }}{% else %}–{% endif %}</td>
+ </tr>
+ {% endfor %}
+ </tbody></table>
+</details>
+{% endfor %}
+</body></html>
+""".replace("__CSS__", CSS)
+
+VISUALS_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>visuals · cost</title>
+<style>__CSS__</style></head><body>
+{{ subnav|safe }}
+<div class="pagehead"><h1>Visuals</h1></div>
+<div class="subnav" style="margin-bottom:16px"><a class="active">Cost</a></div>
+{% if not probes %}
+<p class="meta">No probes yet — nothing to cost. Run <code>exp_probe_context.py</code> first.</p>
+{% else %}
+<h2>Cost</h2>
+<p class="vsub"><b>${{ '%.4f'|format(total) }}</b> across <b>{{ n }}</b> context-reconstruction probe(s)
+ (mean <b>${{ '%.4f'|format(mean) }}</b> per probe). This is the exact amount billed by the model
+ API for each resume call.{% if n_unknown %} {{ n_unknown }} probe(s) had no recorded cost and are excluded.{% endif %}</p>
+{{ fig|safe }}
+<table class="costtable" style="margin-top:1rem"><thead><tr>
+ <th>probe</th><th>scaffold</th><th class="num">cost</th></tr></thead><tbody>
+{% for p in probes %}
+<tr>
+ <td><a href="/continuation/{{ p.probe_id }}">{{ p.run_id }} @ ev{{ p.cut_event }}</a></td>
+ <td>{{ p.scaffold }}</td>
+ <td class="num">{% if p.cost is not none %}${{ '%.4f'|format(p.cost) }}{% else %}–{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody></table>
+{% endif %}
 </body></html>
 """.replace("__CSS__", CSS)
 
@@ -1273,10 +1405,12 @@ def index():
         has_report=(HIGHLIGHTS / "categories.json").exists())
 
 
-@app.route("/run/<run_id>")
-def run(run_id: str):
-    if run_id not in INDEX:
-        abort(404)
+def _trajectory_view(run_id: str, cut_at=None, cut_label=""):
+    """Every template variable for a trajectory page — shared by /run and the
+    continuation page so the latter is a faithful copy of the former.
+    `cut_at`/`cut_label` draw a probe-cut divider in the transcript. Assumes
+    run_id is in INDEX. Returns a kwargs dict (no prev/next ordering — that is
+    /run-specific and added by the caller)."""
     i = INDEX[run_id]
     r = RUNS[i]
     rec = load_record(run_id)
@@ -1392,22 +1526,32 @@ def run(run_id: str):
             annotations.setdefault(str(t), []).append(
                 {"quote": "", "note": f"[first hack — {title}]", "kind": "cat_hack", "matched": False})
     body = rnd.render_events(events, r.get("trace_format", ""),
-                             quotes, marked_turns, annotations, turn_kinds, train_turns, api_turns)
+                             quotes, marked_turns, annotations, turn_kinds,
+                             train_turns, api_turns, cut_at=cut_at, cut_label=cut_label)
     ws = load_workspace(run_id)
     def _kind(t):
         v = turn_kinds.get(str(t))
         return (v if isinstance(v, str) else (v or {}).get("kind")) or "hack"
     n_hack_true = sum(1 for t in marked_turns if _kind(t) == "hack")
-    p = ORDER_POS[run_id]
-    return render_template_string(
-        DETAIL_HTML, r=r, body=body, flagged=is_flagged(r), hl=hl, oj=oj,
+    return dict(
+        r=r, body=body, flagged=is_flagged(r), hl=hl, oj=oj,
         everdict=HL_META.get(run_id, {}).get("everdict", ""),
         raw_path=str(paths.raw_dir(run_id).relative_to(paths.RAW)),
         n_hack_true=n_hack_true, n_noted=len(marked_turns) - n_hack_true,
+        workspace=ws is not None, workspace_n=len(ws["files"]) if ws else 0)
+
+
+@app.route("/run/<run_id>")
+def run(run_id: str):
+    if run_id not in INDEX:
+        abort(404)
+    view = _trajectory_view(run_id)
+    p = ORDER_POS[run_id]
+    return render_template_string(
+        DETAIL_HTML, **view,
         prev=ORDER[p - 1] if p > 0 else None,
         next=ORDER[p + 1] if p < len(ORDER) - 1 else None,
-        pos=p + 1, total=len(ORDER), back_qs="",
-        workspace=ws is not None, workspace_n=len(ws["files"]) if ws else 0)
+        pos=p + 1, total=len(ORDER), back_qs="")
 
 
 # --------------------------------------------------------------------------- #
@@ -2270,6 +2414,172 @@ def workspace(run_id: str):
         abort(404)
     return render_template_string(WORKSPACE_HTML, run_id=run_id,
                                   root=ws.get("root", ""), files=ws.get("files", []))
+
+
+# --------------------------------------------------------------------------- #
+# Continuations (context-reconstruction probes) + Visuals (probe cost)         #
+#                                                                              #
+# A probe run lives at OUT_ROOT/probes/<run_id>__ev<N>/ (produced by           #
+# exp_probe_context.py): fidelity.json (cut/flags/stats + cost/Q&A on newer    #
+# runs), probe_out.jsonl (raw stream), probe_result.md. The loader falls back  #
+# to the raw stream / result md for probes that predate cost/Q&A recording, so #
+# every probe renders regardless of when it was produced.                      #
+# --------------------------------------------------------------------------- #
+PROBES_DIR = runs.OUT_ROOT / "probes"
+
+
+def _probe_answer_from_stream(pdir: Path) -> dict:
+    """Fallback: pull the model's answer + billed cost from the raw claude
+    stream (used when the fidelity record predates cost/answer recording)."""
+    out = {"answer": None, "cost": None}
+    f = pdir / "probe_out.jsonl"
+    if not f.exists():
+        return out
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") == "result":
+            out["answer"] = d.get("result")
+            out["cost"] = d.get("total_cost_usd")
+    return out
+
+
+def _probe_question_from_md(pdir: Path) -> str | None:
+    """Fallback: the '## Probe' section of probe_result.md."""
+    f = pdir / "probe_result.md"
+    if not f.exists():
+        return None
+    m = re.search(r"## Probe\n```\n(.*?)\n```", f.read_text(), re.S)
+    return m.group(1) if m else None
+
+
+def load_probe(pdir: Path) -> dict | None:
+    """One probe run -> the dict the continuation / visuals pages render."""
+    fp = pdir / "fidelity.json"
+    if not fp.exists():
+        return None
+    try:
+        fid = json.loads(fp.read_text())
+    except json.JSONDecodeError:
+        return None
+    cost = (fid.get("cost") or {}).get("total_usd")
+    question = fid.get("probe_question")
+    answer = fid.get("probe_answer")
+    if cost is None or answer is None:
+        strm = _probe_answer_from_stream(pdir)
+        cost = cost if cost is not None else strm["cost"]
+        answer = answer if answer is not None else strm["answer"]
+    if question is None:
+        question = _probe_question_from_md(pdir)
+    return {
+        "probe_id": pdir.name, "run_id": fid.get("run_id"),
+        "scaffold": fid.get("scaffold"), "cut_event": fid.get("cut_event"),
+        "requested_turn": fid.get("requested_turn"), "snapped": fid.get("snapped"),
+        "cut_notes": fid.get("cut_notes") or [], "flags": fid.get("flags") or [],
+        "stats": fid.get("stats") or {}, "probe_env": fid.get("probe_env") or {},
+        "cost": cost, "question": question, "answer": answer,
+    }
+
+
+def all_probes() -> list[dict]:
+    if not PROBES_DIR.exists():
+        return []
+    out = []
+    for d in sorted(PROBES_DIR.iterdir()):
+        if d.is_dir():
+            p = load_probe(d)
+            if p:
+                out.append(p)
+    return out
+
+
+def _subnav(active: str) -> str:
+    """Petri-style underlined tab row for the new pages. 'trajectories' links
+    back to the faithful index at /."""
+    items = [("trajectories", "/"), ("continuations", "/continuations"),
+             ("visuals", "/visuals")]
+    parts = []
+    for name, href in items:
+        cls = ' class="active"' if name == active else ""
+        parts.append(f'<a href="{href}"{cls}>{name}</a>')
+    return '<div class="subnav">' + "".join(parts) + "</div>"
+
+
+def _cost_fig_svg(probes: list[dict]) -> str:
+    """Inline-SVG bar chart of per-probe billed cost (Petri-style figure)."""
+    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
+    if not priced:
+        return ""
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    labels = [f"{(p['run_id'] or '')[:24]}…@ev{p['cut_event']}" for p in priced]
+    vals = [p["cost"] for p in priced]
+    fig, ax = plt.subplots(figsize=(7, 0.7 + 0.5 * len(priced)))
+    ax.barh(range(len(priced)), vals, color="#1558d6")
+    ax.set_yticks(range(len(priced)))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("billed cost (USD)")
+    for i, v in enumerate(vals):
+        ax.text(v, i, f" ${v:.4f}", va="center", fontsize=8)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    buf = io.StringIO()
+    fig.savefig(buf, format="svg")
+    plt.close(fig)
+    svg = buf.getvalue()
+    svg = svg[svg.index("<svg"):]
+    return (f'<figure class="fig">{svg}'
+            f'<figcaption>Exact cost billed per probe resume call.</figcaption></figure>')
+
+
+@app.route("/continuations")
+def continuations():
+    probes = all_probes()
+    by_run: dict[str, list] = {}
+    for p in probes:
+        by_run.setdefault(p["run_id"], []).append(p)
+    groups = []
+    for rid in sorted(by_run):
+        ps = sorted(by_run[rid], key=lambda x: (x["cut_event"] or 0))
+        costs = [x["cost"] for x in ps if isinstance(x["cost"], (int, float))]
+        groups.append({"run_id": rid, "probes": ps,
+                       "total_cost": sum(costs) if costs else None})
+    return render_template_string(CONTINUATIONS_LIST_HTML, groups=groups,
+                                  subnav=_subnav("continuations"))
+
+
+@app.route("/continuation/<path:probe_id>")
+def continuation(probe_id: str):
+    probe = load_probe(PROBES_DIR / probe_id)
+    if probe is None or probe["run_id"] not in INDEX:
+        abort(404)
+    cut = probe["cut_event"]
+    cut_label = (f"probe cut — context was reconstructed up to here (event {cut}); "
+                 f"everything below is the original continuation the probe never saw")
+    view = _trajectory_view(probe["run_id"], cut_at=cut, cut_label=cut_label)
+    return render_template_string(CONTINUATION_HTML, p=probe, has_cut=cut is not None,
+                                  subnav=_subnav("continuations"), **view)
+
+
+@app.route("/visuals")
+def visuals():
+    probes = all_probes()
+    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
+    n = len(priced)
+    total = sum(p["cost"] for p in priced)
+    return render_template_string(
+        VISUALS_HTML, probes=probes, n=n, n_unknown=len(probes) - n,
+        total=total, mean=(total / n if n else 0.0),
+        fig=_cost_fig_svg(probes), subnav=_subnav("visuals"))
 
 
 if __name__ == "__main__":
