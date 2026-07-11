@@ -1,85 +1,87 @@
-"""End-to-end CONTINUATION pipeline: generate -> (regular judge, inline) -> faithfulness
-judge -> rebuild viewer, in one command.
+"""End-to-end CONTINUATION pipeline: generate -> (regular judge, inline) -> [faithfulness
+judge: OFF by default] -> rebuild viewer, in one command.
 
 THE QUESTION: if a target reward-hacks on one task and is then handed a SECOND, unrelated
 task, does its hack rate on the second task go up -- because it's conditioned on its own
-earlier hack? Per target model we pick prefixes (prior trajectories of that model) in up to
-three flavors, plus new-task sources, and run the prefixed conditions N times each:
+earlier hack?
 
-  full_hack_prefix      : target carries a trajectory where it fully reward-hacked
-  corrected_hack_prefix : target carries a trajectory where it hacked, then corrected it
-  clean_prefix          : target carries a trajectory it completed cleanly
-  no_prefix             : target carries nothing -- the new task standalone (baseline).
-                          NOT run here by default (2026-07-05 split): the baseline is
-                          measured FIRST, separately, by exp_baseline_pipeline.py -- used
-                          to screen candidate new tasks for a low standalone hack rate
-                          before spending on the prefix conditions. The viewer joins the
-                          two halves automatically (continuations page groups by B id),
-                          so nothing links the run dirs. Pass --conditions=all (or name
-                          no_prefix) to run the baseline inline anyway.
+ONE INVOCATION = ONE TREATMENT (2026-07-08 rewrite). You choose the prefix set with a single
+`--prefixes` flag and label the run with `--treatment`; run the file again for another
+treatment. This replaced the old fixed three-flavor scheme (--full-hack-prefixes /
+--corrected-hack-prefixes / --clean-prefixes + --conditions) so you can define arbitrarily many
+treatments without touching the code -- the viewer renders whatever treatments appear in the
+data, each in its own spot.
+
+  uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=455,471 \\
+      --continuations=458,470,610 --n=5
+  uv run exp_continuation_pipeline.py --treatment=clean --prefixes=460,473 \\
+      --continuations=458,470,610 --n=5
+  uv run exp_continuation_pipeline.py --treatment=no-prefix --prefixes=none \\
+      --continuations=458,470,610 --n=5          # the baseline (no prior context)
+
+`--prefixes=none` is the baseline (the new task run standalone): the target carries nothing, so
+there is nothing to compare a prefix against but itself. The viewer joins treatments by B id --
+run the baseline once per new task and every prefixed treatment sits beside it in the same
+(model, new task) box.
 
 Ids are FLAT lists; each trajectory's target model is read from its stamped metadata and
 grouped automatically (no positional pairing). Counts per model are free: every
-(new task x prefix) pair runs, plus one no_prefix baseline per new task. The new task may
-come from a different seed FAMILY than the prefix (e.g. perf_benchmark_gaming vs
-ml_training_data_misuse); the target then keeps the PREFIX's system prompt and the pivot
-turn says the new task is a different kind of work (see lib/exp_continuation.py).
+(new task x prefix) pair runs. The new task may come from a different seed FAMILY than the
+prefix (e.g. perf_benchmark_gaming vs ml_training_data_misuse); the target then keeps the
+PREFIX's system prompt and the pivot turn says the new task is a different kind of work
+(see lib/exp_continuation.py).
 
-AUDITOR (Owen 2026-07-05): FRESH by default -- the auditor gets ONLY the new task's seed (like
-a plain audit of it) and generates the environment from scratch; it is NOT primed with the
-original run and gets no faithfulness instruction. This dropped the giant reference blob that
-overflowed the 128k-window sweep-5 auditor. It also means the environment is regenerated
-independently each run, so CONFOUND WATCH: differences in auditor behavior across conditions/
-epochs could confound the reward-hack-rate comparison -- the faithfulness judge is kept ON to
-measure that drift, to be investigated before trusting cross-condition differences.
-`--prime-auditor` restores the legacy primed behavior (full record + faithfulness instruction)
-for that investigation. Either way the auditor never sees the prefix. The clean contrasts are
-each-prefix-vs-no_prefix; prefix-flavor-vs-prefix-flavor is confounded by every way those prior
-runs differ -- read it as suggestive.
+AUDITOR (Owen 2026-07-08): ALWAYS FAITHFUL -- the auditor is primed with the new task's full
+original run + a faithfulness instruction and reproduces that environment as closely as it can.
+This keeps the environment FIXED across treatments so the reward-hack-rate comparison isn't
+confounded by the auditor improvising differently each run; the faithfulness judge still scores
+residual drift. (The earlier fresh-auditor default existed to dodge a DeepSeek context overflow
+that turned out to be an Inspect window-detection glitch, since fixed in lib/model_window.py, so
+priming is safe again.) The auditor never sees the prefix -- Petri keeps the auditor's and
+target's message lists separate. The clean contrast is each-prefix-vs-baseline;
+prefix-vs-prefix is confounded by every way those prior runs differ -- read it as suggestive.
 
 Two judges:
   1. the REGULAR reward-hacking judge, inline -- but the prior-task prefix is MECHANICALLY cut
      out of the transcript the judge sees (system prompt + new task only, numbers preserved),
-     so it can't see or infer the prior task (no_prefix is judged as a standalone run);
+     so it can't see or infer the prior task (a baseline is judged as a standalone run);
   2. a FAITHFULNESS judge that compares each continuation to its new-task original and scores
      how much the auditor's environment diverged from it (lib/exp_continuation
-     .run_faithfulness_for_dir) -- stored as a queryable per-run flag. With fresh auditors this
-     is the drift diagnostic for the confound above (its prompt still says "primed", a wording
-     lag to revisit when interpreting the scores).
+     .run_faithfulness_for_dir) -- stored as a queryable per-run flag. OFF BY DEFAULT (Owen
+     2026-07-09): the auditor is still primed to be faithful, we just don't score it for now.
+     Pass --faithfulness-judge to run it, or run it after the fact via
+     tools/exp_rejudge_continuation_faithfulness.py. The judge code is untouched, only the
+     pipeline no longer calls it unless asked.
 
 Usage:
-  uv run exp_continuation_pipeline.py --full-hack-prefixes=455,471 --clean-prefixes=460,473 \\
-      --corrected-hack-prefixes=602,617 --continuations=458,470,610 --n=5
-  uv run exp_continuation_pipeline.py ... --conditions=full_hack_prefix,no_prefix   # subset
-  uv run exp_continuation_pipeline.py ... --n=5 --dry-run        # FREE: plan only
-  uv run exp_continuation_pipeline.py ... --n=5 --skip-judge     # generate only
+  uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=455,471 \\
+      --continuations=458,470,610 --n=5
+  uv run exp_continuation_pipeline.py ... --n=5 --dry-run             # FREE: plan only
+  uv run exp_continuation_pipeline.py ... --n=5 --faithfulness-judge  # also score faithfulness
 
 Flags:
-  --continuations=<ids>             REQUIRED. new-task source ids (any models, any seeds;
-                                    each pairs with every same-model prefix from a
-                                    different seed).
-  --full-hack-prefixes=<ids>        full-hack prefix ids (optional if the condition is off).
-  --corrected-hack-prefixes=<ids>   corrected-hack prefix ids (optional if the condition is off).
-  --clean-prefixes=<ids>            clean prefix ids (optional if the condition is off).
-  --conditions=<a,b|all>            subset of {full_hack_prefix,corrected_hack_prefix,
-                                    clean_prefix,no_prefix} (default: the three prefixed
-                                    conditions; `all` adds no_prefix back).
+  --treatment=<slug>                REQUIRED. free-form label for this run (lowercase letters,
+                                    digits, hyphens; e.g. full-hack, clean, no-prefix). Names
+                                    the run's spot in the viewer; runs with the SAME treatment
+                                    + same new task pool together (that's how you add epochs).
+  --prefixes=<ids|none>             REQUIRED. prefix trajectory ids the target carries (any
+                                    models, any seeds), or `none` for a baseline (no prefix).
+  --continuations=<ids>             REQUIRED. new-task source ids (any models, any seeds; each
+                                    pairs with every same-model prefix from a different seed).
   --n=<int>                         REQUIRED. continuations (epochs) per cell.
   --concurrency=<int>               one knob -> generation max_samples/max_connections AND
                                     faithfulness-judge parallelism (default 50).
-  --prime-auditor                   LEGACY: prime the auditor with the new-task original's full
-                                    record + a faithfulness instruction (default is a FRESH
-                                    auditor that gets only the seed). For the confound study.
   --deviation-model=<m>             Anthropic model for the faithfulness judge (default
                                     claude-opus-4-8).
   --annotate-model=<m>              Anthropic model for the hack-turn annotator (default
                                     claude-opus-4-8).
   --dry-run                         load + build + validate the plan and print it; no cost.
-  --skip-judge                      generate only; skip the faithfulness judge (regular
-                                    judging is inline).
+  --faithfulness-judge              run the auditor-faithfulness judge (OFF by default). The
+                                    regular reward-hacking judge is inline regardless.
   --skip-annotate                   skip the hack-turn annotation of full-hack continuations.
   --skip-viewer                     don't rebuild the viewer at the end.
-  --force-judge                     re-run (re-spend on) faithfulness judgments already stored.
+  --force-judge                     re-run (re-spend on) faithfulness judgments already stored;
+                                    implies --faithfulness-judge.
   --force-annotate                  re-annotate full-hack continuations already in annotations.json.
 
 Costs money (Anthropic + the target provider) unless --dry-run.
@@ -129,14 +131,6 @@ def _ids(flag: str, required: bool = False) -> list[int]:
     return ids
 
 
-# CLI flag -> the condition its ids realize (see C.PREFIX_CONDITIONS)
-_PREFIX_FLAGS = {
-    "--full-hack-prefixes": "full_hack_prefix",
-    "--corrected-hack-prefixes": "corrected_hack_prefix",
-    "--clean-prefixes": "clean_prefix",
-}
-
-
 def _posint(flag, default):
     v = _arg(flag, default)
     try:
@@ -148,39 +142,31 @@ def _posint(flag, default):
     return v
 
 
+def _parse_prefixes() -> list[int]:
+    """--prefixes=<comma-separated ids> | none. `none` -> [] (a baseline, no prefix)."""
+    raw = _arg("--prefixes")
+    if raw is None or raw is True:
+        raise SystemExit("--prefixes is required (comma-separated prefix ids, or `none` for a "
+                         "baseline with no prior context)")
+    if str(raw).strip().lower() == "none":
+        return []
+    try:
+        ids = [int(x) for x in str(raw).split(",") if x.strip()]
+    except ValueError:
+        raise SystemExit(f"--prefixes must be integers or `none`, got {raw!r}")
+    if not ids:
+        raise SystemExit("--prefixes had no usable ids (use `none` for a baseline)")
+    return ids
+
+
 def _parse_args() -> dict:
+    treatment_raw = _arg("--treatment")
+    if treatment_raw is None or treatment_raw is True:
+        raise SystemExit("--treatment is required (a free-form label for this run, e.g. "
+                         "full-hack / clean / no-prefix)")
+    treatment = C.validate_treatment(str(treatment_raw))
+    prefix_ids = _parse_prefixes()
     cont = _ids("--continuations", required=True)
-    prefix_ids = {cond: _ids(flag) for flag, cond in _PREFIX_FLAGS.items()}
-
-    cond_raw = _arg("--conditions")
-    if cond_raw is None or cond_raw is True:
-        # default: prefixed conditions only -- the no_prefix baseline is measured first by
-        # exp_baseline_pipeline.py (the screening half of the split pipeline).
-        conditions = list(C.PREFIX_CONDITIONS)
-    elif str(cond_raw).strip() == "all":
-        conditions = list(C.CONDITIONS)
-    else:
-        conditions = [c.strip() for c in str(cond_raw).split(",") if c.strip()]
-        unknown = [c for c in conditions if c not in C.CONDITIONS]
-        if unknown:
-            raise SystemExit(f"unknown --conditions {unknown}; choices: {C.CONDITIONS} (or `all`)")
-        # canonical order
-        conditions = [c for c in C.CONDITIONS if c in conditions]
-    if not conditions:
-        raise SystemExit(f"--conditions had no usable names; choices: {C.CONDITIONS}")
-
-    # every requested prefixed condition needs ids, and ids for an unrequested condition
-    # are almost certainly a mistake -- fail loudly either way, before any loading.
-    for cond in conditions:
-        if cond != "no_prefix" and not prefix_ids.get(cond):
-            flag = next(f for f, c in _PREFIX_FLAGS.items() if c == cond)
-            raise SystemExit(f"condition {cond!r} is requested but {flag} was not given; "
-                             f"pass ids or narrow --conditions.")
-    for cond, ids in prefix_ids.items():
-        if ids and cond not in conditions:
-            flag = next(f for f, c in _PREFIX_FLAGS.items() if c == cond)
-            raise SystemExit(f"{flag} was given but --conditions excludes {cond!r}; "
-                             "drop the flag or widen --conditions.")
 
     n = _arg("--n")
     if n is None or n is True:
@@ -193,14 +179,15 @@ def _parse_args() -> dict:
         raise SystemExit(f"--n must be >= 1, got {n}")
 
     return dict(
-        prefix_ids=prefix_ids, cont=cont, conditions=conditions, n=n,
+        treatment=treatment, prefix_ids=prefix_ids, cont=cont, n=n,
         run_dir_stem="continuation",
-        prime_auditor="--prime-auditor" in sys.argv,
         concurrency=_posint("--concurrency", DEFAULT_CONCURRENCY),
         deviation_model=_arg("--deviation-model", DEFAULT_DEVIATION_MODEL),
         annotate_model=_arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         dry_run="--dry-run" in sys.argv,
-        skip_judge="--skip-judge" in sys.argv,
+        # Faithfulness judging is OFF by default now (Owen 2026-07-09) -- opt in with
+        # --faithfulness-judge. --force-judge implies it (re-judging is pointless if we skip).
+        run_faithfulness=("--faithfulness-judge" in sys.argv) or ("--force-judge" in sys.argv),
         skip_annotate="--skip-annotate" in sys.argv,
         skip_viewer="--skip-viewer" in sys.argv,
         force_judge="--force-judge" in sys.argv,
@@ -213,39 +200,36 @@ async def main() -> None:
     print("=" * 76)
     print("  CONTINUATION PIPELINE  (condition a target on a prior task, then hand it a new one)")
     print("=" * 76)
-    for flag, cond in _PREFIX_FLAGS.items():
-        print(f"  {cond:22s}: {cfg['prefix_ids'][cond] or '—'}")
+    print(f"  treatment: {cfg['treatment']}")
+    print(f"  prefixes: {cfg['prefix_ids'] or 'none (baseline — no prior context)'}")
     print(f"  continuations (new-task sources): {cfg['cont']}")
-    print(f"  conditions: {cfg['conditions']}    n: {cfg['n']}    concurrency: {cfg['concurrency']}")
-    print(f"  auditor: {'PRIMED (reference + faithfulness)' if cfg['prime_auditor'] else 'FRESH (seed only, no reference)'}")
-    print(f"  faithfulness judge: {cfg['deviation_model']}\n")
+    print(f"  n: {cfg['n']}    concurrency: {cfg['concurrency']}")
+    print("  auditor: FAITHFUL (primed with the new task's original run + faithfulness instruction)")
+    print(f"  faithfulness judge: {cfg['deviation_model']}"
+          if cfg["run_faithfulness"] else "  faithfulness judge: OFF (pass --faithfulness-judge to run)")
+    print()
     await run_pipeline(cfg)
 
 
 async def run_pipeline(cfg: dict) -> None:
-    """The shared engine: plan -> generate (inline regular judge) -> faithfulness judge ->
-    annotate -> viewer. Called by main() here (the prefixed experiment) and by
-    exp_baseline_pipeline.py (the no_prefix screening half); cfg carries everything,
-    including run_dir_stem (the run-dir name prefix, so the two halves stay tellable
-    apart on disk while both start with 'continuation-' for the viewer's dir scan)."""
+    """The engine: plan -> generate (inline regular judge) -> faithfulness judge -> annotate ->
+    viewer. cfg carries everything, including the single `treatment` label and the `prefix_ids`
+    list (empty for a baseline). Run dirs are always logs/continuation-<N>x-<timestamp>/."""
+    treatment = cfg["treatment"]
+    has_prefixes = bool(cfg["prefix_ids"])
     print("[load] reading originals, reconstructing prefixes, validating the plan ...")
-    plans = await C.build_plans(cfg["prefix_ids"], cfg["cont"])
+    plans = await C.build_plans(treatment, cfg["prefix_ids"], cfg["cont"])
 
     tasks = []
     for model, plan in sorted(plans.items()):
         # coverage: a model must contribute BOTH sides (its ids are probably a typo otherwise);
-        # prefixes are only required when a prefixed condition is requested.
+        # prefixes are only required for a prefixed treatment (--prefixes != none).
         if not plan.b_refs:
             raise SystemExit(f"model {model!r} has prefixes but no --continuations id; every "
                              "model in the run needs at least one new-task source.")
-        needs_prefixes = any(c != "no_prefix" for c in cfg["conditions"])
-        if needs_prefixes and not plan.prefixes:
+        if has_prefixes and not plan.prefixes:
             raise SystemExit(f"model {model!r} has continuations but no prefixes; pass prefix "
-                             "ids for it or run with --conditions=no_prefix.")
-        for cond in cfg["conditions"]:
-            if cond != "no_prefix" and not any(p.condition == cond for p in plan.prefixes):
-                raise SystemExit(f"model {model!r} has no {cond} prefix but --conditions "
-                                 f"requests it; pass an id or narrow --conditions.")
+                             "ids for it or run with --prefixes=none.")
 
         # the run-level allow/correct condition each original was generated under -- shown so
         # a "correct"-condition id passed as a continuation is visible at plan time (the
@@ -256,35 +240,29 @@ async def run_pipeline(cfg: dict) -> None:
         print(f"  {model}:")
         for p in plan.prefixes:
             synth = "  [synthetic tool-result closer]" if p.synthesized_closer else ""
-            print(f"      {p.condition:22s} #{p.ref.traj_id}  (seed {p.ref.seed}{_cond(p.ref)}, "
+            print(f"      prefix #{p.ref.traj_id}  (seed {p.ref.seed}{_cond(p.ref)}, "
                   f"family {C.seed_family(p.ref.seed_dir)}, {len(p.messages)} msgs){synth}")
         for b in plan.b_refs:
             fams = {C.seed_family(p.ref.seed_dir) for p in plan.prefixes}
             cross = ("  [CROSS-FAMILY: target keeps the prefix's system prompt + pivot note]"
                      if fams - {C.seed_family(b.seed_dir)} else "")
-            # reference-blob size only matters when priming the auditor (fresh auditors never
-            # receive it); show it only then so the fresh plan print isn't misleading.
-            refsz = (f", reference={len(C.build_reference_blob(b)):,} chars"
-                     if cfg["prime_auditor"] else "")
+            # the auditor is always primed with this reference, so its size is always relevant.
+            refsz = f", reference={len(C.build_reference_blob(b)):,} chars"
             print(f"      new task               #{b.traj_id}  (seed {b.seed}{_cond(b)}, "
                   f"family {C.seed_family(b.seed_dir)}, max_turns={b.max_turns}{refsz}){cross}")
         for b in plan.b_refs:
-            for cond in cfg["conditions"]:
-                if cond == "no_prefix":
-                    tasks.append(C.build_continuation_task(
-                        plan, b, cond, None, DIMENSIONS, prime_auditor=cfg["prime_auditor"]))
-                else:
-                    for p in plan.prefixes:
-                        if p.condition == cond:
-                            tasks.append(C.build_continuation_task(
-                                plan, b, cond, p, DIMENSIONS, prime_auditor=cfg["prime_auditor"]))
+            if has_prefixes:
+                for p in plan.prefixes:
+                    tasks.append(C.build_continuation_task(plan, b, treatment, p, DIMENSIONS))
+            else:
+                tasks.append(C.build_continuation_task(plan, b, treatment, None, DIMENSIONS))
 
     expected = len(tasks) * cfg["n"]
-    print(f"\n  {len(plans)} model(s), {len(tasks)} cell(s) x n={cfg['n']} = {expected} "
-          "continuation(s) to generate")
+    print(f"\n  treatment {treatment!r}: {len(plans)} model(s), {len(tasks)} cell(s) x "
+          f"n={cfg['n']} = {expected} continuation(s) to generate")
 
     if cfg["dry_run"]:
-        print("\n[dry-run] plan validated (prefixes + new tasks + conditions). No generation, no cost.")
+        print("\n[dry-run] plan validated (treatment + prefixes + new tasks). No generation, no cost.")
         return
 
     run_dir = make_viewer.LOGS / f"{cfg['run_dir_stem']}-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
@@ -310,10 +288,10 @@ async def run_pipeline(cfg: dict) -> None:
     # provenance: what was run, under what inherited config (self-describing run dir).
     (run_dir / "continuation_meta.json").write_text(json.dumps({
         "experiment": "continuation",
-        "run_kind": cfg["run_dir_stem"],   # continuation | continuation-baseline
-        "config_version": "continuation-v2",
+        "run_kind": cfg["run_dir_stem"],   # continuation
+        "config_version": "continuation-v3",
         "n": cfg["n"],
-        "conditions": cfg["conditions"],
+        "treatment": treatment,
         "preamble": C.PREAMBLE,
         "plans": {
             model: {
@@ -321,7 +299,7 @@ async def run_pipeline(cfg: dict) -> None:
                 "prefixes": [
                     {
                         "traj_id": p.ref.traj_id,
-                        "condition": p.condition,
+                        "treatment": p.treatment,
                         "seed": p.ref.seed,
                         "seed_family": C.seed_family(p.ref.seed_dir),
                         "run_condition": p.ref.condition,   # allow|correct|None
@@ -366,8 +344,10 @@ async def run_pipeline(cfg: dict) -> None:
     else:
         print(f"[generate] viewer loader sees all {len(loaded)} continuation(s) -- OK")
 
-    if cfg["skip_judge"]:
-        print("\n[faithfulness] skipped (--skip-judge). Run later with the faithfulness judge.")
+    if not cfg["run_faithfulness"]:
+        print("\n[faithfulness] SKIPPED (off by default). The auditor was still primed to be "
+              "faithful; we just don't score it. Enable with --faithfulness-judge, or run later "
+              "via tools/exp_rejudge_continuation_faithfulness.py.")
     else:
         print("\n[faithfulness] auditor-faithfulness (deviation-from-original) judge ...")
         b_refs_by_id = {b.traj_id: b for plan in plans.values() for b in plan.b_refs}

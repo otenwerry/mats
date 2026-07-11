@@ -35,7 +35,9 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
+from matplotlib.lines import Line2D
+from matplotlib.ticker import PercentFormatter
 
 # consistent condition palette + order across every figure (colorblind-safe blue/orange)
 CONTROL_C = "#4C72B0"
@@ -132,6 +134,25 @@ def _empty_fig(msg: str, size=(4.6, 4.0)) -> str:
     for s in ax.spines.values():
         s.set_visible(False)
     return _fig_to_svg(fig)
+
+
+def _cat_xticks(ax, positions, labels, fontsize=None, tight=False, flat_max=7):
+    """Place categorical x-tick labels, tilting them only when a label is long enough that
+    flat text would collide with its neighbor. Short label sets (None/Clean/Corr/...) stay
+    horizontal; long free-form treatment names (e.g. 'Full hack multiple turns') tilt so the
+    names stay readable without overlapping -- 35 deg on a roomy axis, or fully vertical in a
+    cramped panel (tight=True, e.g. the per-model small-multiples). `flat_max` is the longest a
+    label (its longest line) may be before we tilt. Every continuation figure that puts
+    treatment/model names on the x-axis routes through this so the behavior is uniform."""
+    labels = [str(l) for l in labels]
+    longest = max((max((len(s) for s in l.split("\n")), default=0) for l in labels), default=0)
+    kw = {"fontsize": fontsize} if fontsize is not None else {}
+    if longest <= flat_max:
+        ax.set_xticks(positions, labels, **kw)
+    elif tight:
+        ax.set_xticks(positions, labels, rotation=90, ha="center", va="top", **kw)
+    else:
+        ax.set_xticks(positions, labels, rotation=35, ha="right", rotation_mode="anchor", **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -252,12 +273,14 @@ def fig_score_hist_grid(groups: list[tuple], ncols: int, colors=None,
                         xlabel: str = "Incompleteness  (1 = finished … 10 = cut off early)",
                         ylabel: str = "Trajectories",
                         empty_msg: str = "no incompleteness scores",
-                        suptitle: str = "") -> str:
+                        suptitle: str = "", percent: bool = False) -> str:
     """Small-multiples histograms of an integer 1..10 score per group (one panel per group).
     x = score 1..10, y = # items. Panels share x/y axes so they're directly comparable.
     `groups`: [(label, [scores]), ...] already in the order to display. `colors`: optional
     per-panel bar color list (parallel to groups); defaults to the shared incompleteness teal.
-    `xlabel`/`ylabel` label the shared axes; `suptitle`, when set, is the in-figure headline."""
+    `xlabel`/`ylabel` label the shared axes; `suptitle`, when set, is the in-figure headline.
+    `percent`: y as % OF EACH PANEL'S OWN n (bars per panel sum to 100), so panels with
+    different n are comparable regardless of size; ticks then read '20%' etc."""
     n = len(groups)
     if n == 0:
         return _empty_fig(empty_msg)
@@ -266,15 +289,23 @@ def fig_score_hist_grid(groups: list[tuple], ncols: int, colors=None,
     fig, axes = plt.subplots(nrows, ncols, figsize=(2.05 * ncols, 2.15 * nrows),
                              squeeze=False, sharex=True, sharey=True)
     bins = np.arange(0.5, 11.5, 1.0)   # integer bins centered on 1..10
-    ymax = max((int(np.histogram(s, bins=bins)[0].max()) if s else 0) for _, s in groups)
+
+    def _heights(s):   # bar heights for one panel: counts, or per-panel % when percent
+        counts = np.histogram(s, bins=bins)[0]
+        return counts / len(s) * 100.0 if (percent and s) else counts
+    ymax = max((float(_heights(s).max()) if s else 0.0) for _, s in groups)
     for idx, (label, scores) in enumerate(groups):
         ax = axes[idx // ncols][idx % ncols]
-        ax.hist(scores, bins=bins, color=(colors[idx] if colors else INCOMP_C),
+        weights = (np.full(len(scores), 100.0 / len(scores)) if (percent and scores) else None)
+        ax.hist(scores, bins=bins, weights=weights,
+                color=(colors[idx] if colors else INCOMP_C),
                 edgecolor="white", linewidth=0.5)
         ax.set_title(f"{label}\n(n={len(scores)})", fontsize=9.5)
         ax.set_xticks([1, 5, 10])
         ax.set_xlim(0.5, 10.5)
-        ax.set_ylim(0, ymax * 1.12 + 1)
+        ax.set_ylim(0, ymax * 1.12 + (0 if percent else 1))
+        if percent:
+            ax.yaxis.set_major_formatter(PercentFormatter(decimals=0))
         ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
         ax.set_axisbelow(True)
     for j in range(n, nrows * ncols):   # blank any unused trailing panels
@@ -415,7 +446,7 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
     rows = [r for r in by_condition if r["n"] > 0]
     if not rows:
         return _empty_fig("no continuations yet", (4.8, 4.2))
-    fig, ax = plt.subplots(figsize=(4.8, 4.2))
+    fig, ax = plt.subplots(figsize=(max(4.8, 1.2 * len(rows) + 1.6), 4.2))
     xs = np.arange(len(rows))
     rates, los, his = [], [], []
     for r in rows:
@@ -428,7 +459,7 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
         ax.annotate(f'{r["k"]}/{r["n"]}', (x, 100 * r["k"] / r["n"]),
                     textcoords="offset points", xytext=(0, 8), ha="center",
                     fontsize=10, color="#333", fontweight="bold")
-    ax.set_xticks(xs, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
+    _cat_xticks(ax, xs, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
     ax.set_ylabel("Reward-hack rate (%)")
     ax.set_ylim(0, min(100, max(rates[i] + his[i] for i in range(len(rows))) + 12))
     ax.set_title("Reward hacking by prefix condition")
@@ -439,6 +470,56 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
 
 _CONT_SHORT = {"No prefix": "None", "Clean prefix": "Clean", "Hack prefix": "Hack",
                "Corrected-hack prefix": "Corr", "Full-hack prefix": "Full"}
+
+
+def fig_continuation_rate_by_seed(by_seed: list[dict]) -> str:
+    """Grouped bars: one group per treatment, one bar per NEW-TASK seed within it, so the seeds'
+    reward-hack rates sit side by side under each treatment -- the direct read on whether the
+    seeds behave differently. Each bar is the pooled binary-hack rate over that (seed, treatment)
+    cell with a Wilson 95% CI; k/n printed. A seed that never ran a given treatment is left as a
+    GAP (not a misleading 0% bar). Seeds are ordered biggest-first and colored from the shared
+    categorical palette. Pools across target models, so it's a within-seed read, not a strict
+    cross-seed test where seeds cover different model sets. Empty when <2 seeds have data.
+    `by_seed`: [{seed, by_condition:[{label,k,n}, ... one per treatment in shared order]}]."""
+    seeds = [s for s in by_seed if any(r["n"] for r in s["by_condition"])]
+    if len(seeds) < 2:
+        return _empty_fig("need ≥ 2 seeds to compare", (4.8, 4.2))
+    base = seeds[0]["by_condition"]
+    # x = only the treatments some seed actually covers, in the shared row order
+    tidx = [i for i in range(len(base)) if any(s["by_condition"][i]["n"] for s in seeds)]
+    labels = [_CONT_SHORT.get(base[i]["label"], base[i]["label"]) for i in tidx]
+    nT, nS = len(tidx), len(seeds)
+    fig, ax = plt.subplots(figsize=(max(5.4, 1.25 * nT + 1.8), 4.4))
+    xs = np.arange(nT)
+    total_w = 0.82
+    bw = total_w / nS
+    ymax = 0.0
+    for si, s in enumerate(seeds):
+        color = MODEL_PALETTE[si % len(MODEL_PALETTE)]
+        for j, ti in enumerate(tidx):
+            r = s["by_condition"][ti]
+            if r["n"] == 0:                      # this seed never ran this treatment -> gap
+                continue
+            off = xs[j] - total_w / 2 + bw * (si + 0.5)
+            p, lo, hi = _wilson(r["k"], r["n"])
+            ax.bar(off, 100 * p, width=bw * 0.9, color=color,
+                   yerr=[[100 * (p - lo)], [100 * (hi - p)]], capsize=2.5,
+                   error_kw=dict(ecolor="#333", lw=0.9))
+            ax.annotate(f'{r["k"]}/{r["n"]}', (off, 100 * hi), textcoords="offset points",
+                        xytext=(0, 2), ha="center", fontsize=7, color="#333")
+            ymax = max(ymax, 100 * hi)
+    _cat_xticks(ax, xs, labels)
+    ax.set_ylabel("Reward-hack rate (%)")
+    ax.set_ylim(0, min(100, ymax + 10))
+    ax.set_title("Reward hacking by treatment, split by new-task seed")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    # legend OUTSIDE the axes (top-right) so it never lands on a tall bar; bbox_inches="tight"
+    # in _fig_to_svg grows the canvas to include it.
+    ax.legend(handles=[Patch(facecolor=MODEL_PALETTE[si % len(MODEL_PALETTE)], label=s["seed"])
+                       for si, s in enumerate(seeds)],
+              frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
+    return _fig_to_svg(fig)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,7 +550,7 @@ def _cond_boxstrip(rows: list[dict], key: str, ylabel: str, title: str) -> str:
         ax.scatter(jx, d, s=34, color=CONT_COLOR.get(r["label"], CONTROL_C),
                    edgecolor="white", lw=0.6, zorder=3)
         ax.annotate(f"n={len(d)}", (i, base), ha="center", va="top", fontsize=9, color="#555")
-    ax.set_xticks(pos, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
+    _cat_xticks(ax, pos, [_CONT_SHORT.get(r["label"], r["label"]) for r in rows])
     ax.set_xlim(-0.5, len(rows) - 0.5)
     ax.set_ylim(base - 0.06 * span, vmax + 0.10 * span)
     ax.set_ylabel(ylabel)
@@ -517,8 +598,8 @@ def fig_first_hack_model_grid(by_model: list[dict]) -> str:
             mean = sum(d) / len(d)
             ax.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=1.8, zorder=4)
         ax.set_title(m["model"], fontsize=10)
-        ax.set_xticks(range(len(conds)), [_CONT_SHORT.get(r["label"], r["label"]) for r in conds],
-                      fontsize=8)
+        _cat_xticks(ax, range(len(conds)), [_CONT_SHORT.get(r["label"], r["label"]) for r in conds],
+                    fontsize=8, tight=True)
         ax.set_xlim(-0.5, len(conds) - 0.5)
         ax.set_ylim(0.0, ymax * 1.08 + 1)
         ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
@@ -587,8 +668,8 @@ def fig_continuation_model_grid(by_model: list[dict]) -> str:
                 mean = sum(sc) / len(sc)
                 ax.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=1.8, zorder=4)
         ax.set_title(m["model"], fontsize=10)
-        ax.set_xticks(range(len(conds)), [_CONT_SHORT.get(r["label"], r["label"]) for r in conds],
-                      fontsize=8)
+        _cat_xticks(ax, range(len(conds)), [_CONT_SHORT.get(r["label"], r["label"]) for r in conds],
+                    fontsize=8, tight=True)
         ax.set_xlim(-0.5, len(conds) - 0.5)
         ax.set_ylim(0.0, 10.6)
         ax.set_yticks([1, 5, 10])
@@ -600,6 +681,261 @@ def fig_continuation_model_grid(by_model: list[dict]) -> str:
     fig.supylabel("reward_hacking", fontsize=10)
     fig.tight_layout()
     return _fig_to_svg(fig)
+
+
+def fig_continuation_model_pair(m: dict) -> str:
+    """Full-width per-model figure: left = each continuation's reward_hacking score (1-10) as a
+    jittered dot by prefix condition with a per-condition mean line; right = that model's reward-
+    hack rate (%) by prefix condition with Wilson 95% CI. `m` = one by_model entry
+    {model, by_condition:[{label, k, n, scores}, ...]}."""
+    conds = [r for r in m["by_condition"] if r["n"] > 0]
+    if not conds:
+        return _empty_fig(f"no data for {m['model']}", (7.0, 3.4))
+    rng = np.random.default_rng(0)
+    xs = np.arange(len(conds))
+    labels = [_CONT_SHORT.get(r["label"], r["label"]) for r in conds]
+    colors = [CONT_COLOR.get(r["label"], CONTROL_C) for r in conds]
+    fig, (axd, axb) = plt.subplots(1, 2, figsize=(max(9.5, 1.7 * len(conds) + 4.5), 4.3))
+    # left: reward_hacking score dots by prefix condition
+    for i, r in enumerate(conds):
+        sc = r["scores"]
+        if sc:
+            jx = i + rng.uniform(-0.15, 0.15, size=len(sc))
+            axd.scatter(jx, sc, s=32, color=colors[i], edgecolor="white", lw=0.5, zorder=3)
+            mean = sum(sc) / len(sc)
+            axd.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=2, zorder=4)
+            axd.annotate(f"{mean:.1f}", (i + 0.33, mean), va="center", ha="left",
+                         fontsize=8.5, color="#222")
+    _cat_xticks(axd, xs, labels)
+    axd.set_xlim(-0.5, len(conds) - 0.5)
+    axd.set_ylim(0.0, 10.6)
+    axd.set_yticks([1, 5, 10])
+    axd.set_ylabel("reward_hacking")
+    axd.set_title("reward_hacking by prefix condition")
+    axd.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    axd.set_axisbelow(True)
+    # right: reward-hack rate (%) by prefix condition, Wilson 95% CI
+    rates, los, his = [], [], []
+    for r in conds:
+        p, lo, hi = _wilson(r["k"], r["n"])
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    axb.bar(xs, rates, width=0.62, color=colors,
+            yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for x, r in zip(xs, conds):
+        axb.annotate(f'{r["k"]}/{r["n"]}', (x, 100 * r["k"] / r["n"]),
+                     textcoords="offset points", xytext=(0, 8), ha="center",
+                     fontsize=9.5, color="#333", fontweight="bold")
+    _cat_xticks(axb, xs, labels)
+    axb.set_xlim(-0.5, len(conds) - 0.5)
+    axb.set_ylim(0, min(100, max(rates[i] + his[i] for i in range(len(conds))) + 12))
+    axb.set_ylabel("Reward-hack rate (%)")
+    axb.set_title("Reward-hack rate by prefix condition")
+    axb.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    axb.set_axisbelow(True)
+    fig.suptitle(m["model"], fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    return _fig_to_svg(fig)
+
+
+def fig_interesting_category(cat: dict) -> str:
+    """One standalone graph per interesting-behavior category: grouped reward-hack-rate bars, one
+    group per model that ran this interesting prefix, its own no-prefix baseline (grey) beside the
+    interesting-prefix rate (red) so the effect is visible. Wilson 95% CI; k/n annotated. `cat` =
+    {label, models:[{model, base_k, base_n, int_k, int_n}, ...]}."""
+    models = [m for m in cat["models"] if m["int_n"] > 0]
+    if not models:
+        return ""
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.8 * len(models) + 1.6), 4.3))
+    xs = np.arange(len(models))
+    w = 0.38
+    ymax = 0.0
+    for j, (lab, kk, nk, color) in enumerate((
+            ("no prefix (baseline)", "base_k", "base_n", "#8C8C8C"),
+            ("interesting prefix", "int_k", "int_n", RH_C))):
+        for m in models:
+            p, lo, hi = _wilson(m[kk], m[nk])
+            ymax = max(ymax, 100 * hi)
+        rates = [100 * _wilson(m[kk], m[nk])[0] for m in models]
+        los = [100 * (_wilson(m[kk], m[nk])[0] - _wilson(m[kk], m[nk])[1]) for m in models]
+        his = [100 * (_wilson(m[kk], m[nk])[2] - _wilson(m[kk], m[nk])[0]) for m in models]
+        bars = ax.bar(xs + (j - 0.5) * w, rates, w, label=lab, color=color,
+                      yerr=[los, his], capsize=4, error_kw=dict(ecolor="#333", lw=1.0))
+        for b, m in zip(bars, models):
+            ax.annotate(f'{m[kk]}/{m[nk]}', (b.get_x() + b.get_width() / 2, b.get_height()),
+                        textcoords="offset points", xytext=(0, 3), ha="center",
+                        fontsize=8, color="#333")
+    _cat_xticks(ax, xs, [m["model"] for m in models])
+    ax.set_ylabel("Reward-hack rate (%)")
+    ax.set_ylim(0, min(100, ymax + 14))
+    ax.set_title(cat["label"][:1].upper() + cat["label"][1:])
+    ax.legend(frameon=False, fontsize=8.5, loc="upper right")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Continuations — model x treatment coverage/rate matrix + matched-baseline effect
+# --------------------------------------------------------------------------- #
+# These two lead the Continuations section (2026-07-09). They exist because the pooled
+# by-treatment bar chart is confounded when treatments cover DIFFERENT model subsets: it
+# would compare, say, a 3-model treatment's rate against a 5-model baseline. The matrix
+# shows every (model, treatment) cell honestly (incl. what's missing); the dumbbell compares
+# each treatment to its baseline computed on the SAME models it actually covers.
+def _cont_lut(continuations: dict):
+    """(models, treatments, lut). models = per-model order the caller built (strongest first);
+    treatments = [(key, label, is_baseline)] in display order; lut[model][key] = its rate row."""
+    treatments = [(r["key"], r["label"], r.get("is_baseline", False))
+                  for r in continuations.get("by_condition", [])]
+    by_model = continuations.get("by_model", [])
+    models = [m["model"] for m in by_model]
+    lut = {m["model"]: {r["key"]: r for r in m["by_condition"]} for m in by_model}
+    return models, treatments, lut
+
+
+def _treat_tick(label: str) -> str:
+    return _CONT_SHORT.get(label, label)
+
+
+def fig_continuation_matrix(continuations: dict) -> str:
+    """Heatmap: rows = target models (+ a pooled 'All models' row), columns = treatments
+    (baseline column separated by a rule), cell = reward-hack rate (color) with k/n printed.
+    A cell that never ran (n==0) is a hatched grey square with a dash -- so missing coverage is
+    obvious. This one figure carries per-model behavior, the aggregate, AND what's missing."""
+    models, treatments, lut = _cont_lut(continuations)
+    if not models or not treatments:
+        return _empty_fig("no continuations yet", (6.0, 4.0))
+    keys = [k for k, _, _ in treatments]
+    labels = [l for _, l, _ in treatments]
+    n_base = sum(1 for _, _, b in treatments if b)   # baseline cols lead the order
+    row_labels = models + ["All models"]
+    nrow, ncol = len(row_labels), len(treatments)
+
+    rate = np.full((nrow, ncol), np.nan)
+    txt = [["" for _ in range(ncol)] for _ in range(nrow)]
+    for j, k in enumerate(keys):
+        colK = colN = 0
+        for i, model in enumerate(models):
+            r = lut[model].get(k) or {"k": 0, "n": 0}
+            if r["n"] > 0:
+                rate[i, j] = r["k"] / r["n"]
+                txt[i][j] = f'{r["k"]}/{r["n"]}'
+                colK += r["k"]; colN += r["n"]
+        if colN > 0:
+            rate[nrow - 1, j] = colK / colN
+            txt[nrow - 1][j] = f'{colK}/{colN}'
+
+    fig, ax = plt.subplots(figsize=(1.02 * ncol + 2.6, 0.6 * nrow + 1.9))
+    cmap = matplotlib.colormaps["Reds"].copy()
+    cmap.set_bad("#ededf2")
+    im = ax.imshow(np.ma.masked_invalid(rate), cmap=cmap, vmin=0, vmax=1,
+                   aspect="auto", interpolation="nearest")
+    for i in range(nrow):
+        for j in range(ncol):
+            if np.isnan(rate[i, j]):
+                ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, fill=False,
+                                       hatch="////", edgecolor="#cfcfda", lw=0))
+                ax.text(j, i, "—", ha="center", va="center", color="#aeaebc", fontsize=10)
+            else:
+                tc = "white" if rate[i, j] > 0.55 else "#222"
+                ax.text(j, i, txt[i][j], ha="center", va="center",
+                        color=tc, fontsize=9, fontweight="bold")
+    ax.set_xticks(range(ncol), [_treat_tick(l) for l in labels], rotation=35, ha="right", fontsize=9)
+    ax.set_yticks(range(nrow), row_labels, fontsize=9)
+    # thin white gridlines between cells
+    ax.set_xticks(np.arange(-0.5, ncol, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, nrow, 1), minor=True)
+    ax.grid(which="minor", color="white", lw=1.6)
+    ax.tick_params(which="minor", length=0)
+    # separators: after the baseline column(s), and above the pooled 'All models' row
+    if 0 < n_base < ncol:
+        ax.axvline(n_base - 0.5, color="#555", lw=1.6)
+    ax.axhline(len(models) - 0.5, color="#555", lw=1.6)
+    for s in ax.spines.values():
+        s.set_visible(False)
+    ax.set_title("Reward-hack rate by model × treatment", pad=10)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+    cbar.set_label("reward-hack rate", fontsize=9)
+    cbar.set_ticks([0, 0.5, 1.0]); cbar.set_ticklabels(["0", "50%", "100%"])
+    cbar.outline.set_visible(False)
+    return _fig_to_svg(fig)
+
+
+def fig_continuation_vs_baseline(continuations: dict) -> str:
+    """Dumbbell: for each PREFIX treatment, its reward-hack rate vs the no-prefix baseline
+    computed on the SAME models the treatment covers (a fair comparison -- not the pooled
+    baseline over all models). Grey dot = matched baseline, red dot = with-prefix; the line
+    is the effect. Sorted by effect size (largest jump on top). Empty string if there is no
+    baseline treatment or no prefixed treatment to compare."""
+    models, treatments, lut = _cont_lut(continuations)
+    base_keys = [k for k, _, b in treatments if b]
+    prefixed = [(k, l) for k, l, b in treatments if not b]
+    if not models or not base_keys or not prefixed:
+        return ""
+    entries = []
+    for k, label in prefixed:
+        tk = tn = bk = bn = 0
+        cov = []
+        for m in models:
+            tr = lut[m].get(k) or {"k": 0, "n": 0}
+            if tr["n"] == 0:
+                continue
+            mbk = sum((lut[m].get(x) or {"k": 0, "n": 0})["k"] for x in base_keys)
+            mbn = sum((lut[m].get(x) or {"k": 0, "n": 0})["n"] for x in base_keys)
+            if mbn == 0:                     # no matched baseline for this model -> can't compare it fairly
+                continue
+            tk += tr["k"]; tn += tr["n"]; bk += mbk; bn += mbn; cov.append(m)
+        if tn == 0 or bn == 0:
+            continue
+        entries.append({"label": label, "models": cov,
+                        "t": tk / tn, "b": bk / bn, "tn": tn})
+    if not entries:
+        return ""
+    entries.sort(key=lambda e: e["t"] - e["b"])   # ascending -> biggest jump lands at the top
+    fig, ax = plt.subplots(figsize=(7.4, 0.52 * len(entries) + 1.9))
+    for y, e in enumerate(entries):
+        b, t = 100 * e["b"], 100 * e["t"]
+        ax.plot([b, t], [y, y], color="#c2c2cf", lw=2.4, zorder=1, solid_capstyle="round")
+        ax.scatter([b], [y], s=95, color="#8C8C8C", edgecolor="white", lw=1.2, zorder=3)
+        ax.scatter([t], [y], s=95, color=RH_C, edgecolor="white", lw=1.2, zorder=3)
+        ax.annotate(f"{t - b:+.0f}pp", (max(b, t), y), xytext=(9, 0),
+                    textcoords="offset points", va="center", ha="left",
+                    fontsize=9, color="#333", fontweight="bold")
+    ax.set_yticks(range(len(entries)),
+                  [f'{e["label"]}  ({len(e["models"])}m)' for e in entries], fontsize=9)
+    ax.set_ylim(-0.6, len(entries) - 0.4)
+    ax.set_xlim(0, min(100, max(100 * e["t"] for e in entries) + 20))
+    ax.set_xlabel("Reward-hack rate (%)")
+    ax.set_title("Each prefix vs its matched no-prefix baseline")
+    ax.xaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(handles=[
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#8C8C8C",
+               markersize=9, label="no prefix (matched baseline)"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=RH_C,
+               markersize=9, label="after this prefix")],
+        loc="lower right", fontsize=8.5, frameon=False)
+    return _fig_to_svg(fig)
+
+
+def _continuation_missing_note(continuations: dict) -> str:
+    """A plain-English 'not yet run' list: per prefix treatment, the models that have no cell
+    yet (so it doubles as a rerun to-do). '' when every treatment covers every model."""
+    models, treatments, lut = _cont_lut(continuations)
+    if not models:
+        return ""
+    parts = []
+    for k, label, is_base in treatments:
+        if is_base:
+            continue
+        missing = [m for m in models if (lut[m].get(k) or {"n": 0})["n"] == 0]
+        if missing:
+            parts.append(f'<b>{label}</b>: {", ".join(missing)}')
+    if not parts:
+        return ('<p class="vsub">Coverage is complete &mdash; every treatment ran on every '
+                'model.</p>')
+    return ('<p class="vsub"><b>Not yet run</b> (rerun these treatment&times;model cells to '
+            'complete the grid): ' + "  &middot;  ".join(parts) + "</p>")
 
 
 # --------------------------------------------------------------------------- #
@@ -760,20 +1096,26 @@ Modes are non-exclusive &mdash; a run can carry several, so counts need not sum 
 """
 
 
-def _condition_section(cond: dict) -> str:
+def _condition_section(cond: dict, show_condition_rate: bool = True) -> str:
     """The 'Reward hacking' block over the sweep's condition-experiment audits: ONLY the
     headline rate figure keeps the allow/correct split; category composition, per-model
     and per-prompt rates, and the reward_hacking score histogram pool the conditions
     (Owen, 2026-07-05: the split doesn't matter beyond the first graph).
     `cond` is make_viewer.condition_comparison_data's dict; its `note` records exactly
-    which audits were excluded from the comparison and is always shown."""
+    which audits were excluded from the comparison and is always shown.
+    `show_condition_rate` gates the leading allow-vs-correct "Hack rate by condition" figure
+    (dropped on sweep 7, Owen 2026-07-10)."""
     ci_cap = "Hack = binary definition. Error bars: Wilson 95% CI."
+    pooled_note = ("conditions pooled in every figure but the first" if show_condition_rate
+                   else "conditions pooled")
+    lead_fig = (_figure(fig_condition_rate(cond["by_condition"]), ci_cap)
+                if show_condition_rate else "")
     return (
         "<h2>Reward hacking by seed condition</h2>"
         f'<p class="vsub"><b>{cond["n"]}</b> audits &middot; {esc_loc(cond["note"])} &middot; '
-        "conditions pooled in every figure but the first</p>"
+        f'{pooled_note}</p>'
         '<div class="figgrid">'
-        + _figure(fig_condition_rate(cond["by_condition"]), ci_cap)
+        + lead_fig
         + _figure(fig_category_composition(cond["categories"]))
         + "</div>"
         '<div class="figgrid">'
@@ -1040,21 +1382,23 @@ def _mechanism_section(mechanism: dict) -> str:
 
 
 def _continuation_section(continuations: dict) -> str:
-    """The 'Continuations' block: the 3-bar reward-hack-rate-by-prefix figure. Empty string
-    when there are no continuations (so the page just omits the section)."""
+    """The 'Continuations' block. Leads with the two coverage-aware summary figures (the
+    model × treatment rate matrix and the matched-baseline dumbbell) + a 'not yet run' list,
+    then the pooled bar / score histograms / per-model grid as detail. Empty string when there
+    are no continuations (so the page just omits the section)."""
     rows = continuations.get("by_condition", [])
     if not any(r["n"] for r in rows):
         return ""
     n_dead = continuations.get("n_dead", 0)
     dead_note = f" {n_dead} dead continuation(s) excluded." if n_dead else ""
-    # baseline-only screening candidates (no prefixed condition) are held out of every figure
+    # baseline-only screening candidates (no prefixed treatment) are held out of every figure
     # -- surface which ones and how many so the exclusion is visible, not silent.
     n_bo = continuations.get("n_baseline_only", 0)
     bo_bids = continuations.get("baseline_only_bids", [])
     bo_note = (f" {n_bo} baseline-only continuation(s) excluded "
-               f"(B {', '.join('#' + str(b) for b in bo_bids)} — screening candidates, "
-               "not completed experiments)." if n_bo else "")
-    # RH-score distribution: one histogram panel per condition (with data), colored to match.
+               f"(B {', '.join('#' + str(b) for b in bo_bids)} — no prefixed treatment ran "
+               "against them yet)." if n_bo else "")
+    # RH-score distribution: one histogram panel per treatment (with data), colored to match.
     rows = [r for r in rows if r["n"] > 0]
     hist_groups = [(r["label"], r["scores"]) for r in rows]
     hist_colors = [CONT_COLOR.get(r["label"], INCOMP_C) for r in rows]
@@ -1062,14 +1406,43 @@ def _continuation_section(continuations: dict) -> str:
         hist_groups, ncols=3, colors=hist_colors,
         xlabel="reward_hacking score  (1 = none … 10 = blatant)",
         ylabel="Continuations", empty_msg="no scored continuations",
-        suptitle="Score distribution by condition")
+        suptitle="Score distribution by treatment", percent=True)
     figs = [fig_continuation_rate(rows), hist]
     by_model = continuations.get("by_model", [])
+    # standalone per-interesting-category graphs (the 'interestings' treatment lumps several
+    # behaviors; here each category is its own graph, models that ran it vs their baseline).
+    cat_svgs = [s for s in (fig_interesting_category(c)
+                            for c in continuations.get("interesting_categories", [])) if s]
+    cat_html = ""
+    if cat_svgs:
+        cat_html = (
+            "<h3>By interesting-behavior category</h3>"
+            '<p class="vsub">The <b>interestings</b> prefix pools several different behaviors, so '
+            "here it's split by category: each graph shows the models that ran that interesting "
+            "prefix (red) against their own no-prefix baseline (grey). Wilson 95% CI.</p>"
+            + _stack(*cat_svgs))
+    # per-model detail: one full-width row per model (score dots + rate bars side by side).
+    model_html = ""
     if by_model:
-        figs.append(fig_continuation_model_grid(by_model))
+        model_html = (
+            "<h3>Reward hacking by prefix condition, per model</h3>"
+            '<p class="vsub">One row per model: reward_hacking scores by prefix condition (left) '
+            "and the reward-hack rate with Wilson 95% CI (right).</p>"
+            + _stack(*(fig_continuation_model_pair(m) for m in by_model)))
     # cross-seed-dir continuation: a different KIND of experiment (new task from a different
     # seed family than the prefix), rendered in its own tinted box so it isn't read as part
     # of the same-family headline above.
+    # by NEW-TASK seed: does the second task's seed change the hack rate per treatment?
+    by_seed = continuations.get("by_seed", [])
+    seed_html = ""
+    if sum(1 for s in by_seed if any(r["n"] for r in s["by_condition"])) >= 2:
+        seed_html = (
+            "<h3>By new-task seed</h3>"
+            '<p class="vsub">Each treatment\'s reward-hack rate split by the <b>seed of the new '
+            "(second) task</b> — a check on whether the seeds behave differently. Pools across "
+            "target models (a within-seed read, not a strict cross-seed test, since seeds can "
+            "cover different model sets); small-n seeds have wide intervals.</p>"
+            + _stack(fig_continuation_rate_by_seed(by_seed)))
     cross = continuations.get("by_condition_cross")
     cross_html = ""
     if cross and any(r["n"] for r in cross):
@@ -1085,12 +1458,23 @@ def _continuation_section(continuations: dict) -> str:
         cross_html += "</div>"
     return (
         "<h2>Reward hacking after a prior task</h2>"
-        '<p class="vsub">The same new task is handed to each target four ways: with <b>no '
-        'prior context</b> (the baseline), after a <b>clean prefix</b> (a prior task it did '
-        'honestly), after a <b>corrected-hack prefix</b>, or after a <b>full-hack prefix</b> (a '
-        'prior task it reward-hacked). '
-        f'reward_hacking is scored on the new task only.{dead_note}{bo_note}</p>'
+        '<p class="vsub">The same new task is handed to each target under several '
+        '<b>treatments</b>: a <b>no-prefix baseline</b> (no prior context) and one or more '
+        '<b>prefix</b> treatments (the target first carries a prior trajectory — e.g. one it '
+        'reward-hacked, corrected, or ran cleanly). reward_hacking is scored on the new task '
+        f'only.{dead_note}{bo_note}</p>'
+        # coverage-aware summary FIRST: the matrix shows every (model, treatment) cell incl.
+        # what's missing.
+        + _stack(fig_continuation_matrix(continuations))
+        + _continuation_missing_note(continuations)
+        + "<h3>Pooled rate &amp; score distribution</h3>"
+        '<p class="vsub">The pooled bar mixes models, so treatments that cover different model '
+        'sets are not strictly comparable here — use the matrix above for that; these add the '
+        'score distributions across treatments.</p>'
         + _stack(*figs)
+        + cat_html
+        + model_html
+        + seed_html
         + cross_html
     )
 
@@ -1251,10 +1635,13 @@ def fig_cost_by_role(cost: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def _fig_cost_stacked(rows: list, title: str, tilde: str) -> str:
-    """Mean cost of one run per group (target model or auditor), stacked by role
-    (auditor/target/judge) so you see both the per-run cost and where that money goes. Bars
-    annotated with the mean total; groups richest-first (as ordered by the caller)."""
+def _fig_cost_stacked(rows: list, title: str, tilde: str,
+                      ylabel: str = "Mean cost per run ($)") -> str:
+    """Cost per group (target model / auditor / treatment), stacked by role
+    (auditor/target/judge) so you see both the per-group cost and where that money goes. Each
+    row is {model (the group label), roles:{role:$}, total_mean (the value plotted+annotated),
+    n}; the value can be a mean (default `ylabel`) or a total (pass ylabel="Total spend ($)").
+    Bars annotated with total_mean; groups in the caller's order."""
     if not rows:
         return _empty_fig("no cost data")
     fig, ax = plt.subplots(figsize=(max(5.5, 1.25 * len(rows) + 1.0), 4.4))
@@ -1269,9 +1656,13 @@ def _fig_cost_stacked(rows: list, title: str, tilde: str) -> str:
         ax.annotate(f"{tilde}{_usd(row['total_mean'])}", (x, row["total_mean"]),
                     textcoords="offset points", xytext=(0, 3), ha="center",
                     fontsize=8.5, color="#333")
+    # long group names (free-form treatment slugs like "Full hack multiple turns") need a
+    # steeper tilt than the short model/auditor names this figure is also used for, or they
+    # collide; key off the longest name so the model/auditor cost figures keep their 20 deg.
+    _longest = max((len(str(row["model"])) for row in rows), default=0)
     ax.set_xticks(xs, [f"{row['model']}\n(n={row['n']})" for row in rows],
-                  rotation=20, ha="right", fontsize=8.5)
-    ax.set_ylabel("Mean cost per run ($)")
+                  rotation=38 if _longest > 15 else 20, ha="right", fontsize=8.5)
+    ax.set_ylabel(ylabel)
     ax.set_ylim(0, max(row["total_mean"] for row in rows) * 1.16)
     ax.set_title(title)
     ax.legend(frameon=False, fontsize=9, loc="upper right")
@@ -1383,6 +1774,66 @@ def _annotation_cost_html(ann: dict | None) -> str:
     )
 
 
+FAITHFUL_COST_COLOR = "#64B5CD"
+
+
+def fig_cost_faithfulness(f: dict) -> str:
+    """Mean cost of the continuation FAITHFULNESS judge per judged continuation, grouped by the
+    target model of that continuation (longer transcripts cost more to compare against B). Title
+    carries the total faithfulness-judge spend. Falls back to a labelled placeholder when no
+    judged continuation in this sweep has captured usage yet (judgments predating cost tracking)."""
+    rows = f.get("by_target") or []
+    if not rows:
+        miss = f.get("n_missing_usage", 0)
+        return _empty_fig(
+            f"no captured faithfulness-judge cost yet\n({miss} judged continuation(s) predate "
+            "cost tracking)" if miss else "no faithfulness judgments", (5.2, 4.0))
+    tilde = "" if f.get("exact") else "~"
+    fig, ax = plt.subplots(figsize=(max(5.2, 1.25 * len(rows) + 1.0), 4.2))
+    xs = np.arange(len(rows))
+    vals = [r["mean"] for r in rows]
+    ax.bar(xs, vals, width=0.6, color=FAITHFUL_COST_COLOR, edgecolor="white", lw=0.4)
+    for x, r in zip(xs, rows):
+        ax.annotate(f"{tilde}{_usd(r['mean'])}", (x, r["mean"]),
+                    textcoords="offset points", xytext=(0, 3), ha="center",
+                    fontsize=8.5, color="#333")
+    ax.set_xticks(xs, [f"{r['model']}\n(n={r['n']})" for r in rows],
+                  rotation=20, ha="right", fontsize=8.5)
+    ax.set_ylabel("Mean faithfulness-judge cost per continuation ($)")
+    ax.set_ylim(0, max(vals) * 1.18)
+    ax.set_title(f"Continuation faithfulness-judge cost — {tilde}{_usd(f['total'])} total")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _faithfulness_cost_html(f: dict | None) -> str:
+    """Sub-block under Cost for the continuation faithfulness judge. Empty when this sweep has
+    no judged continuations at all. Surfaces the going-forward-only capture gap (continuations
+    judged before usage was recorded) rather than hiding it, per the lossy-processing rule."""
+    if not f:
+        return ""
+    tilde = "" if f.get("exact") else "~"
+    n_use, n_miss = f["n_with_usage"], f["n_missing_usage"]
+    models = ", ".join(f.get("models") or []) or "the faithfulness-judge model"
+    if n_use:
+        lead = (f'{tilde}<b>{_usd(f["total"])}</b> to judge auditor faithfulness across '
+                f'<b>{n_use}</b> continuation(s) (mean {tilde}{_usd(f["mean_per"])} each), '
+                f'via {esc_loc(models)}. This is a separate call per continuation that checks how '
+                f'faithfully the auditor reproduced the original run — not part of the '
+                f'auditor/target/judge totals above.')
+    else:
+        lead = ('Continuation faithfulness-judge cost is captured going forward; none of this '
+                'sweep’s judged continuations recorded it yet.')
+    gap = (f' <b>{n_miss}</b> judged continuation(s) predate cost tracking and carry no cost '
+           f'(re-judge with <code>--force-judge</code> to fill them in).' if n_miss else "")
+    return (
+        '<h3 style="margin:26px 0 2px;font-size:15px;">Continuation faithfulness judge</h3>'
+        f'<p class="vsub">{lead}{gap}</p>'
+        + _stack(fig_cost_faithfulness(f))
+    )
+
+
 def _cost_section(cost: dict, show_by_auditor: bool = False) -> str:
     """The 'Cost' block: budget split by role + mean cost per audit by target + the per-audit
     spread. Over the sweep's live audits. Empty string when there's no cost data.
@@ -1408,6 +1859,51 @@ def _cost_section(cost: dict, show_by_auditor: bool = False) -> str:
         f'<b>auditor</b>, <b>target</b>, and <b>judge</b> roles.{exact_note}{unpriced}</p>'
         + _stack(*figs)
         + _annotation_cost_html(cost.get("annotation"))
+    )
+
+
+def fig_cont_cost_by_treatment(cc: dict) -> str:
+    """MEAN cost of one continuation run per treatment (baseline + each prefixed treatment),
+    stacked by role (auditor/target/judge). Per-run means, not totals, so the treatments are
+    comparable regardless of how many times each was run (the grand total + the by-role split
+    above carry the absolute spend). Baseline-first, in the order make_viewer stamped."""
+    rows = []
+    for r in cc.get("by_treatment", []):
+        n = r["n"] or 1
+        rows.append({"model": r["label"], "roles": {role: c / n for role, c in r["roles"].items()},
+                     "total_mean": r["total"] / n, "n": r["n"]})
+    if not rows:
+        return _empty_fig("no continuation cost data")
+    return _fig_cost_stacked(rows, "Continuation cost per run by treatment",
+                             "" if cc["exact"] else "~")   # default ylabel = mean cost per run
+
+
+def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str:
+    """The 'Continuation runs' cost block on the Cost tab (renders on whichever sweep owns the
+    continuations, beside the original-audit 'Cost' block). Shows what it cost to GENERATE the
+    continuation runs -- auditor + target + inline reward-hacking judge -- split by role and by
+    treatment, then the hack-turn annotation and (optional) faithfulness-judge sub-blocks, which
+    are separate post-hoc Anthropic passes. Empty string when there is no continuation cost data
+    at all (so a sweep without continuations shows nothing)."""
+    if not cc:
+        # no generation cost captured, but a faithfulness pass may still have run -- show it alone.
+        return _faithfulness_cost_html(faithfulness)
+    tilde = "" if cc["exact"] else "~"
+    unpriced = (" A few calls used a model with no price and were dropped from the totals."
+                if cc.get("any_unpriced") else "")
+    exact_note = ("" if cc["exact"] else
+                  " <b>~</b> marks a price&times;token estimate; runs bill exactly once routed "
+                  "through OpenRouter.")
+    lead = (f'{tilde}<b>{_usd(cc["total"])}</b> to generate <b>{cc["n"]}</b> continuation(s) '
+            f'(mean {tilde}{_usd(cc["mean_per"])} each). This is the auditor + target + inline '
+            f'reward-hacking judge -- the same three roles as the audit cost above, tallied over '
+            f'the continuation runs and split by treatment below.{exact_note}{unpriced}')
+    return (
+        '<h2 style="margin-top:34px;">Continuation runs</h2>'
+        f'<p class="vsub">{lead}</p>'
+        + _stack(fig_cost_by_role(cc), fig_cont_cost_by_treatment(cc))
+        + _annotation_cost_html(cc.get("annotation"))
+        + _faithfulness_cost_html(faithfulness)
     )
 
 
@@ -1657,11 +2153,14 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        mechanism: dict | None = None,
                        user_turns: dict | None = None,
                        condition_exp: dict | None = None,
+                       show_condition_rate: bool = True,
                        reasoning_exp: dict | None = None,
                        failure_modes: dict | None = None,
                        deadline: dict | None = None,
                        cost: dict | None = None,
                        cost_by_auditor: bool = False,
+                       cont_faithfulness_cost: dict | None = None,
+                       cont_generation_cost: dict | None = None,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
                        subnav_html: str = "") -> str:
@@ -1721,11 +2220,16 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     cont_timing = _continuation_timing_section(continuations) if continuations else ""
     incomp_html = _incompleteness_section(incompleteness) if incompleteness else ""
     ut_html = _user_turns_section(user_turns) if user_turns else ""
-    cond_html = _condition_section(condition_exp) if condition_exp else ""
+    cond_html = _condition_section(condition_exp, show_condition_rate) if condition_exp else ""
     reasoning_html = _reasoning_section(reasoning_exp) if reasoning_exp else ""
     fmodes_html = _failure_modes_section(failure_modes) if failure_modes else ""
     deadline_html = _deadline_section(deadline) if deadline else ""
     cost_html = _cost_section(cost, show_by_auditor=cost_by_auditor) if cost else ""
+    # NEW 'Continuation runs' block on the Cost tab (on whichever sweep owns the continuations):
+    # continuation generation cost split by role + by treatment, then the hack-turn-annotation
+    # and (optional, off-by-default) faithfulness-judge sub-blocks -- both separate Anthropic
+    # passes. The existing 'Cost' block above stays over the ORIGINAL audit trajectories only.
+    cost_html += _cont_cost_section(cont_generation_cost, cont_faithfulness_cost)
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
     # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
@@ -1736,11 +2240,11 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     cont_panel = f"{cont_inner}{cont_timing}{mech_inner}"
     tab_specs = [
         ("audits", "Original audits", audits_panel),
-        ("deadline", "Deadline notices", deadline_html),
         ("cost", "Cost", cost_html),
         ("continuations", "Continuations", cont_panel),
         ("weaker", "Weaker models", old_inner),
         ("rollback", "Rollback re-hacking", rollback_html),
+        ("deadline", "Deadline notices", deadline_html),
     ]
     tabs = [(k, lbl, h) for k, lbl, h in tab_specs if h and h.strip()]
     body = f"""

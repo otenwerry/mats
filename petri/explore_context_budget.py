@@ -59,13 +59,16 @@ async def main() -> None:
               f"{comp}")
 
     print("\n=== prefixes (target side, 2nd half: prefix transcript sits in the TARGET's context) ===")
-    plans = await C.build_plans(PREFIX_IDS, CANDIDATES)
+    # build_plans is now per-treatment; this diagnostic just wants every prefix's reconstructed
+    # transcript, so pass all ids under one dummy treatment and label each by its PREFIX_IDS flavor.
+    flavor = {i: flav for flav, ids in PREFIX_IDS.items() for i in ids}
+    plans = await C.build_plans("full-hack", sorted(flavor), CANDIDATES)
     for model, plan in sorted(plans.items()):
         for p in plan.prefixes:
             a = by_id.get(p.ref.traj_id, {})
             chars = _msgs_chars(p.messages)
             comp = "  ORIGINAL COMPACTED" if a.get("compactions") else ""
-            print(f"  #{p.ref.traj_id}: {model:16s} {p.condition:22s} "
+            print(f"  #{p.ref.traj_id}: {model:16s} {flavor.get(p.ref.traj_id, '?'):22s} "
                   f"{mv.seed_label(p.ref.seed):18s} prefix={chars:>9,} chars "
                   f"(~{int(chars / RATIO):>7,} tok){comp}")
 

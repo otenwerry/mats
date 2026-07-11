@@ -46,8 +46,6 @@ Lossy processing must be surfaced. Whenever a pipeline drops or degrades data â€
 
 Big data files should be stored in mats-local so that they don't get stored on github. Feel free to make new folders within mats-local when relevant.
 
-I like to deal with git myself. There's no need for you to commit anything. You're welcome to do read-only git commands to figure out answers to whatever questions you might have, but I can handle the committing.
-
 When making visuals and viewers, include the minimum amount of information necessary to clearly communicate the data. For example, don't add textual explainers to figures unless I ask for them.
 
 # Preferences

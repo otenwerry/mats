@@ -16,12 +16,12 @@ which lives next to the data.
   - `exp_audit_pipeline.py` — run audits end-to-end (audit → annotate → viewer).
   - `exp_rollback_pipeline.py` — rollback resampling experiments end-to-end.
   - `exp_continuation_pipeline.py` — continuation experiments (condition a target on a prior
-    task, then hand it a new one) end-to-end. Runs the three PREFIXED conditions by default;
-    the `no_prefix` baseline is measured first by the screening half below.
-  - `exp_baseline_pipeline.py` — the first half of the split continuation experiment: run
-    candidate new tasks standalone (`no_prefix` only, N times each) to measure their PRIOR
-    hack rate, so low-prior candidates can be picked before spending on prefixes. Writes
-    `continuation-baseline-*/` dirs; the viewer joins the halves by B id.
+    task, then hand it a new one) end-to-end. ONE INVOCATION = ONE TREATMENT (2026-07-08):
+    `--treatment=<slug>` labels the run, `--prefixes=<ids>|none` picks the prefix set (`none`
+    = a no-prefix baseline); run it again per treatment. The auditor is ALWAYS faithful (primed
+    with the new task's original + a faithfulness instruction). Retired the old
+    `--full-hack-prefixes/--corrected-hack-prefixes/--clean-prefixes + --conditions` scheme and
+    the separate `exp_baseline_pipeline.py` (the baseline is now just `--prefixes=none`).
   - `make_viewer.py` — builds the static viewer (run on its own, or auto-run by the pipelines).
 
   (There used to be a top-level `exp_resample_begin_pipeline.py`; it was removed. The
@@ -67,15 +67,18 @@ which lives next to the data.
    original.
 4. **Continuation runs** (`continuation-*/`): condition a target on a PRIOR task (a prefix
    from one seed) and then hand it a NEW task from a different seed, to ask whether the prior
-   task changes its hack rate on the new one. Conditions: `no_prefix` / `clean_prefix` /
-   `corrected_hack_prefix` / `full_hack_prefix` (legacy runs: the undivided `hack_prefix`);
-   per model, any number of prefixes per condition × any number of new tasks, every pair a
-   cell. Since 2026-07-05 the experiment is SPLIT: `exp_baseline_pipeline.py` runs the
-   `no_prefix` baseline first (`continuation-baseline-*/` dirs, a screening pass for
-   low-prior new tasks), and `exp_continuation_pipeline.py` then runs only the prefixed
-   conditions on the picked candidates; the continuations page joins the halves by B id. A prefixed target keeps the PREFIX's own system prompt; for a new task from a
-   different seed family the pivot names the new kind of work ("...a different task:
-   <descriptor> this time."). Rendered on the owning sweep's
+   task changes its hack rate on the new one. Each run is ONE free-form TREATMENT
+   (`--treatment=<slug>`, e.g. `full-hack` / `clean` / `no-prefix`); `--prefixes=none` is the
+   baseline (no prior context). The viewer renders whatever treatments appear, each in its own
+   spot, and pools runs of the same treatment on the same B by B id (so the baseline and every
+   prefixed treatment sit in one box). Baseline-vs-prefixed is detected STRUCTURALLY (prefix
+   present), never by the treatment's name. Legacy dirs used a fixed 4-condition enum
+   (`no_prefix` / `clean_prefix` / `corrected_hack_prefix` / `full_hack_prefix`, plus the
+   undivided `hack_prefix`); those map to their historical labels so old data still renders.
+   Per model, any number of prefixes × any number of new tasks, every pair a cell. A prefixed
+   target keeps the PREFIX's own system prompt; for a new task from a different seed family the
+   pivot names the new kind of work ("...a different task: <descriptor> this time."). Rendered
+   on the owning sweep's
    `continuations_<key>.html` page (the sweep of the B original each continuation reruns,
    reached from the Continuations button beside that sweep's title; its figures join that
    sweep's visuals page). Since 2026-07-05 the auditor is FRESH by default — it gets only the

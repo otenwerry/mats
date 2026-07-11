@@ -8,15 +8,18 @@ continuations you already have. This re-runs the faithfulness judge in place: it
 existing .eval continuations from the dir and re-judges them against their B original. NO
 continuations are regenerated; the ONLY cost is the Anthropic judge calls.
 
-It can be scoped to specific conditions (e.g. --conditions=no_prefix), leaving the other
-conditions' stored verdicts untouched. force is ON by default (re-judging is the whole point).
+It can be scoped to specific TREATMENTS (e.g. --conditions=no-prefix), leaving the other
+treatments' stored verdicts untouched. Treatments are free-form now, so any name is accepted;
+a name that matches nothing in the dir just judges zero and prints a note. Legacy identities
+(no_prefix / clean_prefix / ...) still work for old dirs. force is ON by default (re-judging is
+the whole point).
 
 LOSSY PROCESSING: none -- full transcripts are sent uncut, exactly as in the pipeline.
 
 Usage:
   uv run tools/exp_rejudge_continuation_faithfulness.py --dir=continuation-1x-20260630-104750
-  uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --conditions=no_prefix
-  uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --conditions=no_prefix,clean_prefix
+  uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --conditions=no-prefix
+  uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --conditions=no-prefix,clean
   uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --concurrency=50
   uv run tools/exp_rejudge_continuation_faithfulness.py --dir=... --model=claude-opus-4-8
 
@@ -66,13 +69,16 @@ async def main() -> None:
     conditions = None
     if cond_raw:
         conditions = {c.strip() for c in cond_raw.split(",") if c.strip()}
-        unknown = conditions - C.KNOWN_CONDITIONS
-        if unknown:
-            raise SystemExit(f"unknown --conditions {sorted(unknown)}; "
-                             f"choices: {sorted(C.KNOWN_CONDITIONS)}")
 
     # build {B traj id -> OriginalRef} from the B ids referenced by this dir's task names.
     audits = await load_mode(run_dir)
+    # treatments are free-form; warn (don't reject) if a requested one matches nothing here.
+    if conditions is not None:
+        present = {p[0] for a in audits if (p := parse_continuation_task(a["task"]))}
+        absent = conditions - present
+        if absent:
+            print(f"  NOTE: --conditions {sorted(absent)} match no treatment in this dir "
+                  f"(present: {sorted(present)}); they will judge nothing.")
     b_ids = sorted({p[2] for a in audits if (p := parse_continuation_task(a["task"]))})
     if not b_ids:
         raise SystemExit(f"no continuation tasks found in {run_dir.name} (is this a continuation dir?)")
