@@ -238,3 +238,21 @@ def resolve_cut(traj: Trajectory, parsed: Parsed, alignment: Alignment,
     if traj.scaffold == "opencode":
         return resolve_cut_opencode(parsed, alignment, events, turn)
     return resolve_cut_codex(parsed, alignment, events, turn)
+
+
+def last_valid_turn(traj: Trajectory, parsed: Parsed, alignment: Alignment,
+                    events: list[dict]) -> int:
+    """Highest viewer event index that resolve_cut accepts — the latest point
+    we can faithfully cut. For claude/qwen3max this is the start of the final
+    main-thread assistant message (context = everything the agent saw going
+    into its last turn); for codex every event is cuttable, so it is the last
+    event. Backs --turn=last. Walks backward from the end so trailing
+    sidechain/user events are skipped rather than refused; raises only if the
+    trajectory has no valid cut at all."""
+    for turn in range(len(events) - 1, -1, -1):
+        try:
+            resolve_cut(traj, parsed, alignment, events, turn)
+            return turn
+        except CutError:
+            continue
+    raise CutError("no valid cut point found in this trajectory")

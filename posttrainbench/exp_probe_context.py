@@ -2,8 +2,13 @@
 
 PAID: launches the scaffold CLI (claude / opencode), which calls model APIs.
 
-  python exp_probe_context.py --trajectory <run_id> --turn <idx|first_hack>
+  python exp_probe_context.py --trajectory <run_id> [--turn <idx|last|first_hack>]
   python exp_probe_context.py --trajectory <run_id> --turn 311 --probe "..."
+
+--turn defaults to 'last' (the latest cuttable point — the context going into
+the agent's final turn); pass a viewer event index or 'first_hack' instead.
+--probe defaults to the task/progress/earliest-visible/last-action/files
+question below.
 
 Mechanics (claude / claude_non_api runs):
   1. build the context bundle (same code as reconstruct.py),
@@ -210,7 +215,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--trajectory", required=True)
-    ap.add_argument("--turn", default="first_hack")
+    ap.add_argument("--turn", default="last",
+                    help="viewer event index, 'last' (default), or 'first_hack'")
     ap.add_argument("--probe", default=DEFAULT_PROBE)
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args()
