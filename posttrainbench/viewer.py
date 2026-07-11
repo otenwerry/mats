@@ -671,6 +671,7 @@ CSS = """
  .compaction>summary{cursor:pointer;padding:.5rem .7rem;font-size:.86rem;font-weight:700;color:#5b46a8}
  .compaction>summary:hover{background:#f3eefc}
  .compaction pre.content{border-top:1px solid #e7ddf7;max-height:520px}
+ .compaction.flash{animation:flashpulse 1.1s ease}
  .compbadge{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;margin-left:8px;vertical-align:middle}
  .compbadge.verbatim{background:#e6f4ea;color:#1a7d33;border:1px solid #b7e1c3}
  .compbadge.para{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
@@ -915,6 +916,7 @@ DETAIL_HTML = """
  function els(sel){ return [].slice.call(document.querySelectorAll(sel)); }
  var groups=[
   {label:'🔪 rollback cut', els: els('.rollbackcut'), keyn:'c', keyp:'C'},
+  {label:'🗜 compaction', els: els('.compaction'), keyn:'k', keyp:'K'},
   {label:'📝 notes', els: els('.msg.hackturn, .msg.notedturn'), keyn:'n', keyp:'p'},
   {label:'⚠ hack',  els: els('.msg.hackturn'),                  keyn:'h', keyp:'H'},
   {label:'🏋 train', els: els('.traintag').map(function(x){ return x.closest('.msg'); }), keyn:'t', keyp:'T'},
@@ -967,6 +969,10 @@ DETAIL_HTML = """
 _TRAJ_CORE_HTML = DETAIL_HTML[DETAIL_HTML.index('<div class="hdr">'):
                               DETAIL_HTML.index('{{ body|safe }}') + len('{{ body|safe }}')]
 
+# The floating jump-nav panel (hack / compaction / train / … toggles) is sliced
+# out of DETAIL_HTML's tail so the continuation page reuses the exact same panel.
+_HACKNAV_HTML = DETAIL_HTML[DETAIL_HTML.index('<div class="hacknav"'):DETAIL_HTML.rindex('</body>')]
+
 CONTINUATION_HTML = ("""
 <!doctype html><html><head><meta charset="utf-8"><title>continuation · {{ p.run_id }} @ ev{{ p.cut_event }}</title>
 <style>__CSS__</style></head><body>
@@ -993,6 +999,7 @@ CONTINUATION_HTML = ("""
  b.onclick=function(){ window.scrollTo({top:0,behavior:'smooth'}); };
  window.addEventListener('scroll',upd); upd(); })();
 </script>
+""" + _HACKNAV_HTML + """
 </body></html>
 """).replace("__CSS__", CSS)
 
