@@ -2557,10 +2557,10 @@ def all_probes() -> list[dict]:
 # (key, label, href) entries to expand; the active pill is passed per-route into
 # _subnav(window=...).
 _WINDOWS = [
-    ("w1", "window 1", "/continuations"),
-    ("w2", "reward hacks", "/continuations/hacks"),
+    ("crt", "context reconstruction tests", "/continuations/hacks"),
+    ("early", "early tests", "/continuations"),
 ]
-_ACTIVE_WINDOW = "w1"
+_ACTIVE_WINDOW = "early"
 
 
 # Reward-hack trajectories grouped by model × scaffold (the "reward hacks"
@@ -2687,7 +2687,7 @@ def continuations():
         groups.append({"run_id": rid, "probes": ps,
                        "total_cost": sum(costs) if costs else None})
     return render_template_string(CONTINUATIONS_LIST_HTML, groups=groups,
-                                  subnav=_subnav("continuations", window="w1"))
+                                  subnav=_subnav("continuations", window="early"))
 
 
 @app.route("/continuations/hacks")
@@ -2729,7 +2729,7 @@ def continuation_hacks():
     return render_template_string(
         HACKS_HTML, groups=groups, n_total=n_total, orphans=orphans,
         label_class=_LABEL_CLASS, oai_pill=openai_pill,
-        subnav=_subnav("continuations", window="w2"))
+        subnav=_subnav("continuations", window="crt"))
 
 
 @app.route("/continuation/<path:probe_id>")
