@@ -73,8 +73,9 @@ def _crib(bundle) -> str:
     return "\n".join(lines)
 
 
-def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int) -> int:
-    out_dir = runs.OUT_ROOT / "probes" / f"{traj.run_id}__ev{plan.cut_event}"
+def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
+                 campaign: str = "probes") -> int:
+    out_dir = runs.OUT_ROOT / campaign / f"{traj.run_id}__ev{plan.cut_event}"
     cwd_dir = out_dir / "cwd"
     cwd_dir.mkdir(parents=True, exist_ok=True)
 
@@ -176,12 +177,13 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int)
     return 0 if result_text else 1
 
 
-def probe_opencode(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int) -> int:
+def probe_opencode(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
+                   campaign: str = "probes") -> int:
     if not shutil.which("opencode"):
         print("opencode CLI not installed; install opencode-ai@1.1.59 to probe "
               "opencode trajectories (also needs provider auth for the original model).")
         return 2
-    out_dir = runs.OUT_ROOT / "probes" / f"{traj.run_id}__ev{plan.cut_event}"
+    out_dir = runs.OUT_ROOT / campaign / f"{traj.run_id}__ev{plan.cut_event}"
     xdg = out_dir / "xdg"
     storage_root = xdg / "opencode"
     for rel, content in bundle.files.items():
@@ -219,6 +221,10 @@ def main():
                     help="viewer event index, 'last' (default), or 'first_hack'")
     ap.add_argument("--probe", default=DEFAULT_PROBE)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--campaign", default="probes",
+                    help="output subdir under OUT_ROOT (e.g. 'probes' for the "
+                         "early exploratory tests, 'probes_context_recon' for "
+                         "the systematic per-hack campaign)")
     args = ap.parse_args()
 
     traj = runs.load(args.trajectory)
@@ -241,10 +247,10 @@ def main():
 
     if traj.scaffold == "claude":
         sys.exit(probe_claude(traj, parsed, plan, bundle, fidelity,
-                              args.probe, args.timeout))
+                              args.probe, args.timeout, args.campaign))
     else:
         sys.exit(probe_opencode(traj, parsed, plan, bundle, fidelity,
-                                args.probe, args.timeout))
+                                args.probe, args.timeout, args.campaign))
 
 
 if __name__ == "__main__":

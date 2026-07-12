@@ -33,6 +33,7 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent / "lib"))  # shared mod
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -240,6 +241,12 @@ _INDEX_RUNS = load_index()
 RUNS = _INDEX_RUNS + load_rollback_runs(
     {r["run_id"]: r.get("accuracy") for r in _INDEX_RUNS})
 INDEX = {r["run_id"]: i for i, r in enumerate(RUNS)}
+
+# Stable per-run display number matching the main index's default "#" column
+# (1-based position among non-rollback runs, in index.json order). Lets us
+# cross-reference the same trajectory across pages by its index number.
+_INDEX_NUM = {r["run_id"]: n for n, r in
+              enumerate((x for x in RUNS if not x.get("is_rollback")), start=1)}
 
 def load_highlight_meta() -> dict[str, dict]:
     """{run_id: meta} for every adjudicated run (a highlights/{run_id}.json
@@ -662,6 +669,8 @@ CSS = """
  .flag.info{background:#eef2f6;color:#475569;border:1px solid #cbd5e1}
  .flag.warn{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
  .flag.error{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
+ .pending{color:#9aa0aa}
+ .cantflag{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;background:#f1f2f4;color:#6b7280;border:1px solid #d7dae0;cursor:help}
  .compaction{border:1px solid #d6c3f0;background:#faf7ff;border-radius:8px;margin:.6rem 0;overflow:hidden}
  .compaction>summary{cursor:pointer;padding:.5rem .7rem;font-size:.86rem;font-weight:700;color:#5b46a8}
  .compaction>summary:hover{background:#f3eefc}
@@ -970,7 +979,7 @@ CONTINUATION_HTML = ("""
 {{ subnav|safe }}
 <div class="pagehead">
  <h1>Continuation probe <span class="meta" style="font-weight:400">{{ p.run_id }} @ ev{{ p.cut_event }}</span></h1>
- <a class="headbtn" href="/continuations">&larr; continuations</a>
+ <a class="headbtn" href="{{ back_href|default('/continuations') }}">&larr; {{ back_label|default('continuations') }}</a>
  <a class="headbtn" href="/run/{{ p.run_id }}">full trajectory &rarr;</a>
 </div>
 <div class="contbanner">
@@ -1035,11 +1044,13 @@ HACKS_HTML = """
 <details class="legend" open style="margin-bottom:.7rem">
  <summary><b>{{ g.model }}</b> <span class="meta">· {{ g.engine }} · {{ g.rows|length }} trajector{{ 'y' if g.rows|length == 1 else 'ies' }}</span></summary>
  <table style="margin-top:.5rem"><thead><tr>
+  <th class="num" title="index number on the main trajectories page">#</th>
   <th>experiment</th><th>bench</th><th>base model</th>
   <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th></tr></thead><tbody>
- {% for r, hm in g.rows %}
+ {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
-  <td><a href="/run/{{ r.run_id }}">{{ r.experiment }}</a></td>
+  <td class="num">{{ row.num or '–' }}</td>
+  <td>{% if row.probe %}<a href="/continuations/hacks/continuation/{{ row.probe.probe_id }}" title="context-reconstruction continuation">{{ r.experiment }}</a>{% else %}<span class="pending" title="{{ row.reason or 'continuation not run yet' }}">{{ r.experiment }}</span>{% if not row.supported %} <span class="cantflag" title="{{ row.reason }}">⚠ can’t reconstruct</span>{% endif %}{% endif %}</td>
   <td>{{ r.benchmark }}</td>
   <td>{{ r.trained_model }}</td>
   <td class="num">{{ '%.3f'|format(r.accuracy) if r.accuracy is not none else '–' }}</td>
@@ -1071,7 +1082,7 @@ VISUALS_HTML = """
  <th>probe</th><th>scaffold</th><th class="num">cost</th></tr></thead><tbody>
 {% for p in probes %}
 <tr>
- <td><a href="/continuation/{{ p.probe_id }}">{{ p.run_id }} @ ev{{ p.cut_event }}</a></td>
+ <td><a href="{{ cont_base|default('/continuation/') }}{{ p.probe_id }}">{{ p.run_id }} @ ev{{ p.cut_event }}</a></td>
  <td>{{ p.scaffold }}</td>
  <td class="num">{% if p.cost is not none %}${{ '%.4f'|format(p.cost) }}{% else %}–{% endif %}</td>
 </tr>
@@ -2479,7 +2490,32 @@ def workspace(run_id: str):
 # to the raw stream / result md for probes that predate cost/Q&A recording, so #
 # every probe renders regardless of when it was produced.                      #
 # --------------------------------------------------------------------------- #
+# Each continuations window has its OWN probe directory, so its list/cost pages
+# only ever see that campaign's runs:
+#   early tests                  -> probes/               (exploratory, pre-existing)
+#   context reconstruction tests -> probes_context_recon/ (systematic, 1 per hack)
 PROBES_DIR = runs.OUT_ROOT / "probes"
+CONTEXT_RECON_DIR = runs.OUT_ROOT / "probes_context_recon"
+
+
+def _probe_support(scaffold: str, agent: str) -> tuple[bool, str]:
+    """Can exp_probe_context.py resume this scaffold on this machine? Returns
+    (supported, reason-if-not). Drives the 'can't reconstruct' caveat shown on
+    the context-reconstruction page so an un-runnable row never looks like a
+    merely-not-yet-run one."""
+    if scaffold == "claude":
+        return True, ""
+    if scaffold == "opencode":
+        if shutil.which("opencode"):
+            return True, ""
+        return False, ("opencode CLI not installed on this machine "
+                       "(needs opencode-ai + provider auth for the original model)")
+    if scaffold == "codex":
+        return False, ("codex traces are lossy (no rollout / patch bodies) — "
+                       "the pre-cut context can't be reconstructed")
+    if scaffold == "qwen3max":
+        return False, "no qwen CLI available to resume this scaffold"
+    return False, f"unsupported scaffold: {scaffold}"
 
 
 def _probe_answer_from_stream(pdir: Path) -> dict:
@@ -2540,11 +2576,11 @@ def load_probe(pdir: Path) -> dict | None:
     }
 
 
-def all_probes() -> list[dict]:
-    if not PROBES_DIR.exists():
+def all_probes(pdir: Path = PROBES_DIR) -> list[dict]:
+    if not pdir.exists():
         return []
     out = []
-    for d in sorted(PROBES_DIR.iterdir()):
+    for d in sorted(pdir.iterdir()):
         if d.is_dir():
             p = load_probe(d)
             if p:
@@ -2553,14 +2589,16 @@ def all_probes() -> list[dict]:
 
 
 # Petri-style window pills, shown ONLY on the continuations pages (below the
-# subtab row) — windows scope the continuations, not the whole viewer. Add
-# (key, label, href) entries to expand; the active pill is passed per-route into
-# _subnav(window=...).
+# subtab row). Each window is a self-contained pair of pages — a list page and a
+# cost page — and BOTH the subtab bar and the pills are scoped to the active
+# window, so "cost" always shows that window's own costs. The leftmost window is
+# the default landing for the continuations top-tab.
+#          key,     label,                          list_href,              cost_href
 _WINDOWS = [
-    ("crt", "context reconstruction tests", "/continuations/hacks"),
-    ("early", "early tests", "/continuations"),
+    ("crt",   "context reconstruction tests", "/continuations/hacks", "/continuations/hacks/cost"),
+    ("early", "early tests",                  "/continuations",       "/visuals"),
 ]
-_ACTIVE_WINDOW = "early"
+_DEFAULT_WINDOW = _WINDOWS[0][0]
 
 
 # Reward-hack trajectories grouped by model × scaffold (the "reward hacks"
@@ -2594,17 +2632,22 @@ _NAV = [
 ]
 
 
-def _subnav(active: str, window: str = _ACTIVE_WINDOW) -> str:
+def _subnav(active: str, window: str = "early") -> str:
     """Global navigator shown at the top of every page:
     (1) top-level tabs (trajectories / continuations / old),
     (2) the active top-level tab's subtabs,
     (3) window pills (petri-style) — ONLY under continuations, below the subtabs.
     `active` names the active subtab; `window` names the active window pill.
-    cheating report / timing / rates only appear once the cheating report has
-    been generated (categories.json)."""
+    Under continuations the subtabs are scoped to the active window (its own
+    list + cost pages). cheating report / timing / rates only appear once the
+    cheating report has been generated (categories.json)."""
     has_report = (HIGHLIGHTS / "categories.json").exists()
+    win_by_key = {k: (lst, cost) for k, _lbl, lst, cost in _WINDOWS}
 
     def subtabs_for(top: str) -> list[tuple[str, str]]:
+        if top == "continuations":
+            lst, cost = win_by_key.get(window, win_by_key[_DEFAULT_WINDOW])
+            return [("continuations", lst), ("cost", cost)]
         subs = dict(_NAV)[top]
         if top == "trajectories" and not has_report:
             subs = [(n, h) for n, h in subs if n == "trajectories"]
@@ -2614,14 +2657,16 @@ def _subnav(active: str, window: str = _ACTIVE_WINDOW) -> str:
     parent = next((top for top, subs in _NAV
                    if any(n == active for n, _ in subs)), "trajectories")
 
-    # Row 1: top-level tabs, each linking to its first (available) subtab.
+    # Row 1: top-level tabs. Continuations always lands on the default (leftmost)
+    # window's list; other tabs link to their first available subtab.
     top_parts = []
     for top, _ in _NAV:
         subs = subtabs_for(top)
         if not subs:
             continue
+        href = win_by_key[_DEFAULT_WINDOW][0] if top == "continuations" else subs[0][1]
         cls = ' class="active"' if top == parent else ""
-        top_parts.append(f'<a href="{subs[0][1]}"{cls}>{top}</a>')
+        top_parts.append(f'<a href="{href}"{cls}>{top}</a>')
 
     # Row 2: subtabs of the active top-level tab.
     sub_parts = []
@@ -2635,9 +2680,9 @@ def _subnav(active: str, window: str = _ACTIVE_WINDOW) -> str:
     # Row 3: window pills — continuations only, below the subtabs.
     if parent == "continuations":
         win_parts = []
-        for key, label, href in _WINDOWS:
+        for key, label, lst, _cost in _WINDOWS:
             cls = ' class="active"' if key == window else ""
-            win_parts.append(f'<a href="{href}"{cls}>{label}</a>')
+            win_parts.append(f'<a href="{lst}"{cls}>{label}</a>')
         rows.append(f'<div class="winnav">{"".join(win_parts)}</div>')
 
     return "".join(rows)
@@ -2690,10 +2735,26 @@ def continuations():
                                   subnav=_subnav("continuations", window="early"))
 
 
+def _context_recon_probes() -> dict[str, dict]:
+    """{run_id: probe} for the context-reconstruction campaign — at most one per
+    trajectory (1 continuation each, cut at the end); if several exist, keep the
+    latest cut."""
+    out: dict[str, dict] = {}
+    for p in all_probes(CONTEXT_RECON_DIR):
+        prev = out.get(p["run_id"])
+        if prev is None or (p["cut_event"] or 0) > (prev["cut_event"] or 0):
+            out[p["run_id"]] = p
+    return out
+
+
 @app.route("/continuations/hacks")
 def continuation_hacks():
-    """The 'reward hacks' window: every confirmed reward-hack trajectory,
-    fully grouped into one collapsible block per model × scaffold."""
+    """The 'context reconstruction tests' window: every confirmed reward-hack
+    trajectory, fully grouped into one collapsible block per model × scaffold.
+    The experiment cell links to that trajectory's context-reconstruction
+    continuation once it exists, else greys out (with a reason when the scaffold
+    can't be reconstructed at all)."""
+    cr = _context_recon_probes()
     buckets: dict[tuple[str, str], list] = {}
     for r in RUNS:
         if r.get("is_rollback"):
@@ -2703,8 +2764,11 @@ def continuation_hacks():
         if not (hm and hm.get("is_reward_hack")):
             continue
         t = runs.load(rid)
+        supported, reason = _probe_support(t.scaffold, t.agent)
+        row = {"r": r, "hm": hm, "num": _INDEX_NUM.get(rid),
+               "probe": cr.get(rid), "supported": supported, "reason": reason}
         key = (_engine_label(t.scaffold, t.agent), r.get("agent_model") or "?")
-        buckets.setdefault(key, []).append((r, hm))
+        buckets.setdefault(key, []).append(row)
 
     def order(key: tuple[str, str]):
         engine, model = key
@@ -2716,8 +2780,8 @@ def continuation_hacks():
     for key in sorted(buckets, key=order):
         engine, model = key
         rows = sorted(buckets[key],
-                      key=lambda rm: ((rm[0].get("benchmark") or ""),
-                                      (rm[0].get("experiment") or "")))
+                      key=lambda row: ((row["r"].get("benchmark") or ""),
+                                       (row["r"].get("experiment") or "")))
         n_total += len(rows)
         groups.append({"engine": engine, "model": model, "rows": rows})
 
@@ -2732,26 +2796,50 @@ def continuation_hacks():
         subnav=_subnav("continuations", window="crt"))
 
 
-@app.route("/continuation/<path:probe_id>")
-def continuation(probe_id: str):
-    probe = load_probe(PROBES_DIR / probe_id)
+def _render_continuation(probe_id: str, pdir: Path, window: str,
+                         back_href: str, back_label: str):
+    probe = load_probe(pdir / probe_id)
     if probe is None or probe["run_id"] not in INDEX:
         abort(404)
     view = _trajectory_view(probe["run_id"], cut_at=probe["cut_event"])
-    return render_template_string(CONTINUATION_HTML, p=probe,
-                                  subnav=_subnav("continuations"), **view)
+    return render_template_string(
+        CONTINUATION_HTML, p=probe, back_href=back_href, back_label=back_label,
+        subnav=_subnav("continuations", window=window), **view)
+
+
+@app.route("/continuation/<path:probe_id>")
+def continuation(probe_id: str):
+    return _render_continuation(probe_id, PROBES_DIR, "early",
+                                "/continuations", "early tests")
+
+
+@app.route("/continuations/hacks/continuation/<path:probe_id>")
+def context_recon_continuation(probe_id: str):
+    return _render_continuation(probe_id, CONTEXT_RECON_DIR, "crt",
+                                "/continuations/hacks", "context reconstruction tests")
+
+
+def _visuals_kwargs(probes: list[dict]) -> dict:
+    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
+    n = len(priced)
+    total = sum(p["cost"] for p in priced)
+    return dict(probes=probes, n=n, n_unknown=len(probes) - n, total=total,
+                mean=(total / n if n else 0.0), fig=_cost_fig_svg(probes))
 
 
 @app.route("/visuals")
 def visuals():
-    probes = all_probes()
-    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
-    n = len(priced)
-    total = sum(p["cost"] for p in priced)
     return render_template_string(
-        VISUALS_HTML, probes=probes, n=n, n_unknown=len(probes) - n,
-        total=total, mean=(total / n if n else 0.0),
-        fig=_cost_fig_svg(probes), subnav=_subnav("cost"))
+        VISUALS_HTML, **_visuals_kwargs(all_probes(PROBES_DIR)),
+        cont_base="/continuation/", subnav=_subnav("cost", window="early"))
+
+
+@app.route("/continuations/hacks/cost")
+def context_recon_cost():
+    return render_template_string(
+        VISUALS_HTML, **_visuals_kwargs(all_probes(CONTEXT_RECON_DIR)),
+        cont_base="/continuations/hacks/continuation/",
+        subnav=_subnav("cost", window="crt"))
 
 
 if __name__ == "__main__":
