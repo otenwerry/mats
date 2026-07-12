@@ -1,6 +1,6 @@
 # Petri reward-hacking audits
 
-Assessing models for reward-hacking propensity with [Inspect Petri](https://meridianlabs-ai.github.io/inspect_petri). Petri orchestrates three model roles: an **auditor** (drives a multi-turn scenario against the target, simulating users and tools), a **target** (the model under assessment), and a **judge** (scores each transcript per dimension). A reference clone of the Petri repo lives at `supermats/inspect_petri`.
+Assessing models for reward-hacking propensity with [Inspect Petri](https://meridianlabs-ai.github.io/inspect_petri). Petri orchestrates three model roles: an **auditor** (drives a multi-turn scenario against the target, simulating users and tools), a **target** (the model under assessment), and a **judge** (scores each transcript per dimension). A reference clone of the Petri repo lives at `supermats/references/inspect_petri`.
 
 ## Layout
 

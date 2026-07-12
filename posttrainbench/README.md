@@ -29,7 +29,7 @@ Goal, in order:
 3. Resample/intervention experiments (later).
 
 Data: `mats-local/posttrainbench/` (read-only mirror of the HF traces dataset).
-Harness reference: `supermats/PostTrainBench/` (read-only clone; note version drift —
+Harness reference: `supermats/references/PostTrainBench/` (read-only clone; note version drift —
 some saved runs predate the current harness, e.g. timestamp prefixes only in newer runs).
 
 ## Data-fidelity survey (2026-07-04)
