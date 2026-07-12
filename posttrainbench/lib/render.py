@@ -154,7 +154,8 @@ def _msg(role: str, header: str, inner: str, mark: str | None = None,
 # --------------------------------------------------------------------------- #
 # Block-based formats (claude_code, opencode)                                 #
 # --------------------------------------------------------------------------- #
-def _render_blocks_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="") -> str:
+def _render_blocks_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="",
+                         reasoning_mode=None) -> str:
     typ = ev.get("type", "?")
     blocks = ev.get("blocks") or []
 
@@ -176,6 +177,11 @@ def _render_blocks_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="
         bt = b.get("type")
         if bt == "text":
             parts.append(f'<pre class="content">{mark(b.get("text", ""), quotes)}</pre>')
+        elif bt == "thinking":
+            badge = _reasoning_badge(reasoning_mode)
+            parts.append(
+                f'<div class="thinkblock"><div class="thinkhdr">&#128173; thinking{badge}</div>'
+                f'<pre class="content reasoning">{mark(b.get("thinking", ""), quotes)}</pre></div>')
         elif bt == "tool_use":
             name = b.get("name", "tool")
             parts.append(f'<div class="call"><div class="callname">🔧 <code>{html.escape(name)}</code></div>'
@@ -196,7 +202,8 @@ def _render_blocks_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="
 # --------------------------------------------------------------------------- #
 # Codex format                                                                #
 # --------------------------------------------------------------------------- #
-def _render_codex_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="") -> str:
+def _render_codex_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra="",
+                        reasoning_mode=None) -> str:
     typ = ev.get("type")
     if typ == "system":
         return _msg("system", f"#{n} · system · {ev.get('subtype','')}",
@@ -207,7 +214,8 @@ def _render_codex_event(ev: dict, n: int, quotes, mk=None, mk_title="", extra=""
 
     if sub == "reasoning":
         return _msg("reasoning", f"#{n} · reasoning",
-                    f'<pre class="content reasoning">{mark(item.get("text", ""), quotes)}</pre>', mk, mk_title, extra)
+                    f'<pre class="content reasoning">{mark(item.get("text", ""), quotes)}</pre>',
+                    mk, mk_title, extra + _reasoning_badge(reasoning_mode))
     if sub == "agent_message":
         return _msg("assistant", f"#{n} · agent message",
                     f'<pre class="content">{mark(item.get("text", ""), quotes)}</pre>', mk, mk_title, extra)
@@ -256,6 +264,26 @@ def _annotations_html(notes: list) -> str:
     return f'<div class="annos">{"".join(rows)}</div>' if rows else ""
 
 
+_RBADGE = {
+    "summarized": ("summarized",
+        "A model-generated summary of the reasoning, not the raw chain of thought "
+        "(this provider never exposes the raw CoT — the summary is exactly what a "
+        "client replays)."),
+    "verbatim": ("verbatim",
+        "The model's raw chain of thought, saved verbatim."),
+}
+
+
+def _reasoning_badge(mode: str | None) -> str:
+    """Per-block tag: is the reasoning shown a summary or the raw chain of thought?
+    Derived from the producing model, not the block — no signature/marker survives
+    in the viewer data, so the caller passes the model-level mode down."""
+    if mode not in _RBADGE:
+        return ""
+    label, why = _RBADGE[mode]
+    return f'<span class="rbadge {mode}" title="{html.escape(why)}">{label}</span>'
+
+
 _COMPACT_PREAMBLE = "This session is being continued from a previous conversation"
 
 
@@ -278,7 +306,7 @@ def _compaction_block(summary: str | None) -> str:
 
 def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
                   annotations=None, turn_kinds=None, train_turns=None,
-                  api_turns=None) -> str:
+                  api_turns=None, reasoning_mode=None) -> str:
     """`marked_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
     classifying each marked turn as 'hack' (direct hacking action, red) or
     'context' (notable but not a hack, neutral); unclassified turns default to
@@ -356,9 +384,9 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
         # of unrelated events). No marked_turns given -> mark everywhere.
         q = quotes if (marked or not hacks) else ()
         if trace_format == "codex":
-            out.append(_render_codex_event(ev, n, q, mk, mk_title or "", extra))
+            out.append(_render_codex_event(ev, n, q, mk, mk_title or "", extra, reasoning_mode))
         else:
-            out.append(_render_blocks_event(ev, n, q, mk, mk_title or "", extra))
+            out.append(_render_blocks_event(ev, n, q, mk, mk_title or "", extra, reasoning_mode))
         if n in anno:
             out.append(_annotations_html(anno[n]))
     return "\n".join(out)
