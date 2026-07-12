@@ -987,6 +987,15 @@ CONTINUATION_HTML = ("""
  {% if p.flags %}<div class="flagline">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span>{% endfor %}</div>{% endif %}
 </div>
 """ + _TRAJ_CORE_HTML + """
+{% if p.injected_turns %}
+<div class="sessdiv">— resume boundary: turn(s) below were injected by the resume CLI, not part of the original trajectory —</div>
+{% for t in p.injected_turns %}
+<div class="msg role-{{ t.role }}"><div class="rolehdr">injected at resume · {{ t.role }}{% if t.meta %} (isMeta){% endif %}</div><pre class="content">{{ t.text }}</pre></div>
+{% endfor %}
+{% endif %}
+{% if p.probe_attachments %}
+<p class="meta" title="local Claude Code system-reminder content attached to the probe turn — the original agent never saw these">the resume CLI also attached local-machine context to the probe turn: {{ p.probe_attachments|join(', ') }}</p>
+{% endif %}
 <div class="qablock">
  <div class="qahdr">&#128172; Probe question &amp; the model's answer (from its reconstructed context only)</div>
  <div class="qq">{{ p.question or '(question not recorded)' }}</div>
@@ -2548,6 +2557,49 @@ def _probe_question_from_md(pdir: Path) -> str | None:
     return m.group(1) if m else None
 
 
+def _session_msg_text(rec: dict) -> str:
+    m = rec.get("message") or {}
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(b.get("text", "") for b in c
+                         if isinstance(b, dict) and b.get("type") == "text")
+    return str(c)
+
+
+def _resume_turns(pdir: Path) -> tuple[list[dict], list[str]]:
+    """What the resume CLI appended to the installed session (resume_turns.jsonl):
+    (injected turns before the probe question, attachment types added to it).
+    The injected turns — e.g. the isMeta "Continue from where you left off." user
+    turn and the "No response requested." assistant reply — were in the resumed
+    model's context but are not trajectory events, so they get rendered
+    separately on the continuation page."""
+    f = pdir / "resume_turns.jsonl"
+    injected, attachments = [], []
+    if not f.exists():
+        return injected, attachments
+    for ln in f.read_text().splitlines():
+        try:
+            rec = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        t = rec.get("type")
+        if t == "user" and not rec.get("isMeta"):
+            break  # the probe question itself; injected turns end here
+        if t in ("user", "assistant"):
+            injected.append({"role": t, "meta": bool(rec.get("isMeta")),
+                             "text": _session_msg_text(rec)})
+    for ln in f.read_text().splitlines():
+        try:
+            rec = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") == "attachment":
+            attachments.append((rec.get("attachment") or {}).get("type", "?"))
+    return injected, attachments
+
+
 def load_probe(pdir: Path) -> dict | None:
     """One probe run -> the dict the continuation / visuals pages render."""
     fp = pdir / "fidelity.json"
@@ -2566,6 +2618,7 @@ def load_probe(pdir: Path) -> dict | None:
         answer = answer if answer is not None else strm["answer"]
     if question is None:
         question = _probe_question_from_md(pdir)
+    injected, attachments = _resume_turns(pdir)
     return {
         "probe_id": pdir.name, "run_id": fid.get("run_id"),
         "scaffold": fid.get("scaffold"), "cut_event": fid.get("cut_event"),
@@ -2573,6 +2626,7 @@ def load_probe(pdir: Path) -> dict | None:
         "cut_notes": fid.get("cut_notes") or [], "flags": fid.get("flags") or [],
         "stats": fid.get("stats") or {}, "probe_env": fid.get("probe_env") or {},
         "cost": cost, "question": question, "answer": answer,
+        "injected_turns": injected, "probe_attachments": attachments,
     }
 
 

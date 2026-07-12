@@ -119,9 +119,14 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
     # the CLI appends to the installed session file; detect synthetic bridging
     # turns it injected before our probe (observed on 2.1.181: an isMeta user
     # message "Continue from where you left off." when the cut ends on a
-    # tool_result)
+    # tool_result). Save ALL appended records (injected turns, attachments,
+    # bookkeeping) to resume_turns.jsonl so the viewer can render what the
+    # resumed model actually saw beyond the reconstructed context.
     try:
         appended = [json.loads(ln) for ln in open(session_path)][len(lines):]
+        with open(out_dir / "resume_turns.jsonl", "w") as f:
+            for a in appended:
+                f.write(json.dumps(a) + "\n")
         injected = [a for a in appended
                     if a.get("isMeta") and a.get("type") == "user"]
         if injected:
