@@ -24,6 +24,7 @@ def _find_repo_root() -> Path:
 _REPO = _find_repo_root()
 RAW = Path(os.environ.get("PTB_RAW", _REPO / "mats-local" / "posttrainbench"))
 VIEWER_DATA = Path(os.environ.get("PTB_DATA", RAW / "viewer_data"))
+REFERENCES = _REPO / "references"  # read-only clones of relevant external repos
 HIGHLIGHTS = Path(__file__).resolve().parents[1] / "highlights"
 
 
