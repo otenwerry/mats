@@ -675,6 +675,13 @@ CSS = """
  .compbadge{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;margin-left:8px;vertical-align:middle}
  .compbadge.verbatim{background:#e6f4ea;color:#1a7d33;border:1px solid #b7e1c3}
  .compbadge.para{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
+ .rbadge{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;margin-left:6px;vertical-align:middle;cursor:help;text-transform:none;letter-spacing:0}
+ .rbadge.verbatim{background:#e6f4ea;color:#1a7d33;border:1px solid #b7e1c3}
+ .rbadge.summarized{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
+ .rbadge.uncaptured{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
+ .rbadge.inline{background:#eef2f6;color:#475569;border:1px solid #cbd5e1}
+ .thinkblock{border-top:1px dashed #e6ddf5}
+ .thinkhdr{font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;color:#7c5cbf;padding:.3rem .7rem 0}
  .qablock{border:1px solid #cdd9f0;border-radius:10px;margin:1.6rem 0 .6rem;overflow:hidden}
  .qablock .qahdr{background:#1558d6;color:#fff;font-weight:700;padding:.5rem .9rem;font-size:.95rem}
  .qablock .qq{background:#f4f7ff;padding:.7rem .9rem;white-space:pre-wrap;font:13px/1.5 ui-monospace,Menlo,monospace;color:#33406b;border-bottom:1px solid #e0e6f4}
@@ -791,7 +798,7 @@ DETAIL_HTML = """
 </div>
 <div class="hdr">
  <div><b>{{ r.benchmark }}</b> · base <b>{{ r.trained_model }}</b> · agent <b>{{ r.agent_model }}</b>
-   · format {{ r.trace_format }}</div>
+   · format {{ r.trace_format }}{% if reasoning_capture %} · reasoning <span class="rbadge {{ reasoning_capture.cls }}" title="{{ reasoning_capture.why }}">{{ reasoning_capture.text }}</span>{% endif %}</div>
  <div style="margin-top:.3rem;color:#555">experiment <b>{{ r.experiment }}</b> · seed {{ r.seed }}
    · accuracy <b>{{ '%.4f'|format(r.accuracy) if r.accuracy is not none else '–' }}</b>
    {% if r.stderr is not none %}± {{ '%.4f'|format(r.stderr) }}{% endif %}
@@ -1410,6 +1417,43 @@ def index():
         has_report=(HIGHLIGHTS / "categories.json").exists())
 
 
+def _reasoning_capture(trace_format, agent_model, events):
+    """What kind of model reasoning this trajectory preserves — a per-MODEL fact
+    (no signature/marker survives in the viewer data), surfaced once in the header
+    and, where a reasoning block actually renders, badged per-block via render.py.
+
+    Modes: summarized (Claude 4-family thinking + Codex reasoning summaries — both
+    are summaries, never raw CoT), not_captured (OpenCode drops reasoning from its
+    stream, so a thinking model's internal reasoning is simply absent — a genuine
+    lossy gap), inline (Claude-API / qwen runs with no thinking channel; reasoning
+    is ordinary assistant text). The per-block badge mode is None outside
+    summarized/verbatim, so only summarized blocks get a badge today."""
+    tf = trace_format or ""
+    has_block = any(
+        (e.get("type") == "codex_item" and e.get("subtype") == "reasoning")
+        or any((b or {}).get("type") == "thinking" for b in (e.get("blocks") or []))
+        for e in events)
+    if tf == "codex":
+        return {"cls": "summarized", "text": "summarized", "block_mode": "summarized",
+                "why": ("OpenAI reasoning models never expose the raw chain of thought; "
+                        "these runs saved detailed reasoning summaries "
+                        "(model_reasoning_summary=detailed).")}
+    if tf == "claude_code":
+        if has_block:
+            return {"cls": "summarized", "text": "summarized", "block_mode": "summarized",
+                    "why": ("Claude 4-family returns a summary of its reasoning (with a "
+                            "signature for replay), never the raw chain of thought.")}
+        return {"cls": "inline", "text": "no separate reasoning channel", "block_mode": None,
+                "why": ("This run has no thinking blocks; the model's reasoning appears "
+                        "inline as ordinary assistant text.")}
+    if tf == "opencode":
+        return {"cls": "uncaptured", "text": "not captured", "block_mode": None,
+                "why": ("OpenCode does not record model reasoning in its stream, so any "
+                        "internal reasoning (e.g. for a thinking model like "
+                        "kimi-k2-thinking) is absent from the trace.")}
+    return None
+
+
 def _trajectory_view(run_id: str, cut_at=None):
     """Every template variable for a trajectory page — shared by /run and the
     continuation page. When `cut_at` is set (continuation), the transcript is
@@ -1533,16 +1577,20 @@ def _trajectory_view(run_id: str, cut_at=None):
                  "title": f"FIRST hack of type {j+1}: {title}"})
             annotations.setdefault(str(t), []).append(
                 {"quote": "", "note": f"[first hack — {title}]", "kind": "cat_hack", "matched": False})
+    reasoning_capture = _reasoning_capture(
+        r.get("trace_format", ""), r.get("agent_model"), events)
     body = rnd.render_events(events, r.get("trace_format", ""),
                              quotes, marked_turns, annotations, turn_kinds,
-                             train_turns, api_turns)
+                             train_turns, api_turns,
+                             reasoning_mode=(reasoning_capture or {}).get("block_mode"))
     ws = load_workspace(run_id)
     def _kind(t):
         v = turn_kinds.get(str(t))
         return (v if isinstance(v, str) else (v or {}).get("kind")) or "hack"
     n_hack_true = sum(1 for t in marked_turns if _kind(t) == "hack")
     return dict(
-        r=r, body=body, flagged=is_flagged(r), hl=hl, oj=oj,
+        r=r, body=body, reasoning_capture=reasoning_capture,
+        flagged=is_flagged(r), hl=hl, oj=oj,
         everdict=HL_META.get(run_id, {}).get("everdict", ""),
         raw_path=str(paths.raw_dir(run_id).relative_to(paths.RAW)),
         n_hack_true=n_hack_true, n_noted=len(marked_turns) - n_hack_true,
