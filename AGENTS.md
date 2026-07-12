@@ -1,8 +1,6 @@
 # Context
 
-This repository is for my MATS research project. MATS is an AI safety research fellowship that pairs me with a mentor and supports me in working on an independent research project for 3 months.
-
-I am working with Maksym Andriushchenko, one of the authors of PostTrainBench (henceforth PTB). Our project will study reward hacking (henceforth RH); specifically, reward-hack-like behavior that happens at inference time (as opposed to during RL). There were some instances of this observed in PTB, and we're planning on working largely with this data. We're also generating our own reward hack trajectories using Petri, an automated auditing tool; and we may also extend into other observed RH trajectories from other benchmarks. 
+This repository is for my MATS AI safety research project. I am working with Maksym Andriushchenko, one of the authors of PostTrainBench (henceforth PTB). Our project will study reward hacking (henceforth RH); specifically, reward-hack-like behavior that happens at inference time (as opposed to during RL). There were some instances of this observed in PTB, and we're planning on working largely with this data. We're also generating our own reward hack trajectories using Petri, an automated auditing tool; and we may also extend into other observed RH trajectories from other benchmarks. 
 
 PTB: Various LLM agents are evaluated for their ability to post-train various base LLMs to maximize various benchmarks, with 10 hours and one Nvidia H100 GPU. In ~5% of PTB trajectories, models reward-hacked, doing things like training on the test data. The PTB paper identified cases of rule-breaks in order to make the scores fair; we have gone further than this and identified the runs we think involved actual intentional reward-hacking; we also identify specific turns within the trajectory that involve reward-hack actions. 
 
@@ -24,7 +22,7 @@ We are using uv.
 Inside of the supermats directory, we have:
 - mats (this directory), which has everything I want to keep on github
 - mats-local, which has all the data that I don't want to keep on github. Within this, we have folders with downloaded data (malt, posttrainbench) that should be treated as read-only, as well as folders for our own data that you're welcome to write to.
-- Other directories that clone useful repos for reference. Treat as read-only.
+- references, which clones relevant repos. Treat as read-only.
 
 # Approach to interaction
 
