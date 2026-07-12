@@ -5,12 +5,14 @@ Free (no API calls). The paid probe lives in exp_probe_context.py.
 Usage:
   python reconstruct.py --list
   python reconstruct.py --report                 # parse+align+cut-check all 30
-  python reconstruct.py --trajectory <run_id> --turn <viewer event idx|first_hack>
+  python reconstruct.py --trajectory <run_id> [--turn <viewer event idx|last|first_hack>]
 
 --turn is a VIEWER EVENT INDEX (same numbering as the viewer and as
-first_hack_event/marked_turns in highlights). The cut goes immediately before
-that event; invalid positions are refused with nearby valid alternatives, and
-mid-message positions snap down to their message boundary (recorded in
+first_hack_event/marked_turns in highlights), or one of two keywords: 'last'
+(the default — the latest cuttable point, i.e. the context going into the
+agent's final turn) and 'first_hack'. The cut goes immediately before the
+resolved event; invalid positions are refused with nearby valid alternatives,
+and mid-message positions snap down to their message boundary (recorded in
 fidelity.json).
 
 Output bundle: mats-local/posttrainbench2/reconstructions/<run_id>__ev<N>/
@@ -53,6 +55,8 @@ def build_bundle(traj: runs.Trajectory, turn_arg: str):
         if traj.first_hack_event is None:
             raise stream.CutError("no first_hack_event recorded for this trajectory")
         turn = traj.first_hack_event
+    elif turn_arg == "last":
+        turn = stream.last_valid_turn(traj, parsed, alignment, events)
     else:
         turn = int(turn_arg)
     plan = stream.resolve_cut(traj, parsed, alignment, events, turn)
@@ -174,8 +178,8 @@ def main():
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--trajectory")
-    ap.add_argument("--turn", default="first_hack",
-                    help="viewer event index, or 'first_hack' (default)")
+    ap.add_argument("--turn", default="last",
+                    help="viewer event index, 'last' (default), or 'first_hack'")
     args = ap.parse_args()
     if args.list:
         cmd_list(args)
