@@ -2518,10 +2518,11 @@ def all_probes() -> list[dict]:
     return out
 
 
-# Petri-style window pills (topmost row). Everything lives in window 1 for now;
-# add (key, label, href) entries here to expand, mirroring petri's SWEEPS.
+# Petri-style window pills, shown ONLY on the continuations pages (below the
+# subtab row) — windows scope the continuations, not the whole viewer. Everything
+# lives in window 1 for now; add (key, label, href) entries to expand.
 _WINDOWS = [
-    ("w1", "window 1", "/"),
+    ("w1", "window 1", "/continuations"),
 ]
 _ACTIVE_WINDOW = "w1"
 
@@ -2545,10 +2546,10 @@ _NAV = [
 
 
 def _subnav(active: str) -> str:
-    """Three-level global navigator shown at the top of every page:
-    (1) window pills (petri-style; window 1 only for now),
-    (2) top-level tabs (trajectories / continuations / old),
-    (3) the active top-level tab's subtabs.
+    """Global navigator shown at the top of every page:
+    (1) top-level tabs (trajectories / continuations / old),
+    (2) the active top-level tab's subtabs,
+    (3) window pills (petri-style) — ONLY under continuations, below the subtabs.
     `active` names the active subtab. cheating report / timing / rates only appear
     once the cheating report has been generated (categories.json)."""
     has_report = (HIGHLIGHTS / "categories.json").exists()
@@ -2563,14 +2564,7 @@ def _subnav(active: str) -> str:
     parent = next((top for top, subs in _NAV
                    if any(n == active for n, _ in subs)), "trajectories")
 
-    # Row 1: window pills.
-    win_parts = []
-    for key, label, href in _WINDOWS:
-        cls = ' class="active"' if key == _ACTIVE_WINDOW else ""
-        win_parts.append(f'<a href="{href}"{cls}>{label}</a>')
-    win = "".join(win_parts)
-
-    # Row 2: top-level tabs, each linking to its first (available) subtab.
+    # Row 1: top-level tabs, each linking to its first (available) subtab.
     top_parts = []
     for top, _ in _NAV:
         subs = subtabs_for(top)
@@ -2579,15 +2573,24 @@ def _subnav(active: str) -> str:
         cls = ' class="active"' if top == parent else ""
         top_parts.append(f'<a href="{subs[0][1]}"{cls}>{top}</a>')
 
-    # Row 3: subtabs of the active top-level tab.
+    # Row 2: subtabs of the active top-level tab.
     sub_parts = []
     for name, href in subtabs_for(parent):
         cls = ' class="active"' if name == active else ""
         sub_parts.append(f'<a href="{href}"{cls}>{name}</a>')
 
-    return (f'<div class="winnav">{win}</div>'
-            f'<div class="toptabs">{"".join(top_parts)}</div>'
-            f'<div class="subnav">{"".join(sub_parts)}</div>')
+    rows = [f'<div class="toptabs">{"".join(top_parts)}</div>',
+            f'<div class="subnav">{"".join(sub_parts)}</div>']
+
+    # Row 3: window pills — continuations only, below the subtabs.
+    if parent == "continuations":
+        win_parts = []
+        for key, label, href in _WINDOWS:
+            cls = ' class="active"' if key == _ACTIVE_WINDOW else ""
+            win_parts.append(f'<a href="{href}"{cls}>{label}</a>')
+        rows.append(f'<div class="winnav">{"".join(win_parts)}</div>')
+
+    return "".join(rows)
 
 
 def _cost_fig_svg(probes: list[dict]) -> str:
