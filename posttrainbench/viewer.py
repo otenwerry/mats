@@ -1021,6 +1021,40 @@ CONTINUATIONS_LIST_HTML = """
 </body></html>
 """.replace("__CSS__", CSS)
 
+HACKS_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>reward hacks</title>
+<style>__CSS__</style></head><body>
+{{ subnav|safe }}
+<div class="pagehead"><h1>Reward-hack trajectories</h1>
+ <span class="meta">{{ n_total }} trajectories · {{ groups|length }} model×scaffold group(s)</span></div>
+{% if orphans %}
+<p class="meta" style="color:#9a3412">⚠ {{ orphans|length }} reward-hack highlight(s) have no viewable trajectory row and are omitted here:
+ {{ orphans|join(', ') }}</p>
+{% endif %}
+{% for g in groups %}
+<details class="legend" open style="margin-bottom:.7rem">
+ <summary><b>{{ g.model }}</b> <span class="meta">· {{ g.engine }} · {{ g.rows|length }} trajector{{ 'y' if g.rows|length == 1 else 'ies' }}</span></summary>
+ <table style="margin-top:.5rem"><thead><tr>
+  <th>experiment</th><th>bench</th><th>base model</th>
+  <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th></tr></thead><tbody>
+ {% for r, hm in g.rows %}
+ <tr class="rh">
+  <td><a href="/run/{{ r.run_id }}">{{ r.experiment }}</a></td>
+  <td>{{ r.benchmark }}</td>
+  <td>{{ r.trained_model }}</td>
+  <td class="num">{{ '%.3f'|format(r.accuracy) if r.accuracy is not none else '–' }}</td>
+  <td class="num">{{ r.num_turns or '–' }}</td>
+  <td class="num">{{ r.time_taken or '–' }}</td>
+  <td class="flags">{% if hm.label %}<span class="lbl {{ label_class.get(hm.label,'') }}" title="final assessment (full provenance on the run page)">{{ hm.label }}</span>{% endif %}
+   {% set op = oai_pill(r.run_id) %}{% if op %}<span class="apitag {{ op.cls }}" title="{{ op.title }}">{{ op.text }}</span>{% endif %}</td>
+ </tr>
+ {% endfor %}
+ </tbody></table>
+</details>
+{% endfor %}
+</body></html>
+""".replace("__CSS__", CSS)
+
 VISUALS_HTML = """
 <!doctype html><html><head><meta charset="utf-8"><title>cost</title>
 <style>__CSS__</style></head><body>
@@ -2519,12 +2553,27 @@ def all_probes() -> list[dict]:
 
 
 # Petri-style window pills, shown ONLY on the continuations pages (below the
-# subtab row) — windows scope the continuations, not the whole viewer. Everything
-# lives in window 1 for now; add (key, label, href) entries to expand.
+# subtab row) — windows scope the continuations, not the whole viewer. Add
+# (key, label, href) entries to expand; the active pill is passed per-route into
+# _subnav(window=...).
 _WINDOWS = [
     ("w1", "window 1", "/continuations"),
+    ("w2", "reward hacks", "/continuations/hacks"),
 ]
 _ACTIVE_WINDOW = "w1"
+
+
+# Reward-hack trajectories grouped by model × scaffold (the "reward hacks"
+# window). `scaffold` alone can't tell Claude API from Claude Code (both are
+# scaffold=="claude"), so we key the engine label off the PTB agent dir too.
+_HACK_ENGINE_ORDER = ["Claude API", "Claude Code", "Codex", "OpenCode", "Qwen"]
+
+
+def _engine_label(scaffold: str, agent: str) -> str:
+    if scaffold == "claude":
+        return "Claude Code" if agent == "claude_non_api" else "Claude API"
+    return {"codex": "Codex", "opencode": "OpenCode",
+            "qwen3max": "Qwen"}.get(scaffold, scaffold)
 
 # Top-level tabs -> their subtabs [(subtab_name, href)]. `active` passed to _subnav
 # is always a subtab name; its parent top-level tab is derived from this map.
@@ -2545,13 +2594,14 @@ _NAV = [
 ]
 
 
-def _subnav(active: str) -> str:
+def _subnav(active: str, window: str = _ACTIVE_WINDOW) -> str:
     """Global navigator shown at the top of every page:
     (1) top-level tabs (trajectories / continuations / old),
     (2) the active top-level tab's subtabs,
     (3) window pills (petri-style) — ONLY under continuations, below the subtabs.
-    `active` names the active subtab. cheating report / timing / rates only appear
-    once the cheating report has been generated (categories.json)."""
+    `active` names the active subtab; `window` names the active window pill.
+    cheating report / timing / rates only appear once the cheating report has
+    been generated (categories.json)."""
     has_report = (HIGHLIGHTS / "categories.json").exists()
 
     def subtabs_for(top: str) -> list[tuple[str, str]]:
@@ -2586,7 +2636,7 @@ def _subnav(active: str) -> str:
     if parent == "continuations":
         win_parts = []
         for key, label, href in _WINDOWS:
-            cls = ' class="active"' if key == _ACTIVE_WINDOW else ""
+            cls = ' class="active"' if key == window else ""
             win_parts.append(f'<a href="{href}"{cls}>{label}</a>')
         rows.append(f'<div class="winnav">{"".join(win_parts)}</div>')
 
@@ -2637,7 +2687,49 @@ def continuations():
         groups.append({"run_id": rid, "probes": ps,
                        "total_cost": sum(costs) if costs else None})
     return render_template_string(CONTINUATIONS_LIST_HTML, groups=groups,
-                                  subnav=_subnav("continuations"))
+                                  subnav=_subnav("continuations", window="w1"))
+
+
+@app.route("/continuations/hacks")
+def continuation_hacks():
+    """The 'reward hacks' window: every confirmed reward-hack trajectory,
+    fully grouped into one collapsible block per model × scaffold."""
+    buckets: dict[tuple[str, str], list] = {}
+    for r in RUNS:
+        if r.get("is_rollback"):
+            continue
+        rid = r["run_id"]
+        hm = HL_META.get(rid)
+        if not (hm and hm.get("is_reward_hack")):
+            continue
+        t = runs.load(rid)
+        key = (_engine_label(t.scaffold, t.agent), r.get("agent_model") or "?")
+        buckets.setdefault(key, []).append((r, hm))
+
+    def order(key: tuple[str, str]):
+        engine, model = key
+        ei = (_HACK_ENGINE_ORDER.index(engine)
+              if engine in _HACK_ENGINE_ORDER else len(_HACK_ENGINE_ORDER))
+        return (ei, model)
+
+    groups, n_total = [], 0
+    for key in sorted(buckets, key=order):
+        engine, model = key
+        rows = sorted(buckets[key],
+                      key=lambda rm: ((rm[0].get("benchmark") or ""),
+                                      (rm[0].get("experiment") or "")))
+        n_total += len(rows)
+        groups.append({"engine": engine, "model": model, "rows": rows})
+
+    # Surface any reward-hack highlight with no viewable trajectory row (would
+    # otherwise silently vanish from this window).
+    orphans = sorted(rid for rid, m in HL_META.items()
+                     if m.get("is_reward_hack")
+                     and not rid.startswith("rollback") and rid not in INDEX)
+    return render_template_string(
+        HACKS_HTML, groups=groups, n_total=n_total, orphans=orphans,
+        label_class=_LABEL_CLASS, oai_pill=openai_pill,
+        subnav=_subnav("continuations", window="w2"))
 
 
 @app.route("/continuation/<path:probe_id>")
