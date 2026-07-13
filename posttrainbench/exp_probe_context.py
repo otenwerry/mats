@@ -39,6 +39,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # ANTHROPIC_API_KEY for clean-config probes
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import recon_claude, runs, stream  # noqa: E402
 from reconstruct import build_bundle  # noqa: E402
