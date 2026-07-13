@@ -80,11 +80,12 @@ def restart_assignments() -> dict:
 
 def _task_notification_text(a: dict) -> str:
     """The run-era CLI's injected turn, rebuilt from a reviewed assignment.
-    Both formats captured verbatim from the 2.1.76 repros (2026-07-13):
-    shell tasks end with 'Read the output file...', agent (subagent) tasks
-    carry <result>/<usage> and end with 'Full transcript available at:'.
-    Failed-task wording is an assumption; agent <result>/<usage> lines are
-    omitted when the data was never recorded (see the assignment's 'lost')."""
+    All three formats captured verbatim from the 2.1.76 repros (2026-07-13):
+    shell tasks end with 'Read the output file...' (completed: '... completed
+    (exit code 0)'; failed: '... failed with exit code 1' — no parentheses),
+    agent (subagent) tasks carry <result>/<usage> and end with 'Full
+    transcript available at:'. Agent <result>/<usage> lines are omitted when
+    the data was never recorded (see the assignment's 'lost')."""
     head = ("<task-notification>\n"
             f"<task-id>{a['task_id']}</task-id>\n"
             f"<tool-use-id>{a['tool_use_id']}</tool-use-id>\n"
@@ -101,9 +102,13 @@ def _task_notification_text(a: dict) -> str:
                      f"<duration_ms>{u['duration_ms']}</duration_ms></usage>\n")
         footer = f"Full transcript available at: {a['output_file']}"
     else:
-        verb = "completed" if a["status"] == "completed" else "failed"
-        body = (f"<summary>Background command \"{a['command']}\" {verb} "
-                f"(exit code {a['exit_code']})</summary>\n")
+        if a["status"] == "completed":
+            summary = (f"Background command \"{a['command']}\" completed "
+                       f"(exit code {a['exit_code']})")
+        else:
+            summary = (f"Background command \"{a['command']}\" failed "
+                       f"with exit code {a['exit_code']}")
+        body = f"<summary>{summary}</summary>\n"
         footer = f"Read the output file to retrieve the result: {a['output_file']}"
     return head + body + "</task-notification>\n" + footer
 

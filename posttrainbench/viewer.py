@@ -1055,13 +1055,13 @@ HACKS_HTML = """
 <style>__CSS__</style></head><body>
 {{ subnav|safe }}
 <div class="pagehead"><h1>Reward-hack trajectories</h1>
- <span class="meta">{{ n_total }} trajectories · {{ groups|length }} model×scaffold group(s)</span></div>
+ <span class="meta">{{ n_total }} trajectories · {{ groups|length + deferred|length }} model×scaffold group(s)</span></div>
 <p class="meta" style="margin:0 0 .6rem">issues: <span class="issue perm">permanent loss</span> <span class="issue open">unresolved</span> <span class="issue structural">structural — unavoidable at resume</span> <span class="issue fixed">fixed — re-run clears</span></p>
 {% if orphans %}
 <p class="meta" style="color:#9a3412">⚠ {{ orphans|length }} reward-hack highlight(s) have no viewable trajectory row and are omitted here:
  {{ orphans|join(', ') }}</p>
 {% endif %}
-{% for g in groups %}
+{% macro group_block(g) %}
 <details class="legend" open style="margin-bottom:.7rem">
  <summary><b>{{ g.model }}</b> <span class="meta">· {{ g.engine }} · {{ g.rows|length }} trajector{{ 'y' if g.rows|length == 1 else 'ies' }}</span></summary>
  <table style="margin-top:.5rem"><thead><tr>
@@ -1085,7 +1085,13 @@ HACKS_HTML = """
  {% endfor %}
  </tbody></table>
 </details>
-{% endfor %}
+{% endmacro %}
+{% for g in groups %}{{ group_block(g) }}{% endfor %}
+{% if deferred %}
+<hr style="border:none;border-top:2px solid #cbd5e1;margin:1.6rem 0 .7rem">
+<h2 style="margin:0 0 .7rem;font-size:1.05rem">deferred</h2>
+{% for g in deferred %}{{ group_block(g) }}{% endfor %}
+{% endif %}
 <details class="legend" style="margin-top:1rem">
  <summary>issue-tag legend</summary>
  <table style="margin-top:.5rem"><tbody>
@@ -3140,9 +3146,15 @@ def continuation_hacks():
     orphans = sorted(rid for rid, m in HL_META.items()
                      if m.get("is_reward_hack")
                      and not rid.startswith("rollback") and rid not in INDEX)
+    # Deferred section (below the divider): scaffolds we are not trying to
+    # reconstruct right now — codex (permanent data loss) and qwen (needs a
+    # DashScope key). OpenCode stays in the top section (planned).
+    deferred_engines = {"Codex", "Qwen"}
+    deferred = [g for g in groups if g["engine"] in deferred_engines]
+    groups = [g for g in groups if g["engine"] not in deferred_engines]
     return render_template_string(
-        HACKS_HTML, groups=groups, n_total=n_total, orphans=orphans,
-        label_class=_LABEL_CLASS, oai_pill=openai_pill,
+        HACKS_HTML, groups=groups, deferred=deferred, n_total=n_total,
+        orphans=orphans, label_class=_LABEL_CLASS, oai_pill=openai_pill,
         subnav=_subnav("continuations", window="crt"))
 
 

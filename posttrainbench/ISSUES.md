@@ -79,9 +79,10 @@ repro pass pointed the wrong way.)
   the `<task-notification>` turn from each entry (provenance
   `reconstructed_notification`, flag `restart_notification_reconstructed`).
   Known caveats, flagged: exit codes inferred (2 failures identified from
-  replies, rest assumed 0); the failed-task summary wording is an assumption
-  (repro only observed a successful completion); one low-confidence entry
-  (bfcl's vLLM-server task, assigned by elimination).
+  replies, rest assumed 0); one low-confidence entry (bfcl's vLLM-server task,
+  assigned by elimination). The failed-task summary wording was VERIFIED by
+  the `--fail` repro (2026-07-13): `failed with exit code 1` — our earlier
+  guess had the wrong format ("failed (exit code 1)"), fixed in recon_claude.
 - **Reconstructed with a permanent gap (purple tag, shown in the viewer as
   `missing helper agent text` — renamed 2026-07-13 for readability):**
   opus-1M run1's (#15) single restart. The `--agent-task` repro (2026-07-13, CLI 2.1.76) pinned the
@@ -99,10 +100,10 @@ repro pass pointed the wrong way.)
   errors — nothing to review; assignments would be launch-order guesses).
   Keeps the old time-nudge insert with a loud KNOWN-WRONG flag
   (`continuation_prompt_estimated`).
-- The failed-task wording test is BUILT (`--fail` mode, 2026-07-13), not yet
-  run — it pins the wording assumed in 2 of #2's 6 inserts (~$0.05, ~2 min):
-
-      uv run python posttrainbench/exp_restart_repro.py --fail --cli "npx -y @anthropic-ai/claude-code@2.1.76"
+- The failed-task wording test RAN (`--fail` mode, Owen, 2026-07-13): the
+  run-era CLI says `Background command "..." failed with exit code 1` (no
+  parentheses — our guessed format was wrong; fixed in recon_claude). All
+  three notification wordings are now repro-verified.
 
 Original evidence trail (2026-07-12/13, kept for the record):
 
@@ -311,7 +312,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 ---
 
-## Can't-reconstruct rows (greyed in the viewer)
+## Can't-reconstruct rows (greyed in the viewer; codex + qwen live below the "deferred" divider on /continuations/hacks since 2026-07-13, opencode stays in the top section as planned work)
 
 | scaffold | verdict | what it would take |
 |---|---|---|
@@ -329,7 +330,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [x] ~~`exp_restart_repro.py` re-entry test~~ — DONE 2026-07-13 (three repro runs + `--agent-task`; mechanism confirmed, wordings captured)
-- [ ] **Test (exp approval, ~$0.05, ~2 min):** pin the FAILED-task notification wording (assumed in 2 of #2's 6 inserts): `uv run python posttrainbench/exp_restart_repro.py --fail --cli "npx -y @anthropic-ai/claude-code@2.1.76"`
+- [x] ~~pin the FAILED-task notification wording~~ — DONE 2026-07-13 (Owen ran `--fail` on 2.1.76): `failed with exit code 1`, guessed format was wrong, recon_claude fixed
 - [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes the extra resume turns/attachments for the 7 probeable clean-ending runs (the 8th clean ender is #54, not probeable)
 - [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out); CLI version pinning still optional/untested
 - [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?
