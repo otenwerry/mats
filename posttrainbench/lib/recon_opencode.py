@@ -101,8 +101,12 @@ def build(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> OpencodeBundle:
         flags.append(_flag(
             "opencode_reasoning_not_streamed",
             f"model billed {reasoning_tokens} reasoning tokens but the stream has no "
-            f"reasoning parts; the model's reasoning is NOT in the reconstructed "
-            f"context (matches what later turns saw, but we cannot inspect it)"))
+            f"reasoning parts — the run's stdout printer skipped them (--format json "
+            f"without --thinking). opencode v1.1.59 stored reasoning and REPLAYED it "
+            f"into every subsequent request (verified in source, 2026-07-13), so the "
+            f"original model DID see this reasoning in-context; the rebuilt storage "
+            f"lacks it and a resume sends less context than the original runtime "
+            f"did. Permanent: the container's storage is gone."))
 
     files: dict[str, str] = {}
     t0 = recs[0]["timestamp"]

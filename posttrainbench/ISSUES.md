@@ -220,7 +220,7 @@ never saved. This is the model's own *output*, so the context cannot be rebuilt.
   `run_task.sh`: only `task/` and named files are copied out. Not in the HF
   dataset; not a download problem.
 
-### `reasoning lost` (7 codex + 3 opencode thinking-model runs)
+### `reasoning lost` (7 codex + ALL 8 opencode runs — purple)
 
 Reasoning IS replayed within a tool-call chain (all providers) — and a 10-hour
 agent run is essentially one giant chain — so mid-run cuts need it. Between user
@@ -231,15 +231,25 @@ turns it is dropped (Claude and OpenAI alike).
   Interpretability caveat only: the text is a summary, not raw CoT.
 - **codex:** the replayable (encrypted) reasoning items lived in the destroyed
   rollout files. Fundamental, same as `edits lost`.
-- **opencode:** the stream saves no reasoning at all. Tagged only for the three
-  thinking-model runs (kimi-k2-thinking, gpt-5.1-codex-max, gemini-3.1-pro).
-- **OPEN QUESTION:** did the opencode runtime replay reasoning within the chain
-  during the original runs? If it never sent reasoning back, its resumes are
-  accidentally faithful (the original model didn't see prior reasoning either).
-  Check opencode's request-building code / docs for the kimi + OpenAI providers.
-- **ASSUMPTION TO VERIFY (Owen or quick research):** kimi-k2.5 treated as
-  NON-thinking (its 5 rows untagged). If it has a hidden reasoning channel,
-  those rows need the tag.
+- **opencode — RESOLVED 2026-07-13 (source-read of v1.1.59 at its tag, plus its
+  pinned AI-SDK packages; clone in references/opencode):**
+  - opencode STORED reasoning parts locally and REPLAYED them into every
+    subsequent request — kimi models as plaintext `reasoning_content`, gemini
+    as thought parts + signatures, gpt as encrypted reasoning items. A missing
+    reasoning part is silently tolerated at resume.
+  - The runs' stdout (`--format json` WITHOUT `--thinking`) skipped reasoning
+    parts by construction — so the reasoning existed in the containers'
+    storage and was simply never captured. The containers are gone: PERMANENT.
+    Resumes from our rebuilt storage send less context than the original
+    runtime did. Tag upgraded blue → purple.
+  - ~~ASSUMPTION: kimi-k2.5 non-thinking~~ — WRONG: kimi-k2.5 is a reasoning
+    model, thinking ON by default (models.dev `reasoning: true` today and in
+    the run-era catalog; Moonshot's model card). Its 5 rows now carry the tag
+    too → all 8 opencode rows, not 3.
+  - Possible partial mitigation, unexplored: the printer emitted full part
+    JSON for text/tool parts incl. metadata, so gemini thought-signatures and
+    openai reasoning item-ids attached to TEXT/tool parts may be recoverable
+    from our streams (the reasoning TEXT itself is not).
 
 ### `effort not replicated` (4 claude_non_api runs)
 
@@ -333,7 +343,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 | scaffold | verdict | what it would take |
 |---|---|---|
 | codex (7) | **fundamental** — patch bodies + rollouts destroyed | nothing recoverable; approximate-only, permanent flag |
-| opencode (8) | logistics | install opencode CLI + provider auth for the original models; reasoning caveat above for 3 rows |
+| opencode (8) | logistics | CLI DONE (pinned 1.1.59 in mats-local/tools/, 2026-07-13); remaining: an opencode zen key (`OPENCODE_API_KEY` in mats/.env — all 8 runs used the zen gateway). Permanent `reasoning lost` caveat on all 8 rows; the kimi-k2-thinking model is deprecated on zen (may refuse) |
 | qwen3max (1) | logistics | it's Claude Code + DashScope endpoint: needs a DashScope key + env overrides (**OWEN:** obtain key if we want this row) |
 
 ---
@@ -344,10 +354,11 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
 - [x] ~~background-restarts reconstruction fix~~ — 12/34 reviewed + wired in 2026-07-13 (restart_assignments.json; run #15's agent-task wording pinned by the --agent-task repro, its subagent report permanently lost → purple); **still open:** qwen's 22, deferred by Owen — revisit when qwen becomes resumable
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
-- [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
+- [ ] **Owen:** DashScope key if we want the qwen3max row (#54) resumable
 - [x] ~~`exp_restart_repro.py` re-entry test~~ — DONE 2026-07-13 (three repro runs + `--agent-task`; mechanism confirmed, wordings captured)
 - [x] ~~pin the FAILED-task notification wording~~ — DONE 2026-07-13 (Owen ran `--fail` on 2.1.76): `failed with exit code 1`, guessed format was wrong, recon_claude fixed
 - [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes the extra resume turns/attachments for the 7 probeable clean-ending runs (the 8th clean ender is #54, not probeable)
 - [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out)
 - [x] ~~CLI version pinning~~ — DONE 2026-07-13 (default `--cli original` via npx; run-era resume behavior itself pending the validation probe)
-- [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?
+- [x] ~~does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?~~ — BOTH RESOLVED 2026-07-13 (v1.1.59 source-read): yes it replays (three mechanisms), and yes kimi-k2.5 thinks by default → `reasoning lost` is purple on all 8 opencode rows
+- [ ] **Owen:** create an opencode zen API key (sign in at https://opencode.ai/auth, add billing, copy the key) and add `OPENCODE_API_KEY=...` to mats/.env — unlocks the 8 opencode rows (with the permanent reasoning caveat; the kimi-k2-thinking row may refuse — that model was deprecated on zen 2026-03-06)

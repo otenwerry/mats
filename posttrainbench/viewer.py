@@ -1098,8 +1098,8 @@ HACKS_HTML = """
    <td>codex traces store only path + change-kind for each file edit; the edit contents were never saved and are unrecoverable.</td></tr>
   <tr><td class="flags"><span class="issue perm">reasoning lost</span></td>
    <td>(codex) only reasoning summaries were saved — the replayable reasoning items lived in the rollout file, destroyed with the run's temp dir.</td></tr>
-  <tr><td class="flags"><span class="issue open">reasoning lost</span></td>
-   <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
+  <tr><td class="flags"><span class="issue perm">reasoning lost</span></td>
+   <td>(opencode — all 8 rows; kimi-k2.5 is a thinking model too, verified 2026-07-13) the runs' stdout printer skipped reasoning parts, and the containers' storage is gone. opencode v1.1.59 replayed stored reasoning into every request (verified in its source), so resumes from our rebuilt storage send less context than the original runtime did.</td></tr>
   <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
   <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span></td>
@@ -2917,10 +2917,14 @@ def continuations():
 # flags on the continuation page.
 _ISSUE_FACTS_CACHE: dict[str, dict] = {}
 
-# opencode models with a hidden reasoning channel; the opencode stream saves no
-# reasoning at all, so for these runs the model's reasoning is simply gone.
-# (kimi-k2.5 is treated as non-thinking and gets no tag.)
-_OPENCODE_THINKING = ("kimi-k2-thinking", "gpt-5.1-codex-max", "gemini-3.1-pro")
+# ALL FOUR opencode models are reasoning models (verified 2026-07-13:
+# models.dev reasoning flags, run-era catalog, Moonshot's k2.5 card —
+# thinking-on-by-default; the old kimi-k2.5-is-non-thinking assumption was
+# wrong). opencode v1.1.59 stored reasoning and replayed it into every
+# request, but the runs' stdout printer skipped reasoning parts (--format
+# json without --thinking), so the reasoning died with the containers.
+_OPENCODE_REASONING_MODELS = ("kimi-k2-thinking", "kimi-k2.5",
+                              "gpt-5.1-codex-max", "gemini-3.1-pro")
 
 
 def _issue_facts(run_id: str) -> dict:
@@ -3041,13 +3045,16 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                       "difference). Re-running the continuation clears this.")})
     if t.scaffold == "opencode":
         model = t.run_id
-        if any(m in model for m in _OPENCODE_THINKING):
+        if any(m in model for m in _OPENCODE_REASONING_MODELS):
             issues.append({
-                "tag": "reasoning lost", "cls": "open",
-                "title": ("the opencode stream records no model reasoning, so this "
-                          "thinking model's reasoning is absent from the trace entirely. "
-                          "Open question: if opencode never replayed reasoning mid-run, "
-                          "resumes are faithful anyway")})
+                "tag": "reasoning lost", "cls": "perm",
+                "title": ("this reasoning model's reasoning never reached the saved "
+                          "stream (the run's stdout printer skipped reasoning parts) "
+                          "and the container's storage is gone — permanent. It "
+                          "matters: opencode v1.1.59 replayed stored reasoning into "
+                          "every request (verified in source, 2026-07-13), so a "
+                          "resume from our rebuilt storage sends less context than "
+                          "the original runtime did.")})
     if t.scaffold == "codex":
         if f["n_file_change"]:
             issues.append({
