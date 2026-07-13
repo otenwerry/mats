@@ -446,6 +446,12 @@ body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .2
          background: #1558d6; color: #fff; font-size: 1.25rem; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.28);
          display: none; z-index: 50; }
 .totop:hover { background: #0f47b0; }
+/* EM ask pages: floating jump-to-the-new-question pill, stacked above the totop button */
+.toq { position: fixed; right: 18px; bottom: 68px; height: 42px; line-height: 42px;
+       border-radius: 21px; padding: 0 16px; background: #1558d6; color: #fff;
+       font-size: .85rem; font-weight: 600; box-shadow: 0 2px 10px rgba(0,0,0,.28);
+       z-index: 50; }
+.toq:hover { background: #0f47b0; color: #fff; text-decoration: none; }
 .cnav-grp { margin-bottom: 9px; padding-bottom: 8px; border-bottom: 1px solid #eceef2; }
 .cnav-grp.hack b { color: #b3261e; }
 .cnav-grp.user b { color: #2456a6; }
@@ -5319,8 +5325,6 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
         bits.append("flags: " + ", ".join(map(str, flags)))
 
     buttons = [head_btn(f"../{sweep_em_file(key)}", "&larr; back")]
-    if q_m is not None:
-        buttons.append(head_btn(f"#M{q_m}", "&darr; new question"))
     if a:
         orig = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
         anchor = _em_cut_anchor(a, s.get("cut_turn"))
@@ -5335,11 +5339,15 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
 <h2>Resumed conversation <span class="meta">(replayed prefix; the inserted question at the cut mark)</span></h2>
 {tr_html_}
 """
+    # floating jump to the new question (bottom-right, above the totop button, so it
+    # travels with the scroll like the hack-turn nav)
+    toq = (f'<a class="toq" href="#M{q_m}" title="jump to the new question">'
+           f"&darr; question</a>" if q_m is not None else "")
     name = f'em__{b["campaign"]}__id{b["tid"]}__{s.get("cut")}__{r["dir"]}.html'
     page = (f"<!doctype html><html><head><meta charset='utf-8'>"
             f"<title>#{b['tid']} ask {esc(str(r.get('question_id') or ''))} "
             f"s{r.get('sample_index')}</title><style>{CSS}</style></head>"
-            f"<body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
+            f"<body><div class='wrap'>{body}</div>{toq}{TOTOP_HTML}</body></html>")
     (OUT / "pages" / name).write_text(page)
     return name
 
