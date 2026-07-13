@@ -80,12 +80,26 @@ Mid-run agent restarts with **no known mechanism**. Evidence collected 2026-07-1
   ids the models cite (e.g. b92a6ea) enter their context via the ordinary
   launch tool_result — so the "notification" the models answered was injected
   at resume, not streamed.
-- **TEST (script updated, re-run it):** `exp_restart_repro.py` now runs two
-  phases — the background-job run, then `claude --continue` on the same session
-  (exactly the external-watchdog move) — and dumps whatever the resume injects.
-  Run once with the current CLI and once with
-  `--cli "npx @anthropic-ai/claude-code@2.1.76"` (run-era). The injected format,
-  if any, is what reconstruction should insert at PTB restart points.
+- **TEST RESULT #2 (2026-07-13) — MECHANISM ESSENTIALLY CONFIRMED.** Running
+  `claude --continue` on a session with a pending background task reproduced
+  the full PTB signature in one shot: multiple `system:init` events under one
+  session id, an injected user turn that does NOT appear in the stream, and the
+  model replying about the stale task. The injected turn's format (CLI 2.1.207):
+
+      <task-notification>
+      <task-id>bstr6vigs</task-id>
+      <tool-use-id>toolu_...</tool-use-id>
+      <status>stopped</status>
+      <summary>No completion record was found for this background shell
+      command from the previous session. ...</summary>
+
+  So the PTB restarts = something external re-ran `claude --continue`, and the
+  CLI injected task-notifications at resume. This is what reconstruction should
+  insert at restart points instead of the time-nudge template — pending two
+  remaining unknowns: (1) the run-era CLI's notification wording (re-run with
+  `--cli "npx -y @anthropic-ai/claude-code@2.1.76"` — note `-y`, plain npx
+  hangs on a hidden install prompt), and (2) what prompt text, if any, the
+  external relauncher passed (Maksym).
 - **Extra unfaithfulness in the existing probes:** the 3 restart runs' pre-fix
   probe contexts ENDED on the synthetic nudge text (their `--turn last` cut fell
   right after a relaunch). `--turn end` re-runs fix the ending; the mid-context

@@ -2953,13 +2953,14 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
             issues.append({
                 "tag": f"unexplained restarts ×{f['restarts_visible']}", "cls": "open",
                 "title": (f"the agent was restarted mid-run {f['restarts_visible']} "
-                          f"time(s) after the last compaction by an unknown mechanism — "
-                          f"no relaunch loop exists for this agent in any harness branch, "
-                          f"and post-restart replies suggest background-task notifications "
-                          f"(claude) or API-error retries (qwen), not a time nudge. "
-                          f"Reconstruction currently inserts the nudge template here — "
-                          f"probably wrong content. Plausibly resolvable: repro test "
-                          f"ready (exp_restart_repro.py) + ask Maksym.{extra}")})
+                          f"time(s) after the last compaction. Mechanism essentially "
+                          f"confirmed by repro (2026-07-13): something external re-ran "
+                          f"`claude --continue`, and the CLI injected <task-notification> "
+                          f"turns (never streamed) that the model then answered. "
+                          f"Reconstruction still inserts the time-nudge template here — "
+                          f"wrong content, to be replaced with the notification format "
+                          f"once the run-era CLI's wording and the relauncher's prompt "
+                          f"text (Maksym) are pinned down.{extra}")})
     # Task prompt: regeneration is era-exact since 2026-07-13 (prompts.py
     # restores the pre-April wording), so this only tags runs whose EXISTING
     # continuation was built before the fix — re-running clears it.
