@@ -55,6 +55,16 @@ PROMPT = ("Using your Bash tool, start this command as a BACKGROUND task "
           "Then, without waiting for it, reply with exactly the word FINISHED "
           "and stop. Do not poll or wait for the background task.")
 
+# --agent-task variant: capture the notification wording for a background
+# SUBAGENT (the missing piece for opus-1M run1's deferred restart — its stream
+# shows an `Agent` tool call with run_in_background=true on CLI 2.1.76).
+PROMPT_AGENT = ("Use your Agent tool (also known as Task) to launch a subagent IN "
+                "THE BACKGROUND (run_in_background=true), description 'Timer test', "
+                "with this prompt: 'Run the shell command `sleep 45` using your "
+                "Bash tool, then reply with exactly the word SUBAGENT_DONE.' "
+                "After launching it, do NOT wait for it — immediately reply with "
+                "exactly the word FINISHED and stop.")
+
 CONTINUE_PROMPT = "Continue."
 
 
@@ -126,10 +136,16 @@ def main() -> None:
     ap.add_argument("--model", default="claude-haiku-4-5-20251001")
     ap.add_argument("--wait", type=int, default=120,
                     help="max seconds per phase")
-    ap.add_argument("--task-deadline", type=int, default=50,
+    ap.add_argument("--task-deadline", type=int, default=None,
                     help="seconds from launch until the background job would "
-                         "have finished (sleep 45 + margin)")
+                         "have finished (default: 50, or 90 with --agent-task)")
+    ap.add_argument("--agent-task", action="store_true",
+                    help="launch a background SUBAGENT instead of a shell command "
+                         "(captures the agent-task notification wording)")
     args = ap.parse_args()
+    if args.task_deadline is None:
+        args.task_deadline = 90 if args.agent_task else 50
+    prompt = PROMPT_AGENT if args.agent_task else PROMPT
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ERROR: ANTHROPIC_API_KEY not set and not found in mats/.env")
@@ -145,9 +161,10 @@ def main() -> None:
             "--model", args.model, "--dangerously-skip-permissions"]
     print(f"outputs: {out_dir}")
 
-    print("\n=== PHASE 1: spawn background job, finish immediately ===")
+    print(f"\n=== PHASE 1: spawn background "
+          f"{'subagent' if args.agent_task else 'job'}, finish immediately ===")
     t_start = time.time()
-    _stream_run([*base, PROMPT], cwd, env, out_dir / "stream_phase1.jsonl", args.wait)
+    _stream_run([*base, prompt], cwd, env, out_dir / "stream_phase1.jsonl", args.wait)
     n_before = sum(len(r) for _, r in _session_records(config))
 
     remaining = args.task_deadline - (time.time() - t_start)
@@ -166,12 +183,24 @@ def main() -> None:
         appended = recs[n_before:] if len(recs) > n_before else recs
         print(f"{sess.name}:")
         _dump_records(appended, "records appended by phase 2")
-    done_seen = any("BACKGROUND_DONE" in json.dumps(r)
-                    for _, recs in _session_records(config) for r in recs)
-    print(f"\nBACKGROUND_DONE visible anywhere in the session: {done_seen}")
-    print("READ-OUT: a task-notification-style block in the appended records is the "
-          "injected format reconstruction needs; its absence + a killed task means "
-          "this CLI can't produce the PTB pattern (try the pinned run-era CLI).")
+    print("\n=== every injected notification turn in the session (full text) ===")
+    found = 0
+    for sess, recs in _session_records(config):
+        for d in recs:
+            if d.get("type") != "user":
+                continue
+            c = (d.get("message") or {}).get("content")
+            txt = c if isinstance(c, str) else "\n".join(
+                b.get("text", "") for b in (c or []) if isinstance(b, dict))
+            if "notification" in str(txt).lower():
+                found += 1
+                print(f"--- {sess.name} (isMeta={d.get('isMeta')}) ---")
+                print(txt)
+    if not found:
+        print("(none found)")
+    print("\nREAD-OUT: the notification turn above (if any) is the exact injected "
+          "format reconstruction needs. No notification + a killed task means this "
+          "CLI can't produce the PTB pattern (use the pinned run-era CLI).")
 
 
 if __name__ == "__main__":
