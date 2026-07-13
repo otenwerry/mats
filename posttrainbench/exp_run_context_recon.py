@@ -24,7 +24,6 @@ so re-running only fills gaps.
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -42,9 +41,11 @@ def _support(traj) -> tuple[bool, str]:
     if traj.scaffold == "claude":
         return True, ""
     if traj.scaffold == "opencode":
-        if shutil.which("opencode"):
-            return True, ""
-        return False, "opencode CLI not installed (needs opencode-ai + provider auth)"
+        if not runs.opencode_cmd():
+            return False, "opencode CLI not installed (pinned install expected in mats-local/tools/)"
+        if not runs.env_has("OPENCODE_API_KEY"):
+            return False, "zen gateway key missing (add OPENCODE_API_KEY to mats/.env)"
+        return True, ""
     if traj.scaffold == "codex":
         return False, "codex traces lossy (no rollout/patch bodies) — can't reconstruct"
     if traj.scaffold == "qwen3max":

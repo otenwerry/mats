@@ -120,6 +120,33 @@ def load(run_id: str) -> Trajectory:
     )
 
 
+OPENCODE_BIN = (ROOT / "mats-local" / "tools" / "opencode-1.1.59" /
+                "node_modules" / ".bin" / "opencode")
+
+
+def opencode_cmd() -> str | None:
+    """Path to the opencode CLI: the pinned run-era install (opencode-ai@1.1.59,
+    the version in PTB's containers) if present, else whatever is on PATH."""
+    import shutil
+    if OPENCODE_BIN.exists():
+        return str(OPENCODE_BIN)
+    return shutil.which("opencode")
+
+
+def env_has(var: str) -> bool:
+    """Is the env var available to experiment scripts — set in the process env
+    or defined in mats/.env (which the exp_ scripts load via dotenv)?"""
+    import os
+    if os.environ.get(var):
+        return True
+    dotenv = HIGHLIGHTS.parents[1] / ".env"
+    try:
+        return any(line.startswith(f"{var}=") and len(line.strip()) > len(var) + 1
+                   for line in dotenv.read_text().splitlines())
+    except OSError:
+        return False
+
+
 def reward_hacks() -> list[Trajectory]:
     """All confirmed reward-hack trajectories, from the highlights labels."""
     out = []

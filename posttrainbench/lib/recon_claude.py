@@ -265,8 +265,10 @@ def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBun
 
 
 def project_dir_name(cwd: str) -> str:
-    """Claude Code >=2.1.181 maps every non-alphanumeric char to '-'
-    (older versions kept '_'; use the convention of the CLI doing the resume)."""
+    """Claude Code maps every non-alphanumeric char in the cwd to '-'.
+    Verified identical across all run-era versions (2.1.9 / 2.1.34 / 2.1.76,
+    read from their cli.js bundles, 2026-07-13) and the current CLI — an old
+    memory claimed older versions kept '_'; that was wrong."""
     import re
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 

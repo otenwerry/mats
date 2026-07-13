@@ -34,7 +34,6 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent))  # `from lib import .
 import json
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 
@@ -1118,7 +1117,7 @@ HACKS_HTML = """
   <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
    <td>this scaffold's data or tooling doesn't allow rebuilding the context at all (hover the pill for the run-specific reason).</td></tr>
  </tbody></table>
- <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI, and the original workspace/GPU/processes are absent. Two former universal caveats are fixed in code for future probes: local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes on clean-ending runs no longer get synthetic resume turns (--turn end cuts after the final assistant message). Runs that genuinely died mid-action keep them unavoidably — those carry the teal "extra resume turns" tag above. See each continuation page.</p>
+ <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine (the system prompt's env block says this machine + today's date, not the container + April), and the original workspace/GPU/processes are absent. Three former universal caveats are fixed in code for future probes: the probe now runs the run's ORIGINAL CLI version (pinned via npx — same instructions/tools/behavior), local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes on clean-ending runs no longer get synthetic resume turns (--turn end cuts after the final assistant message). Runs that genuinely died mid-action keep them unavoidably — those carry the teal "extra resume turns" tag above. See each continuation page.</p>
 </details>
 </body></html>
 """.replace("__CSS__", CSS)
@@ -2619,10 +2618,14 @@ def _probe_support(scaffold: str, agent: str) -> tuple[bool, str]:
     if scaffold == "claude":
         return True, ""
     if scaffold == "opencode":
-        if shutil.which("opencode"):
-            return True, ""
-        return False, ("opencode CLI not installed on this machine "
-                       "(needs opencode-ai + provider auth for the original model)")
+        if not runs.opencode_cmd():
+            return False, ("opencode CLI not installed on this machine "
+                           "(pinned install expected in mats-local/tools/)")
+        if not runs.env_has("OPENCODE_API_KEY"):
+            return False, ("opencode CLI installed (pinned 1.1.59), but the zen "
+                           "gateway key is missing — these runs used opencode's "
+                           "own model gateway; add OPENCODE_API_KEY to mats/.env")
+        return True, ""
     if scaffold == "codex":
         return False, ("codex traces are lossy (no rollout / patch bodies) — "
                        "the pre-cut context can't be reconstructed")

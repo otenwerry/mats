@@ -289,20 +289,36 @@ noted on continuation pages). The original agents never saw these.
 - **FIXED:** `exp_probe_context.py` now defaults to a fresh per-probe
   `CLAUDE_CONFIG_DIR` (auth via `ANTHROPIC_API_KEY`; `--user-config` restores
   the old behavior). Flags: `probe_config_clean` / `probe_config_personal`.
-- **Residual, bounded, known (not guesses):** CLI built-in listings (killable by
-  pinning the run's original CLI version — still on npm) and the regenerated
-  system prompt's environment block (cwd/platform/date — the original cwd
-  `/home/ben/task` is recorded in init events; fully closing this overlaps with
-  the deferred workspace-reconstruction phase).
+- **Residual, bounded, known (not guesses):** CLI built-in listings (now
+  handled — probes pin the run's original CLI version by default, see "CLI
+  version drift") and the regenerated system prompt's environment block
+  (cwd/platform/date — the original cwd `/home/ben/task` is recorded in init
+  events; fully closing this overlaps with the deferred
+  workspace-reconstruction phase).
 - **TODO:** validate on ONE probe via `resume_turns.jsonl` before the batch
   re-run (also confirms clean-config auth works and, if pinning, that the old
   CLI resumes cleanly).
 
-### CLI version drift
+### CLI version drift — FIXED in code (2026-07-13), pending the validation probe
 
-Probes run CLI 2.1.207; originals used 2.1.9–2.1.76 → different system prompt,
-tool schemas, current date. Deprioritized by Owen (recorded for exhaustiveness);
-mostly eliminated for free by version pinning above.
+Originals used CLI 2.1.9 / 2.1.34 / 2.1.76; the first probe campaign ran the
+local 2.1.207 → different system-prompt instructions, tool schemas, CLI
+behavior.
+
+- **FIXED:** `exp_probe_context.py` now pins the run's own CLI version by
+  default (`--cli original` → `npx -y @anthropic-ai/claude-code@<ver>`;
+  `--cli local` restores the old behavior). Flags: `probe_cli_pinned` /
+  `probe_cli_version_drift`. All three run-era versions invoke fine via npx
+  (verified) and use the SAME session-dir naming as today (read from their
+  cli.js bundles — an earlier note claiming older versions named dirs
+  differently was wrong).
+- **What pinning does NOT fix:** the system prompt's `<env>` block (working
+  directory, platform, OS version, today's date) is generated at runtime by
+  every CLI version — verified in the 2.1.34 bundle. A pinned probe still
+  says Owen's machine + today's date, not the container + April. That
+  residual belongs to the deferred workspace-reconstruction phase.
+- **TODO:** the one-probe validation (below) now also validates that an old
+  CLI resumes our installed sessions cleanly.
 
 ### World/workspace mismatch
 
@@ -332,5 +348,6 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [x] ~~`exp_restart_repro.py` re-entry test~~ — DONE 2026-07-13 (three repro runs + `--agent-task`; mechanism confirmed, wordings captured)
 - [x] ~~pin the FAILED-task notification wording~~ — DONE 2026-07-13 (Owen ran `--fail` on 2.1.76): `failed with exit code 1`, guessed format was wrong, recon_claude fixed
 - [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes the extra resume turns/attachments for the 7 probeable clean-ending runs (the 8th clean ender is #54, not probeable)
-- [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out); CLI version pinning still optional/untested
+- [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out)
+- [x] ~~CLI version pinning~~ — DONE 2026-07-13 (default `--cli original` via npx; run-era resume behavior itself pending the validation probe)
 - [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?
