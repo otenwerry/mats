@@ -65,13 +65,30 @@ mechanism, no external watchdog anywhere. (The current CLI behaves differently:
 it kills background tasks ~5s after the final answer, which is why the first
 repro pass pointed the wrong way.)
 
-**Now unblocked — DECISION (Owen):** replace the wrong time-nudge inserts with
-reconstructed `<task-notification>` turns. Reconstructable from the stream:
-task-id, tool-use-id, output-file (all in the launch tool_result), the command
-(launch tool_use input). Unknowns to handle: the exit code in the summary line
-(not recorded; assume 0 + flag?), and which task maps to which re-entry when
-several complete (launch order vs the ids the post-restart replies quote; for
-bfcl run1 the replies name the ids, so exact assignment is possible).
+**PARTIALLY FIXED (2026-07-13) — 11 of 34 inserts hand-reviewed and wired in;
+23 deferred:**
+
+- **Reviewed + reconstructed (green tag):** bfcl run1 (6) and opus-1M run3 (5).
+  Manual review matched each restart to its background job via the ids/content
+  the replies quote (notification order matched launch order in every checkable
+  case). Assignments live in `restart_assignments.json` (verbatim
+  task-id/tool-use-id/command/output-file from the streams + inferred
+  status/exit-code + per-entry evidence and confidence); `recon_claude` builds
+  the `<task-notification>` turn from each entry (provenance
+  `reconstructed_notification`, flag `restart_notification_reconstructed`).
+  Known caveats, flagged: exit codes inferred (2 failures identified from
+  replies, rest assumed 0); the failed-task summary wording is an assumption
+  (repro only observed a successful completion); one low-confidence entry
+  (bfcl's vLLM-server task, assigned by elimination).
+- **Deferred (blue tag), Owen's call still open:** qwen's 22 (replies are API
+  errors — nothing to review; assignments would be launch-order guesses) and
+  opus-1M run1's single restart (a background *agent* task — the run-era
+  notification wording for agent tasks is unverified; only shell-command
+  format was repro'd). These runs keep the old time-nudge insert with a loud
+  KNOWN-WRONG flag (`continuation_prompt_estimated`).
+- Optional refinements if we want them later: a 30-second repro variant with a
+  failing command (`exit 1`) pins the failure wording; one with a background
+  subagent pins the agent-task wording (would un-defer opus-1M run1).
 
 Original evidence trail (2026-07-12/13, kept for the record):
 
@@ -274,7 +291,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 - [x] ~~what relaunched the non-reprompt agents~~ — RESOLVED 2026-07-13: the run-era CLI itself (background-task re-entry; see `background restarts`). No Maksym needed.
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
-- [ ] **Owen:** decide the `background restarts` reconstruction fix — insert reconstructed `<task-notification>` turns (exit-code assumption + task↔re-entry matching strategy need your sign-off)
+- [x] ~~background-restarts reconstruction fix~~ — 11/34 reviewed + wired in 2026-07-13 (restart_assignments.json); **still open:** qwen's 22 + the one agent-task restart, deferred by Owen — revisit when qwen becomes resumable or via the optional repro variants (failure wording / agent-task wording)
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)

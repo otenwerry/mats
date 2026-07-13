@@ -7,9 +7,13 @@ Model-visible context at a main-thread cut:
     followed by ONE synthetic user message holding the summary Claude Code
     actually put in front of the model. Context = that summary + everything
     after it (the pre-compaction history was no longer visible to the model).
-  - each mid-run `system:init` is a harness relaunch (`claude --continue`)
-    whose continuation prompt was a CLI arg (never streamed); we re-insert it
-    from the known template with an estimated remaining time (flagged).
+  - each mid-run `system:init` is the run-era CLI re-entering the session to
+    deliver a background-task completion notification (mechanism confirmed
+    2026-07-13, see ISSUES.md): an unstreamed plain user turn in the
+    <task-notification> format. Where the reviewed assignment file
+    (restart_assignments.json) covers the restart we insert a reconstructed
+    notification (flagged); otherwise we still insert the OLD time-nudge
+    template, which is known-wrong content, with a loud flag (deferred runs).
   - subagent (sidechain) records never entered the main context and are
     excluded; only the Task tool_result the main thread received remains.
 
@@ -29,6 +33,7 @@ import json
 import uuid as uuidlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import prompts
 from .runs import Trajectory
@@ -55,6 +60,38 @@ class ContextBundle:
 
 def _flag(code: str, detail: str, severity: str = "warn") -> dict:
     return {"code": code, "severity": severity, "detail": detail}
+
+
+_ASSIGNMENTS_PATH = Path(__file__).resolve().parents[1] / "restart_assignments.json"
+_assignments_cache: dict | None = None
+
+
+def restart_assignments() -> dict:
+    """The reviewed background-task-notification assignments (see ISSUES.md,
+    'background restarts'). {'assignments': {run_id: {init_record: {...}}},
+    'deferred': {run_id: {reason}}}."""
+    global _assignments_cache
+    if _assignments_cache is None:
+        _assignments_cache = (json.loads(_ASSIGNMENTS_PATH.read_text())
+                              if _ASSIGNMENTS_PATH.exists()
+                              else {"assignments": {}, "deferred": {}})
+    return _assignments_cache
+
+
+def _task_notification_text(a: dict) -> str:
+    """The run-era CLI's injected turn, rebuilt from a reviewed assignment
+    (format captured verbatim from the 2.1.76 repro; failed-task wording is an
+    assumption — see restart_assignments.json _readme)."""
+    verb = "completed" if a["status"] == "completed" else "failed"
+    return ("<task-notification>\n"
+            f"<task-id>{a['task_id']}</task-id>\n"
+            f"<tool-use-id>{a['tool_use_id']}</tool-use-id>\n"
+            f"<output-file>{a['output_file']}</output-file>\n"
+            f"<status>{a['status']}</status>\n"
+            f"<summary>Background command \"{a['command']}\" {verb} "
+            f"(exit code {a['exit_code']})</summary>\n"
+            "</task-notification>\n"
+            f"Read the output file to retrieve the result: {a['output_file']}")
 
 
 def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBundle:
@@ -101,13 +138,31 @@ def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBun
             if r.get("subtype") == "status":
                 continue  # e.g. "compacting" notice; must not break message grouping
             if r.get("subtype") == "init" and init_idxs and i != init_idxs[0]:
-                text, basis = prompts.continuation_prompt(i / max(1, len(recs)), traj.num_hours)
-                messages.append(Msg("user", {"role": "user", "content": text},
-                                    "estimated_continuation", [i]))
-                flags.append(_flag(
-                    "continuation_prompt_estimated",
-                    f"relaunch at record {i}: continuation prompt re-inserted from the "
-                    f"solve.sh template; {basis}"))
+                a = restart_assignments()["assignments"].get(traj.run_id, {}).get(str(i))
+                if a is not None:
+                    messages.append(Msg(
+                        "user", {"role": "user", "content": _task_notification_text(a)},
+                        "reconstructed_notification", [i]))
+                    flags.append(_flag(
+                        "restart_notification_reconstructed",
+                        f"restart at record {i}: background-task notification for "
+                        f"{a['task_id']} reconstructed from the reviewed assignment file "
+                        f"(confidence: {a['confidence']}; exit code inferred, not "
+                        f"recorded). Evidence: {a['evidence']}", "info"))
+                else:
+                    text, basis = prompts.continuation_prompt(i / max(1, len(recs)),
+                                                              traj.num_hours)
+                    messages.append(Msg("user", {"role": "user", "content": text},
+                                        "estimated_continuation", [i]))
+                    reason = (restart_assignments()["deferred"]
+                              .get(traj.run_id, {}).get("reason", "not yet reviewed"))
+                    flags.append(_flag(
+                        "continuation_prompt_estimated",
+                        f"restart at record {i}: KNOWN-WRONG content — the real injected "
+                        f"turn was a background-task notification (mechanism confirmed "
+                        f"2026-07-13), but this restart has no reviewed assignment "
+                        f"({reason}); the old time-nudge template is inserted instead. "
+                        f"{basis}"))
             cur_asst = None
             continue
         if t == "result":

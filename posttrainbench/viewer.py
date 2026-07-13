@@ -29,6 +29,7 @@ from __future__ import annotations
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).resolve().parent / "lib"))  # shared modules (paths, locate, render, runs)
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))  # `from lib import ...` (package-relative modules)
 
 import json
 import os
@@ -43,6 +44,7 @@ import locate
 import paths
 import render as rnd
 import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench2/probes)
+from lib import recon_claude  # restart_assignments() for the issues column
 
 # all data/output locations come from the shared paths module (handles the
 # PTB_DATA override and the repo-relative layout)
@@ -1094,8 +1096,8 @@ HACKS_HTML = """
    <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
   <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
-  <tr><td class="flags"><span class="issue open">background restarts ×N</span></td>
-   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn — every affected run's background launches match its re-entries (6/6, 5/6, 22/22). The format is known and reconstructable; reconstruction still inserts the old time-nudge template at these points, which is wrong content — replacement pending.</td></tr>
+  <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span></td>
+   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn. <b>Green</b>: every restart in the run has a hand-reviewed reconstructed notification (restart_assignments.json; exit codes inferred) — re-running the continuation clears it. <b>Blue</b>: the faithful insert is deferred (qwen: replies are API errors, nothing to review; opus-1M run1: agent-task wording unverified) and reconstruction still inserts the known-wrong time-nudge template.</td></tr>
   <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
   <tr><td class="flags"><span class="issue fixed">effort not replicated</span></td>
@@ -2919,6 +2921,7 @@ def _issue_facts(run_id: str) -> dict:
     last_c = compacts[-1] if compacts else -1
     facts = {
         "restarts_visible": sum(1 for i in inits[1:] if i > last_c),
+        "restart_idxs": [i for i in inits[1:] if i > last_c],
         "n_compactions": len(compacts),
         "n_file_change": sum(1 for e in evs if e.get("type") == "codex_item"
                              and e.get("subtype") == "file_change"),
@@ -2947,19 +2950,29 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                           f"time values were not streamed but ARE recoverable from this "
                           f"run's line timestamps (not yet wired into reconstruction)")})
         else:
-            extra = (" This run's existing probe context even ENDED on that synthetic "
-                     "nudge text (--turn end re-run fixes the ending, not the "
-                     "mid-context inserts)." if probe is not None else "")
-            issues.append({
-                "tag": f"background restarts ×{f['restarts_visible']}", "cls": "open",
-                "title": (f"mechanism CONFIRMED (2026-07-13): the run-era CLI waits for "
-                          f"background tasks and re-enters the session once per completed "
-                          f"task, injecting a <task-notification> user turn that is never "
-                          f"streamed — this run's background launches match its "
-                          f"{f['restarts_visible']} re-entr{'y' if f['restarts_visible']==1 else 'ies'}. "
-                          f"The injected format is known and reconstructable from the "
-                          f"stream; reconstruction still inserts the old time-nudge "
-                          f"template here — wrong content, replacement pending.{extra}")})
+            asg = recon_claude.restart_assignments()
+            assigned = asg["assignments"].get(t.run_id, {})
+            covered = all(str(i) in assigned for i in f["restart_idxs"])
+            probe_fixed = "restart_notification_reconstructed" in probe_flags
+            if covered and not probe_fixed:
+                issues.append({
+                    "tag": f"background restarts ×{f['restarts_visible']}", "cls": "fixed",
+                    "title": (f"the run-era CLI re-entered the session "
+                              f"{f['restarts_visible']} time(s) to deliver background-task "
+                              f"notifications; each one is now reconstructed from the "
+                              f"reviewed assignment file (restart_assignments.json — exit "
+                              f"codes inferred, see its _readme). This run's existing "
+                              f"continuation predates the fix; re-running clears the tag.")})
+            elif not covered:
+                reason = asg["deferred"].get(t.run_id, {}).get("reason", "not yet reviewed")
+                issues.append({
+                    "tag": f"background restarts ×{f['restarts_visible']}", "cls": "open",
+                    "title": (f"mechanism confirmed (2026-07-13): the run-era CLI "
+                              f"re-entered the session once per completed background task, "
+                              f"injecting an unstreamed <task-notification> turn. The "
+                              f"faithful insert for this run is DEFERRED — {reason}. "
+                              f"Reconstruction still inserts the old time-nudge template "
+                              f"here (known-wrong content).")})
     # Task prompt: regeneration is era-exact since 2026-07-13 (prompts.py
     # restores the pre-April wording), so this only tags runs whose EXISTING
     # continuation was built before the fix — re-running clears it.
