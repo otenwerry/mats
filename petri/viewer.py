@@ -5241,9 +5241,107 @@ def load_em_blocks() -> list[dict]:
         except Exception as e:
             print(f"  WARNING: unreadable ask results {rj} ({type(e).__name__}: {e}); skipped")
             continue
-        blocks.append({"campaign": rj.parent.parent.name, "tid": tid,
+        blocks.append({"campaign": rj.parent.parent.name, "tid": tid, "dir": rj.parent,
                        "summary": summary, "asks": asks})
     return blocks
+
+
+def _em_context_messages(run_dir: Path) -> list:
+    """Rebuild the resumed context (inspect ChatMessage objects) from an ask-run dir's
+    context.jsonl (written once per trajectory by exp_ask_questions.py). The lines are
+    pydantic dumps of the exact messages sent, so revalidating reproduces them."""
+    from inspect_ai.model import ChatMessage
+    from pydantic import TypeAdapter
+    lines = (run_dir / "context.jsonl").read_text().splitlines()
+    return TypeAdapter(list[ChatMessage]).validate_python(
+        [json.loads(ln)["message"] for ln in lines if ln.strip()])
+
+
+async def _em_rendered(messages: list) -> str:
+    """[M<n>]-numbered transcript string for a plain (linear) message list, via the SAME
+    numbering/renderer the judge and the trajectory pages use — so an ask page's prefix
+    M-numbers match the original trajectory page's."""
+    messages_as_str, _refs, _label = message_numbering(
+        MessagesPreprocessor(exclude_system=False), label_for_id=True)
+    return await messages_as_str(messages)
+
+
+async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> str:
+    """One full resumed-conversation page per ask (pages/em__*.html): the replayed
+    prefix rendered exactly like a trajectory page, a cut marker at the inserted
+    question turn, then the answer. Head buttons: back to the EM list, jump down to
+    the new question, and the original trajectory at the same cut. Returns the
+    pages/ file name (for prune bookkeeping)."""
+    from exp_ask_questions import with_question   # the ask's own fold rule (single source)
+    s, a = b["summary"], b["orig"]
+    ask_dir = b["dir"] / r["dir"]
+    msgs, _folded = with_question(context_msgs, r.get("question") or "")
+    note = ""
+    resp = ask_dir / "response.json"
+    if resp.exists():
+        try:
+            from inspect_ai.model import ChatMessage
+            from pydantic import TypeAdapter
+            msgs = msgs + [TypeAdapter(ChatMessage).validate_python(
+                json.loads(resp.read_text())["message"])]
+        except Exception as e:
+            note = (f"<p><b>response.json unreadable ({esc(type(e).__name__)}: {esc(str(e))})"
+                    f" &mdash; showing the prefix + question only.</b></p>")
+    elif r.get("error"):
+        note = (f'<p><b>The ask errored &mdash; no response.</b> '
+                f'<span class="meta">{esc(r["error"])}</span></p>')
+    rendered = await _em_rendered(msgs)
+    # the inserted question = the LAST user head (folded into the trailing user turn, or
+    # appended); the cut marker + the jump button both point there.
+    q_m = None
+    for h in MSG_HEAD.finditer(rendered):
+        if re.sub(r"[^a-z]", "", h.group(2).lower().split()[0]) == "user":
+            q_m = int(h.group(1))
+    tr_html_, _un = transcript_html(rendered, cut_m=q_m)
+
+    flags: list = []
+    fj = ask_dir / "fidelity.json"
+    if fj.exists():
+        try:
+            flags = [f.get("code") for f in json.loads(fj.read_text()).get("flags", [])]
+        except Exception:
+            pass
+    model = pretty_model(a["target"]) if a else esc(str(s.get("target_model") or "?"))
+    status = ("error" if r.get("error")
+              else "no answer" if r.get("answer") is None else "answered")
+    c = r.get("cost_usd")
+    bits = [model, f"cut {s.get('cut')}", status]
+    if r.get("n_tool_uses"):
+        bits.append(f'{r["n_tool_uses"]} tool call(s)')
+    if isinstance(c, (int, float)):
+        bits.append(f"${c:.4f}")
+    if flags:
+        bits.append("flags: " + ", ".join(map(str, flags)))
+
+    buttons = [head_btn(f"../{sweep_em_file(key)}", "&larr; back")]
+    if q_m is not None:
+        buttons.append(head_btn(f"#M{q_m}", "&darr; new question"))
+    if a:
+        orig = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
+        anchor = _em_cut_anchor(a, s.get("cut_turn"))
+        buttons.append(head_btn(orig + (f"#{anchor}" if anchor else ""),
+                                "original at the cut &rarr;"))
+    title = (f'#{b["tid"]} ask &middot; {esc(str(r.get("question_id") or "?"))} '
+             f's{r.get("sample_index")} <span class="meta">({esc(b["campaign"])})</span>')
+    body = f"""
+{page_head(title, *buttons)}
+<div class="emmeta">{esc(" · ".join(bits))}</div>
+{note}
+<h2>Resumed conversation <span class="meta">(replayed prefix; the inserted question at the cut mark)</span></h2>
+{tr_html_}
+"""
+    name = f'em__{b["campaign"]}__id{b["tid"]}__{s.get("cut")}__{r["dir"]}.html'
+    page = (f"<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>#{b['tid']} ask {esc(str(r.get('question_id') or ''))} "
+            f"s{r.get('sample_index')}</title><style>{CSS}</style></head>"
+            f"<body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
+    (OUT / "pages" / name).write_text(page)
+    return name
 
 
 def group_em_by_sweep(blocks: list[dict], originals_by_id: dict) -> dict[str, list[dict]]:
@@ -5296,11 +5394,14 @@ def em_cost_data(blocks: list[dict]) -> dict | None:
             "n_unpriced": n_unpriced, "exact": not any_est}
 
 
-def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> str:
+async def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> tuple[str, set[str]]:
     """One sweep's EM page (em_<key>.html): every ask campaign whose originals live on
     this sweep, one block per (trajectory, cut) with a jump to the original's page at
-    the cut anchor and each question's per-sample answers (collapsed)."""
+    the cut anchor and each question's per-sample answers (collapsed, each linking to
+    its full resumed-conversation page — see write_em_ask_page). Returns
+    (em page file name, set of pages/ ask-page names written)."""
     parts: list[str] = []
+    ask_pages: set[str] = set()
     by_campaign: dict[str, list[dict]] = {}
     for b in blocks:
         by_campaign.setdefault(b["campaign"], []).append(b)
@@ -5308,6 +5409,14 @@ def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> str:
         parts.append(f"<h2>{esc(camp)}</h2>")
         for b in sorted(bs, key=lambda x: (x["tid"], str(x["summary"].get("cut")))):
             s, a = b["summary"], b["orig"]
+            # the resumed context, loaded once per block and shared by its ask pages;
+            # a missing/unreadable context.jsonl is surfaced (no ask pages, list still renders)
+            try:
+                context_msgs = _em_context_messages(b["dir"])
+            except Exception as e:
+                context_msgs = None
+                print(f"  WARNING: no resumed context for {b['dir']} "
+                      f"({type(e).__name__}: {e}); ask pages skipped")
             link = ""
             if a:
                 page = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
@@ -5340,13 +5449,23 @@ def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> str:
                         bits.append(f"${c:.4f}")
                     if r.get("duration_s"):
                         bits.append(f'{r["duration_s"]:.0f}s')
+                    page_link = ""
+                    if context_msgs is not None and r.get("dir"):
+                        try:
+                            nm = await write_em_ask_page(key, b, r, context_msgs)
+                            ask_pages.add(nm)
+                            page_link = (f' &middot; <a href="pages/{nm}">full '
+                                         f'conversation &rarr;</a>')
+                        except Exception as e:
+                            print(f"  WARNING: ask page failed for {b['dir'].name}/"
+                                  f"{r['dir']} ({type(e).__name__}: {e})")
                     body = (esc(r["answer"]) if r.get("answer") is not None
                             else esc(r["error"]) if r.get("error")
                             else "(no text in the response; the raw output is in the "
                                  "ask dir's response.json)")
                     items.append(
                         f'<details class="emask"><summary>s{r.get("sample_index")} '
-                        f'&mdash; {esc(", ".join(bits))}</summary>'
+                        f'&mdash; {esc(", ".join(bits))}{page_link}</summary>'
                         f'<div class="emanswer">{body}</div></details>')
                 parts.append(f'<div class="emq"><div class="emqtext">{esc(qid)}: '
                              f'{esc(rs[0].get("question") or "")}</div>{"".join(items)}</div>')
@@ -5361,7 +5480,7 @@ def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> str:
             f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div></body></html>")
     out_file = sweep_em_file(key)
     (OUT / out_file).write_text(page)
-    return out_file
+    return out_file, ask_pages
 
 
 # --------------------------------------------------------------------------- #
@@ -5550,9 +5669,10 @@ async def main() -> None:
     EM_SWEEPS.clear()
     EM_SWEEPS.update(em_by_sweep)
     for key, bs in em_by_sweep.items():
-        f = write_em_page(key, bs, has_cont=bool(cont_by_sweep.get(key)))
+        f, em_ask_pages = await write_em_page(key, bs, has_cont=bool(cont_by_sweep.get(key)))
+        written_pages |= em_ask_pages   # ask pages live in pages/; keep the prune off them
         print(f"wrote {OUT / f} ({sum(len(b['asks']) for b in bs)} ask(s) over "
-              f"{len(bs)} trajectory dir(s))")
+              f"{len(bs)} trajectory dir(s), {len(em_ask_pages)} conversation page(s))")
     for key, _, _, _ in SWEEPS:
         if key not in em_by_sweep:
             (OUT / sweep_em_file(key)).unlink(missing_ok=True)
