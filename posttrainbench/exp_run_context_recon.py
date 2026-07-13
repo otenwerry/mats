@@ -3,10 +3,14 @@
 PAID: each trajectory launches the scaffold CLI (claude), which calls model APIs
 (~$0.3-0.5 per probe, from the two existing probes).
 
-One continuation per trajectory, cut at the END (--turn last), asking the model
-to report its own context (exp_probe_context.DEFAULT_PROBE). Outputs land in the
-"context reconstruction tests" campaign dir (probes_context_recon/), which the
-viewer's context-reconstruction window reads.
+One continuation per trajectory, cut at the END (--turn end: the full completed
+trajectory incl. the final assistant message, so the resume adds no bridging
+turns), asking the model to report its own context
+(exp_probe_context.DEFAULT_PROBE). Outputs land in the "context reconstruction
+tests" campaign dir (probes_context_recon/), which the viewer's
+context-reconstruction window reads. --rerun re-probes already-probed
+trajectories; the viewer shows the latest cut per run, so re-runs supersede
+old probes (and clear the green fixed-in-code issue tags).
 
 Coverage: only claude / claude_non_api (and opencode, if its CLI is installed)
 can be resumed. codex and qwen3max are refused (lossy data / no CLI) and are
@@ -61,6 +65,9 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan (what would run / skip) and exit")
+    ap.add_argument("--rerun", action="store_true",
+                    help="also re-probe trajectories that already have a probe "
+                         "(new probes supersede old ones in the viewer)")
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args()
 
@@ -70,7 +77,7 @@ def main() -> None:
         ok, reason = _support(t)
         if not ok:
             unsupported.append((t, reason))
-        elif _already_run(t.run_id):
+        elif _already_run(t.run_id) and not args.rerun:
             done.append(t)
         else:
             runnable.append(t)
@@ -92,7 +99,7 @@ def main() -> None:
         print(f"[{i}/{len(runnable)}] {t.scaffold} · {t.run_id}")
         proc = subprocess.run(
             [sys.executable, str(PROBE_SCRIPT), "--trajectory", t.run_id,
-             "--turn", "last", "--campaign", CAMPAIGN, "--timeout", str(args.timeout)],
+             "--turn", "end", "--campaign", CAMPAIGN, "--timeout", str(args.timeout)],
             cwd=PROBE_SCRIPT.parent)
         if proc.returncode == 0:
             ok_n += 1

@@ -86,8 +86,11 @@ def build(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> OpencodeBundle:
             raise ValueError(f"message {mid} is not contiguous in the stream; "
                              f"cut anchoring would be unsafe")
 
-    cut_mid = recs[plan.raw_cut]["part"].get("messageID")
-    kept_mids = order[: order.index(cut_mid)]
+    if plan.raw_cut >= len(recs):
+        kept_mids = list(order)          # end cut: keep every message
+    else:
+        cut_mid = recs[plan.raw_cut]["part"].get("messageID")
+        kept_mids = order[: order.index(cut_mid)]
 
     # reasoning-visibility check: billed reasoning tokens without reasoning parts
     reasoning_tokens = sum(

@@ -59,12 +59,27 @@ Mid-run agent restarts with **no known mechanism**. Evidence collected 2026-07-1
   an interpolated time estimate) at every mid-run init — for these 4 runs that is
   probably **wrong content**. Not yet changed; what to insert instead is an open
   design decision.
+- **This is positive evidence of a different mechanism, not just caution:** the
+  replies (12/12 address stale background tasks, 0 mention time), the scripts
+  (loop agents restart 14–19×, non-loop codex agents exactly 0× — yet non-loop
+  claude/qwen restarted), and the shape (restarts fire back-to-back, ~3 records
+  apart, clustered after "done"; reprompt runs have real work between nudges).
 - **Leading hypothesis (claude):** Claude Code itself continues the session to
-  deliver "background task finished" notifications — inits cluster right after
-  the agent declared itself done, and injected turns wouldn't be streamed.
-- **TEST (cheap, needs exp approval):** run `claude -p` locally with a
-  backgrounded sleep task; check whether the stream emits a second `init` after
-  the task completes. Confirms/kills the hypothesis for ~$0.05.
+  deliver "background task finished" notifications. Rival hypothesis: an
+  external watchdog re-ran `claude --continue` (would unify with qwen's
+  crash-retries — a crashed CLI can't re-enter itself).
+- **Plausibly resolvable, not permanently uncertain:** if the notification
+  format is a deterministic template, the injected content is reconstructable —
+  the stale task ids are quoted in the replies and the original background jobs
+  are in the stream.
+- **TEST (script ready, needs exp approval, ~$0.05):** `exp_restart_repro.py` —
+  spawns a background job in a scratch `claude -p` run and watches for
+  re-entry; `--cli "npx @anthropic-ai/claude-code@2.1.76"` pins the run-era CLI.
+  A re-entry shows the exact injected turn format in the session file.
+- **Extra unfaithfulness in the existing probes:** the 3 restart runs' pre-fix
+  probe contexts ENDED on the synthetic nudge text (their `--turn last` cut fell
+  right after a relaunch). `--turn end` re-runs fix the ending; the mid-context
+  inserts stay until the mechanism is known.
 - **OWEN:** ask Maksym what relaunched the non-reprompt agents (and whether some
   infra-level retry wrapper existed outside the repo).
 
@@ -134,29 +149,48 @@ resumed at default effort.
 
 ## Universal caveats (every probe; not tagged per run)
 
-### Resume-injected turns
+### Resume-injected turns — MOSTLY FIXED for end-of-run probes (2026-07-13)
 
 `claude --resume` on a context ending in a tool result injects a synthetic user
 turn ("Continue from where you left off.") plus an assistant reply ("No response
-requested.") before the probe question; cuts ending on an assistant message get
-just the assistant reply. Recorded per probe in `resume_turns.jsonl` and rendered
-on continuation pages (2026-07-12). Must be accounted for in any
-intervention/resample design.
+requested."). Not our bug — it's the CLI's bridging behavior for resuming
+mid-agentic-turn — but it fired on our probes because `--turn last` deliberately
+cut *before* the final assistant message (a definition inherited from the
+resample use-case).
 
-### Local CLI attachments
+- **FIXED for end probes:** new `--turn end` cuts *after* the final assistant
+  message — the session ends on an assistant turn, the CLI appends the probe
+  directly, no bridging, and the agent's real closing summary stays in context.
+  The campaign runner now uses it.
+- **Structural remainder:** 7 of the 15 claude/qwen reward-hack runs genuinely
+  died mid-tool (final assistant message has an unanswered tool call), so their
+  end cut snaps back and bridging is unavoidable — that's the trajectory's real
+  shape, recorded in the cut notes. Bridging also returns at any mid-trajectory
+  tool-result cut in future resample experiments: there it's a structural cost
+  of native CLI resume that intervention design must account for.
+- Injected turns remain recorded per probe (`resume_turns.jsonl`) and rendered
+  on continuation pages.
+
+### Local CLI attachments — FIXED in code (2026-07-13), pending one validation probe
 
 The local Claude Code attaches its own system-reminder content to the probe turn
 (tool/agent/skill listings from Owen's machine — visible in `resume_turns.jsonl`,
 noted on continuation pages). The original agents never saw these.
 
-- **Fix recipe for the next campaign (not yet implemented):**
-  1. run probes with a fresh `CLAUDE_CONFIG_DIR` + `ANTHROPIC_API_KEY` auth →
-     removes everything personal;
-  2. optionally pin the run's original CLI version
-     (`@anthropic-ai/claude-code@2.1.9` etc., still on npm) → removes the
-     version-baked built-ins too, and kills most system-prompt drift;
-  3. verify on ONE probe via `resume_turns.jsonl` before running the batch
-     (also checks that the old CLI resumes cleanly).
+- **Perfectly fixable — subtractive, not generative:** the contamination is
+  *added* personal config, so removing it requires inventing nothing, and it
+  only ever touched the new probe turn (original turns are verbatim regardless).
+- **FIXED:** `exp_probe_context.py` now defaults to a fresh per-probe
+  `CLAUDE_CONFIG_DIR` (auth via `ANTHROPIC_API_KEY`; `--user-config` restores
+  the old behavior). Flags: `probe_config_clean` / `probe_config_personal`.
+- **Residual, bounded, known (not guesses):** CLI built-in listings (killable by
+  pinning the run's original CLI version — still on npm) and the regenerated
+  system prompt's environment block (cwd/platform/date — the original cwd
+  `/home/ben/task` is recorded in init events; fully closing this overlaps with
+  the deferred workspace-reconstruction phase).
+- **TODO:** validate on ONE probe via `resume_turns.jsonl` before the batch
+  re-run (also confirms clean-config auth works and, if pinning, that the old
+  CLI resumes cleanly).
 
 ### CLI version drift
 
@@ -189,7 +223,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** decide what recon should insert at unexplained restarts instead of the nudge template
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
-- [ ] **Test (exp approval, ~$0.05):** background-task → second init hypothesis for claude restarts
-- [ ] **Test (paid, small):** re-run the 4 claude_non_api probes — clears both grey tags (effort + task prompt era)
-- [ ] **Next campaign prep:** clean CLAUDE_CONFIG_DIR (+ optional CLI version pinning), verified on one probe first
+- [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)
+- [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes bridging/attachments for the 8 runs that end on an assistant message
+- [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out); CLI version pinning still optional/untested
 - [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?

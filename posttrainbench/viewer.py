@@ -1105,7 +1105,7 @@ HACKS_HTML = """
   <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
    <td>this scaffold's data or tooling doesn't allow rebuilding the context at all (hover the pill for the run-specific reason).</td></tr>
  </tbody></table>
- <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI (different system prompt, plus local tool/agent/skill listings attached to the probe turn), the resume CLI may inject bridging turns, and the original workspace/GPU/processes are absent. See each continuation page.</p>
+ <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI, and the original workspace/GPU/processes are absent. Two former universal caveats are fixed in code for future probes: local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes no longer get "Continue from where you left off." bridging turns (--turn end cuts after the final assistant message — except runs that genuinely died mid-tool, where bridging is structural). See each continuation page.</p>
 </details>
 </body></html>
 """.replace("__CSS__", CSS)
@@ -2947,6 +2947,9 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                           f"time values were not streamed but ARE recoverable from this "
                           f"run's line timestamps (not yet wired into reconstruction)")})
         else:
+            extra = (" This run's existing probe context even ENDED on that synthetic "
+                     "nudge text (--turn end re-run fixes the ending, not the "
+                     "mid-context inserts)." if probe is not None else "")
             issues.append({
                 "tag": f"unexplained restarts ×{f['restarts_visible']}", "cls": "open",
                 "title": (f"the agent was restarted mid-run {f['restarts_visible']} "
@@ -2955,7 +2958,8 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                           f"and post-restart replies suggest background-task notifications "
                           f"(claude) or API-error retries (qwen), not a time nudge. "
                           f"Reconstruction currently inserts the nudge template here — "
-                          f"probably wrong content.")})
+                          f"probably wrong content. Plausibly resolvable: repro test "
+                          f"ready (exp_restart_repro.py) + ask Maksym.{extra}")})
     # Task prompt: regeneration is era-exact since 2026-07-13 (prompts.py
     # restores the pre-April wording), so this only tags runs whose EXISTING
     # continuation was built before the fix — re-running clears it.

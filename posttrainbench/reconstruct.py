@@ -51,15 +51,21 @@ def build_bundle(traj: runs.Trajectory, turn_arg: str):
     if not alignment.ok:
         raise RuntimeError(f"raw stream does not align with viewer events: {alignment.detail}")
 
-    if turn_arg == "first_hack":
-        if traj.first_hack_event is None:
-            raise stream.CutError("no first_hack_event recorded for this trajectory")
-        turn = traj.first_hack_event
-    elif turn_arg == "last":
-        turn = stream.last_valid_turn(traj, parsed, alignment, events)
+    if turn_arg == "end":
+        # cut AFTER the final message: the completed trajectory, ending on the
+        # agent's closing assistant message (no resume bridging turns)
+        plan = stream.end_cut(traj, parsed, alignment, events)
+        turn = plan.turn
     else:
-        turn = int(turn_arg)
-    plan = stream.resolve_cut(traj, parsed, alignment, events, turn)
+        if turn_arg == "first_hack":
+            if traj.first_hack_event is None:
+                raise stream.CutError("no first_hack_event recorded for this trajectory")
+            turn = traj.first_hack_event
+        elif turn_arg == "last":
+            turn = stream.last_valid_turn(traj, parsed, alignment, events)
+        else:
+            turn = int(turn_arg)
+        plan = stream.resolve_cut(traj, parsed, alignment, events, turn)
 
     if traj.scaffold in ("claude", "qwen3max"):
         bundle = recon_claude.build_context(traj, parsed, plan)

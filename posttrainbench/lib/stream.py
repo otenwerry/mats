@@ -240,6 +240,61 @@ def resolve_cut(traj: Trajectory, parsed: Parsed, alignment: Alignment,
     return resolve_cut_codex(parsed, alignment, events, turn)
 
 
+def end_cut(traj: Trajectory, parsed: Parsed, alignment: Alignment,
+            events: list[dict]) -> CutPlan:
+    """Cut AFTER the last main-thread message — the context of the COMPLETED
+    trajectory, ending on the agent's closing message. Backs --turn=end for
+    end-of-trajectory probes: when the installed session ends on an assistant
+    message, `claude --resume` appends the probe directly, with no synthetic
+    bridging turns ("Continue from where you left off." / "No response
+    requested."). If the trajectory itself ended on a tool result (run died
+    mid-tool), the cut still includes it and bridging is unavoidable — that is
+    recorded in the plan notes."""
+    if traj.scaffold in ("claude", "qwen3max"):
+        last = None
+        for i, r in enumerate(parsed.records):
+            if r.get("type") in ("assistant", "user") and _is_main(r):
+                last = i
+        if last is None:
+            raise CutError("no main-thread messages in this trajectory")
+        rec = parsed.records[last]
+        if rec.get("type") == "assistant":
+            # the final assistant message may span several chunk records
+            mid = _claude_msg_id(rec)
+            first_chunk = last
+            while (first_chunk > 0
+                   and parsed.records[first_chunk - 1].get("type") == "assistant"
+                   and _is_main(parsed.records[first_chunk - 1])
+                   and _claude_msg_id(parsed.records[first_chunk - 1]) == mid):
+                first_chunk -= 1
+            has_tool_use = any(
+                b.get("type") == "tool_use"
+                for j in range(first_chunk, last + 1)
+                for b in ((parsed.records[j].get("message") or {}).get("content") or [])
+                if isinstance(b, dict))
+            if has_tool_use:
+                # run died mid-tool: the final message's tool calls were never
+                # answered, so including it would leave dangling tool_use ids
+                plan = CutPlan(turn=first_chunk, cut_event=first_chunk,
+                               raw_cut=first_chunk, snapped=True)
+                plan.notes.append(
+                    "trajectory ends on an assistant message with unanswered tool "
+                    "call(s) (run died mid-tool); cut snapped to before it — the "
+                    "resume CLI will inject bridging turns")
+                return plan
+            plan = CutPlan(turn=last + 1, cut_event=last + 1, raw_cut=last + 1)
+            plan.notes.append("cut after the final assistant message (end of trajectory)")
+            return plan
+        plan = CutPlan(turn=last + 1, cut_event=last + 1, raw_cut=last + 1)
+        plan.notes.append(
+            "trajectory ends on a user/tool_result record, not an assistant "
+            "message — the resume CLI will inject bridging turns")
+        return plan
+    plan = CutPlan(turn=len(events), cut_event=len(events), raw_cut=len(parsed.records))
+    plan.notes.append("cut after the last record (end of trajectory)")
+    return plan
+
+
 def last_valid_turn(traj: Trajectory, parsed: Parsed, alignment: Alignment,
                     events: list[dict]) -> int:
     """Highest viewer event index that resolve_cut accepts — the latest point

@@ -74,10 +74,36 @@ def _crib(bundle) -> str:
 
 
 def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
-                 campaign: str = "probes") -> int:
+                 campaign: str = "probes", user_config: bool = False) -> int:
+    import os
     out_dir = runs.OUT_ROOT / campaign / f"{traj.run_id}__ev{plan.cut_event}"
     cwd_dir = out_dir / "cwd"
     cwd_dir.mkdir(parents=True, exist_ok=True)
+
+    # Fresh CLAUDE_CONFIG_DIR by default: without it the local CLI attaches
+    # personal context (skill/agent/tool listings) to the probe turn — content
+    # the original agent never saw. A clean config dir removes everything
+    # personal (subtractive fix; nothing is invented). Auth then comes from
+    # ANTHROPIC_API_KEY. --user-config restores the old contaminated behavior.
+    config_dir = None
+    if not user_config:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print("ERROR: clean-config probes authenticate via ANTHROPIC_API_KEY, "
+                  "which is not set. Export it, or pass --user-config to use your "
+                  "personal Claude config (adds local-context contamination).")
+            return 2
+        config_dir = out_dir / "claude_config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        fidelity["flags"].append({
+            "code": "probe_config_clean", "severity": "info",
+            "detail": "probe ran with a fresh CLAUDE_CONFIG_DIR (no personal "
+                      "skills/agents/MCP attached to the probe turn); remaining "
+                      "attachments, if any, are CLI built-ins"})
+    else:
+        fidelity["flags"].append({
+            "code": "probe_config_personal", "severity": "warn",
+            "detail": "probe ran with the user's personal Claude config — local "
+                      "skill/agent/tool listings were attached to the probe turn"})
 
     orig_version = recon_claude.original_cli_version(parsed)
     model = recon_claude.original_model(parsed)
@@ -117,7 +143,8 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
 
     sid, lines = recon_claude.emit_session(bundle, cwd=str(cwd_dir),
                                            version=orig_version or "unknown")
-    proj = Path.home() / ".claude" / "projects" / recon_claude.project_dir_name(str(cwd_dir))
+    config_root = config_dir if config_dir is not None else Path.home() / ".claude"
+    proj = config_root / "projects" / recon_claude.project_dir_name(str(cwd_dir))
     proj.mkdir(parents=True, exist_ok=True)
     session_path = proj / f"{sid}.jsonl"
     with open(session_path, "w") as f:
@@ -125,12 +152,17 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
             f.write(json.dumps(ln) + "\n")
     print(f"installed session {sid} ({len(lines)} turns) -> {session_path}")
 
+    if config_dir is not None:
+        probe_env_overrides["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    fidelity["probe_env"]["config"] = ("clean (fresh CLAUDE_CONFIG_DIR)"
+                                       if config_dir is not None else "personal (~/.claude)")
+
     cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json",
            "--model", model, *effort_args, "--resume", sid, probe]
     print(f"launching: claude --print --resume {sid} --model {model} "
-          f"{' '.join(effort_args)} (timeout {timeout}s)")
+          f"{' '.join(effort_args)} "
+          f"[config: {fidelity['probe_env']['config']}] (timeout {timeout}s)")
     t0 = datetime.datetime.now()
-    import os
     proc = subprocess.run(cmd, cwd=cwd_dir, capture_output=True, text=True,
                           timeout=timeout,
                           env={**os.environ, **probe_env_overrides})
@@ -248,9 +280,15 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--trajectory", required=True)
     ap.add_argument("--turn", default="last",
-                    help="viewer event index, 'last' (default), or 'first_hack'")
+                    help="viewer event index, 'last' (default: context going into "
+                         "the final turn), 'end' (full completed trajectory incl. "
+                         "the final assistant message — no resume bridging turns), "
+                         "or 'first_hack'")
     ap.add_argument("--probe", default=DEFAULT_PROBE)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--user-config", action="store_true",
+                    help="use the personal ~/.claude config instead of a fresh "
+                         "CLAUDE_CONFIG_DIR (re-adds local-context contamination)")
     ap.add_argument("--campaign", default="probes",
                     help="output subdir under OUT_ROOT (e.g. 'probes' for the "
                          "early exploratory tests, 'probes_context_recon' for "
@@ -277,7 +315,8 @@ def main():
 
     if traj.scaffold == "claude":
         sys.exit(probe_claude(traj, parsed, plan, bundle, fidelity,
-                              args.probe, args.timeout, args.campaign))
+                              args.probe, args.timeout, args.campaign,
+                              user_config=args.user_config))
     else:
         sys.exit(probe_opencode(traj, parsed, plan, bundle, fidelity,
                                 args.probe, args.timeout, args.campaign))
