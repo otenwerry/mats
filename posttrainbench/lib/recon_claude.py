@@ -79,19 +79,33 @@ def restart_assignments() -> dict:
 
 
 def _task_notification_text(a: dict) -> str:
-    """The run-era CLI's injected turn, rebuilt from a reviewed assignment
-    (format captured verbatim from the 2.1.76 repro; failed-task wording is an
-    assumption — see restart_assignments.json _readme)."""
-    verb = "completed" if a["status"] == "completed" else "failed"
-    return ("<task-notification>\n"
+    """The run-era CLI's injected turn, rebuilt from a reviewed assignment.
+    Both formats captured verbatim from the 2.1.76 repros (2026-07-13):
+    shell tasks end with 'Read the output file...', agent (subagent) tasks
+    carry <result>/<usage> and end with 'Full transcript available at:'.
+    Failed-task wording is an assumption; agent <result>/<usage> lines are
+    omitted when the data was never recorded (see the assignment's 'lost')."""
+    head = ("<task-notification>\n"
             f"<task-id>{a['task_id']}</task-id>\n"
             f"<tool-use-id>{a['tool_use_id']}</tool-use-id>\n"
             f"<output-file>{a['output_file']}</output-file>\n"
-            f"<status>{a['status']}</status>\n"
-            f"<summary>Background command \"{a['command']}\" {verb} "
-            f"(exit code {a['exit_code']})</summary>\n"
-            "</task-notification>\n"
-            f"Read the output file to retrieve the result: {a['output_file']}")
+            f"<status>{a['status']}</status>\n")
+    if a.get("task_type") == "agent":
+        body = f"<summary>Agent \"{a['description']}\" completed</summary>\n"
+        if a.get("result") is not None:
+            body += f"<result>{a['result']}</result>\n"
+        u = a.get("usage")
+        if u:
+            body += (f"<usage><total_tokens>{u['total_tokens']}</total_tokens>"
+                     f"<tool_uses>{u['tool_uses']}</tool_uses>"
+                     f"<duration_ms>{u['duration_ms']}</duration_ms></usage>\n")
+        footer = f"Full transcript available at: {a['output_file']}"
+    else:
+        verb = "completed" if a["status"] == "completed" else "failed"
+        body = (f"<summary>Background command \"{a['command']}\" {verb} "
+                f"(exit code {a['exit_code']})</summary>\n")
+        footer = f"Read the output file to retrieve the result: {a['output_file']}"
+    return head + body + "</task-notification>\n" + footer
 
 
 def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBundle:
@@ -143,12 +157,14 @@ def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBun
                     messages.append(Msg(
                         "user", {"role": "user", "content": _task_notification_text(a)},
                         "reconstructed_notification", [i]))
+                    lost = f" LOST CONTENT: {a['lost']}." if a.get("lost") else ""
                     flags.append(_flag(
                         "restart_notification_reconstructed",
                         f"restart at record {i}: background-task notification for "
                         f"{a['task_id']} reconstructed from the reviewed assignment file "
                         f"(confidence: {a['confidence']}; exit code inferred, not "
-                        f"recorded). Evidence: {a['evidence']}", "info"))
+                        f"recorded).{lost} Evidence: {a['evidence']}",
+                        "warn" if a.get("lost") else "info"))
                 else:
                     text, basis = prompts.continuation_prompt(i / max(1, len(recs)),
                                                               traj.num_hours)

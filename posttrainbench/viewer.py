@@ -1096,8 +1096,8 @@ HACKS_HTML = """
    <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
   <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
-  <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span></td>
-   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn. <b>Green</b>: every restart in the run has a hand-reviewed reconstructed notification (restart_assignments.json; exit codes inferred) — re-running the continuation clears it. <b>Blue</b>: the faithful insert is deferred (qwen: replies are API errors, nothing to review; opus-1M run1: agent-task wording unverified) and reconstruction still inserts the known-wrong time-nudge template.</td></tr>
+  <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span> <span class="issue perm">background restarts ×N</span></td>
+   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn. <b>Green</b>: every restart has a hand-reviewed reconstructed notification (restart_assignments.json; exit codes inferred) — re-running the continuation clears it. <b>Blue</b>: the faithful insert is deferred (qwen: replies are API errors, nothing to review) and reconstruction still inserts the known-wrong time-nudge template. <b>Purple</b>: reconstructed as far as the data allows, but part of the notification's content was never recorded (opus-1M run1: the background subagent's report text — its transcript isn't in the stream) — permanent gap.</td></tr>
   <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
   <tr><td class="flags"><span class="issue fixed">effort not replicated</span></td>
@@ -2953,8 +2953,20 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
             asg = recon_claude.restart_assignments()
             assigned = asg["assignments"].get(t.run_id, {})
             covered = all(str(i) in assigned for i in f["restart_idxs"])
+            has_gap = any(assigned.get(str(i), {}).get("lost") for i in f["restart_idxs"])
             probe_fixed = "restart_notification_reconstructed" in probe_flags
-            if covered and not probe_fixed:
+            if covered and has_gap:
+                issues.append({
+                    "tag": f"background restarts ×{f['restarts_visible']}", "cls": "perm",
+                    "title": (f"reconstructed as far as the data allows: the notification "
+                              f"turn is rebuilt with every surviving field verbatim, but "
+                              f"part of its content was never recorded — "
+                              + "; ".join(sorted({assigned[str(i)]['lost']
+                                                  for i in f['restart_idxs']
+                                                  if assigned.get(str(i), {}).get('lost')}))
+                              + ". Permanent gap; the reconstruction omits the lost lines "
+                                "and flags them.")})
+            elif covered and not probe_fixed:
                 issues.append({
                     "tag": f"background restarts ×{f['restarts_visible']}", "cls": "fixed",
                     "title": (f"the run-era CLI re-entered the session "

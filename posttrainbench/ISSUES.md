@@ -80,15 +80,24 @@ repro pass pointed the wrong way.)
   replies, rest assumed 0); the failed-task summary wording is an assumption
   (repro only observed a successful completion); one low-confidence entry
   (bfcl's vLLM-server task, assigned by elimination).
+- **Reconstructed with a permanent gap (purple tag):** opus-1M run1's single
+  restart. The `--agent-task` repro (2026-07-13, CLI 2.1.76) pinned the
+  agent-task notification wording (summary `Agent "<description>" completed` +
+  `<result>` + `<usage>` + "Full transcript available at:" footer). All
+  surviving fields are inserted verbatim (agentId, tool-use-id, output-file,
+  description), but the `<result>` text — the subagent's actual report — and
+  the `<usage>` numbers were **never recorded**: background-subagent
+  transcripts are absent from claude streams (foreground sidechains ARE
+  recorded; the transcript file died with the container). The reconstruction
+  omits those lines and flags them (`restart_notification_reconstructed`,
+  severity warn). **NEW data-loss class worth remembering:** any run using
+  background subagents has this hole.
 - **Deferred (blue tag), Owen's call still open:** qwen's 22 (replies are API
-  errors — nothing to review; assignments would be launch-order guesses) and
-  opus-1M run1's single restart (a background *agent* task — the run-era
-  notification wording for agent tasks is unverified; only shell-command
-  format was repro'd). These runs keep the old time-nudge insert with a loud
-  KNOWN-WRONG flag (`continuation_prompt_estimated`).
-- Optional refinements if we want them later: a 30-second repro variant with a
-  failing command (`exit 1`) pins the failure wording; one with a background
-  subagent pins the agent-task wording (would un-defer opus-1M run1).
+  errors — nothing to review; assignments would be launch-order guesses).
+  Keeps the old time-nudge insert with a loud KNOWN-WRONG flag
+  (`continuation_prompt_estimated`).
+- Optional refinement if we want it later: a 30-second repro variant with a
+  failing command (`exit 1`) pins the failed-task summary wording.
 
 Original evidence trail (2026-07-12/13, kept for the record):
 
@@ -291,7 +300,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 - [x] ~~what relaunched the non-reprompt agents~~ — RESOLVED 2026-07-13: the run-era CLI itself (background-task re-entry; see `background restarts`). No Maksym needed.
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
-- [x] ~~background-restarts reconstruction fix~~ — 11/34 reviewed + wired in 2026-07-13 (restart_assignments.json); **still open:** qwen's 22 + the one agent-task restart, deferred by Owen — revisit when qwen becomes resumable or via the optional repro variants (failure wording / agent-task wording)
+- [x] ~~background-restarts reconstruction fix~~ — 12/34 reviewed + wired in 2026-07-13 (restart_assignments.json; run #15's agent-task wording pinned by the --agent-task repro, its subagent report permanently lost → purple); **still open:** qwen's 22, deferred by Owen — revisit when qwen becomes resumable
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)

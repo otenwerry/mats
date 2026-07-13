@@ -114,12 +114,24 @@
     "confidence": "high",
     "evidence": "reply: 'final v3 evaluation confirming 65.3%'; command is evaluate.py"
    }
+  },
+  "claude_non_api_claude-opus-4-6_1m__10h_run1__bfcl_google_gemma-3-4b-pt_16955282": {
+   "424": {
+    "task_type": "agent",
+    "task_id": "a9fea2abf3a93c236",
+    "tool_use_id": "toolu_01CN4y4aePrWAXKy1fsmgUs3",
+    "output_file": "/tmp/claude-8564/-home-ben-task/168baec4-c631-4f6e-9209-49527aaec129/tasks/a9fea2abf3a93c236.output",
+    "description": "Find more function calling datasets",
+    "status": "completed",
+    "result": null,
+    "usage": null,
+    "lost": "the subagent's report text (<result>) and <usage> numbers were never recorded \u2014 background-subagent transcripts are not captured in the stream; those lines are omitted from the reconstructed notification (permanent gap)",
+    "confidence": "high",
+    "evidence": "only restart in the run; reply: 'The background agent completed its dataset research'; agentId/tool_use_id/output_file/description verbatim from the launch records (rec192/194 line-numbering)"
+   }
   }
  },
  "deferred": {
-  "claude_non_api_claude-opus-4-6_1m__10h_run1__bfcl_google_gemma-3-4b-pt_16955282": {
-   "reason": "single restart was a background AGENT task ('dataset research' subagent), not a shell command \u2014 the run-era notification wording for agent tasks is unverified (the repro only pinned the local_bash format); no shell launches exist in this run"
-  },
   "qwen3max_qwen3-max-2026-01-23_10h__arenahardwriting_google_gemma-3-4b-pt_16816092": {
    "reason": "decision deferred by Owen (2026-07-13): 22 restarts whose replies are API errors \u2014 nothing to review manually; assignments would be pure launch-order guesses"
   }
