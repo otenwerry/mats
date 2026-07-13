@@ -41,9 +41,39 @@ maximize performance."
 - **TODO (code, if codex ever becomes reconstructable):** wire timestamp-derived
   times into the reconstruction instead of estimates.
 
-### `unexplained restarts ×N` (4 runs: claude bfcl run1 ×6, opus-1M ×1 and ×5, qwen ×22)
+### `bg-task restarts ×N` (4 runs: claude bfcl run1 ×6, opus-1M ×1 and ×5, qwen ×22)
 
-Mid-run agent restarts with **no known mechanism**. Evidence collected 2026-07-12/13:
+**MECHANISM CONFIRMED (2026-07-13, three-part repro + crosscheck):** the run-era
+CLI (tested: 2.1.76) **waits for background tasks in `-p` mode and re-enters the
+session in-process once per completed task**, emitting a new `system:init` under
+the same session id and injecting a plain (non-meta, unstreamed) user turn:
+
+    <task-notification>
+    <task-id>b5z23std2</task-id>
+    <tool-use-id>toolu_01WWJ7GEq8GHu68GeCPFswb1</tool-use-id>
+    <output-file>/private/tmp/claude-.../tasks/b5z23std2.output</output-file>
+    <status>completed</status>
+    <summary>Background command "sleep 45 && echo BACKGROUND_DONE" completed (exit code 0)</summary>
+    </task-notification>
+    Read the output file to retrieve the result: <output-file>
+
+Crosscheck against the PTB streams: background launches match re-entries in
+every affected run — bfcl run1 **6/6**, opus-1M run3 **5 re-entries / 6
+launches** (one presumably finished in-session), qwen **22/22**. Qwen's
+API-error replies were the re-entry calls hitting DashScope rate limits — same
+mechanism, no external watchdog anywhere. (The current CLI behaves differently:
+it kills background tasks ~5s after the final answer, which is why the first
+repro pass pointed the wrong way.)
+
+**Now unblocked — DECISION (Owen):** replace the wrong time-nudge inserts with
+reconstructed `<task-notification>` turns. Reconstructable from the stream:
+task-id, tool-use-id, output-file (all in the launch tool_result), the command
+(launch tool_use input). Unknowns to handle: the exit code in the summary line
+(not recorded; assume 0 + flag?), and which task maps to which re-entry when
+several complete (launch order vs the ids the post-restart replies quote; for
+bfcl run1 the replies name the ids, so exact assignment is possible).
+
+Original evidence trail (2026-07-12/13, kept for the record):
 
 - No relaunch loop exists for agents `claude` / `claude_non_api` / `qwen3max` in
   ANY branch of the harness repo (all 13 branches searched).
@@ -242,10 +272,10 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 ## Open questions / actions, collected
 
-- [ ] **Owen → Maksym:** what relaunched the non-reprompt agents? (unexplained restarts)
+- [x] ~~what relaunched the non-reprompt agents~~ — RESOLVED 2026-07-13: the run-era CLI itself (background-task re-entry; see `bg-task restarts`). No Maksym needed.
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
+- [ ] **Owen:** decide the `bg-task restarts` reconstruction fix — insert reconstructed `<task-notification>` turns (exit-code assumption + task↔re-entry matching strategy need your sign-off)
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
-- [ ] **Owen:** decide what recon should insert at unexplained restarts instead of the nudge template
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)
 - [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes bridging/attachments for the 8 runs that end on an assistant message
