@@ -3,8 +3,15 @@
 One section per issue flag from the context-reconstruction work. The per-run tags
 render in the **issues** column of the viewer's context-reconstruction window
 (`/continuations/hacks`, legend at the bottom of that page); the universal caveats
-apply to every probe and are listed after them. Kept current as findings land —
-each section records what we know, what's still open, and who owes what.
+apply to every probe and are listed after them.
+
+**Maintenance rule: whenever an issue is fixed, investigated, or its status
+changes, update this file AND the viewer tags/legend in the same change.**
+
+Tag colors in the viewer (= status): **red** permanent data loss, nothing will fix
+it · **amber** unresolved, still investigating · **grey** fixed in code — the tag
+survives only because that run's existing continuation predates the fix, so
+re-running the continuation clears it.
 
 Status snapshot (2026-07-13): 30 reward-hack trajectories. 9 have completely
 verbatim reconstructed contexts (Claude API runs whose visible window starts at a
@@ -59,20 +66,22 @@ Mid-run agent restarts with **no known mechanism**. Evidence collected 2026-07-1
 - **OWEN:** ask Maksym what relaunched the non-reprompt agents (and whether some
   infra-level retry wrapper existed outside the repo).
 
-### `task prompt rebuilt` (11 runs: never-compacted claude/qwen + all opencode)
+### `task prompt rebuilt` (grey; now tags only runs with a pre-fix continuation — currently the 2 opus-1M rows)
 
 The initial task prompt was a CLI argument, never recorded in any stream. Runs
 that never compacted keep it in every reconstructed context, so we regenerate it
 with the harness's `get_prompt.py`.
 
-- **Drift is now measured, not hypothetical (2026-07-13):** `prompt.txt` changed
-  exactly once in the window our runs span — commit `aebea2f` (2026-04-04), the
-  same commit that added line timestamps. So: no timestamps in a trace ⇒
-  pre-April harness ⇒ the true prompt said "equiped" (typo) where our
-  regeneration says "equipped". That one word is the **entire** difference (both
-  template and generator diffed).
-- **DECISION (Owen):** whether to make regeneration era-exact (a two-line change
-  to `lib/prompts.py`: use the old wording for runs without line timestamps).
+- **Drift measured (2026-07-13):** `prompt.txt` changed exactly once in the
+  window our runs span — commit `aebea2f` (2026-04-04), the same commit that
+  added line timestamps. So: no timestamps in a trace ⇒ pre-April harness ⇒ the
+  true prompt said "equiped" (typo) where the current template says "equipped".
+  That one word is the **entire** difference (both template and generator diffed).
+- **FIXED (2026-07-13):** `lib/prompts.py` now era-matches — runs without line
+  timestamps get the original "equiped" wording restored, making regeneration
+  byte-exact for the public-harness window. Reconstructions stamp a
+  `prompt_era_matched` fidelity flag; the viewer tag survives only on runs whose
+  existing continuation predates the fix (re-run clears it).
 - Residual risk: the run-time harness might not match any public commit; one
   saved `prompt.txt` from Maksym would settle it completely.
 
@@ -175,10 +184,10 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 - [ ] **Owen → Maksym:** what relaunched the non-reprompt agents? (unexplained restarts)
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
-- [ ] **Owen:** decide era-exact prompt regeneration ("equiped" typo) — worth it?
+- [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** decide what recon should insert at unexplained restarts instead of the nudge template
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [ ] **Test (exp approval, ~$0.05):** background-task → second init hypothesis for claude restarts
-- [ ] **Test (paid, small):** re-run the 4 claude_non_api probes with effort replication
+- [ ] **Test (paid, small):** re-run the 4 claude_non_api probes — clears both grey tags (effort + task prompt era)
 - [ ] **Next campaign prep:** clean CLAUDE_CONFIG_DIR (+ optional CLI version pinning), verified on one probe first
 - [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?

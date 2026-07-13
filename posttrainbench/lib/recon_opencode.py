@@ -67,9 +67,10 @@ def build(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> OpencodeBundle:
     flags = [_flag("message_info_synthesized",
                    "per-message metadata records synthesized (role/parentID/agent); "
                    "parts are byte-verbatim from the stream", "info"),
-             _flag("prompt_regenerated",
-                   "initial task prompt regenerated via the harness's get_prompt.py "
-                   "(CLI arg, never streamed)")]
+             _flag("prompt_regenerated", prompts.prompt_provenance(traj), "info"),
+             _flag("prompt_era_matched",
+                   "regeneration is era-exact since 2026-07-13 (this flag marks "
+                   "post-fix reconstructions)", "info")]
 
     # group records by messageID in order of first appearance; check contiguity
     order: list[str] = []

@@ -82,10 +82,11 @@ def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBun
         start = -1
         messages.append(Msg("user", {"role": "user", "content": prompts.task_prompt(traj)},
                             "regenerated_prompt"))
+        flags.append(_flag("prompt_regenerated", prompts.prompt_provenance(traj), "info"))
         flags.append(_flag(
-            "prompt_regenerated",
-            "initial task prompt regenerated via the harness's get_prompt.py (CLI arg, "
-            "never streamed); harness clone may be newer than the run"))
+            "prompt_era_matched",
+            "regeneration is era-exact since 2026-07-13 (this flag marks post-fix "
+            "reconstructions; probes without it used the wrong prompt era)", "info"))
 
     n_side = 0
     cur_asst: Msg | None = None
