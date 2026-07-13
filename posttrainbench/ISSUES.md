@@ -72,10 +72,20 @@ Mid-run agent restarts with **no known mechanism**. Evidence collected 2026-07-1
   format is a deterministic template, the injected content is reconstructable —
   the stale task ids are quoted in the replies and the original background jobs
   are in the stream.
-- **TEST (script ready, needs exp approval, ~$0.05):** `exp_restart_repro.py` —
-  spawns a background job in a scratch `claude -p` run and watches for
-  re-entry; `--cli "npx @anthropic-ai/claude-code@2.1.76"` pins the run-era CLI.
-  A re-entry shows the exact injected turn format in the session file.
+- **TEST RESULT #1 (2026-07-13, CLI 2.1.207):** in `-p` mode the current CLI
+  does NOT wait for background tasks — it killed the job ~5s after the final
+  answer and exited with a single init. So CLI-internal re-entry can't produce
+  the PTB pattern on today's CLI. Also: the run-era PTB streams contain NO
+  task_* event subtypes (only init/status/compact_boundary), and the stale task
+  ids the models cite (e.g. b92a6ea) enter their context via the ordinary
+  launch tool_result — so the "notification" the models answered was injected
+  at resume, not streamed.
+- **TEST (script updated, re-run it):** `exp_restart_repro.py` now runs two
+  phases — the background-job run, then `claude --continue` on the same session
+  (exactly the external-watchdog move) — and dumps whatever the resume injects.
+  Run once with the current CLI and once with
+  `--cli "npx @anthropic-ai/claude-code@2.1.76"` (run-era). The injected format,
+  if any, is what reconstruction should insert at PTB restart points.
 - **Extra unfaithfulness in the existing probes:** the 3 restart runs' pre-fix
   probe contexts ENDED on the synthetic nudge text (their `--turn last` cut fell
   right after a relaunch). `--turn end` re-runs fix the ending; the mid-context
