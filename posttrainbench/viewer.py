@@ -1056,18 +1056,19 @@ HACKS_HTML = """
 <div class="pagehead"><h1>Reward-hack trajectories</h1>
  <span class="meta">{{ n_total }} trajectories · {{ groups|length + deferred|length }} model×scaffold group(s)</span></div>
 <p class="meta" style="margin:0 0 .6rem">issues: <span class="issue perm">permanent loss</span> <span class="issue open">unresolved</span> <span class="issue structural">structural — unavoidable at resume</span> <span class="issue fixed">fixed — re-run clears</span></p>
+__LEGEND__
 {% if orphans %}
 <p class="meta" style="color:#9a3412">⚠ {{ orphans|length }} reward-hack highlight(s) have no viewable trajectory row and are omitted here:
  {{ orphans|join(', ') }}</p>
 {% endif %}
-{% macro group_block(g) %}
-<details class="legend" open style="margin-bottom:.7rem">
+{% macro group_block(g, open=True) %}
+<details class="legend"{% if open %} open{% endif %} style="margin-bottom:.7rem">
  <summary><b>{{ g.model }}</b> <span class="meta">· {{ g.engine }} · {{ g.rows|length }} trajector{{ 'y' if g.rows|length == 1 else 'ies' }}</span></summary>
  <table style="margin-top:.5rem"><thead><tr>
   <th class="num" title="index number on the main trajectories page">#</th>
   <th>experiment</th><th>bench</th><th>base model</th>
   <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th>
-  <th title="per-run reconstruction-unfaithfulness tags at the standard end-of-run cut (see the legend at the bottom of the page); universal caveats — local machine, newer CLI, missing workspace — are on the continuation page instead">issues</th></tr></thead><tbody>
+  <th title="per-run reconstruction-unfaithfulness tags at the standard end-of-run cut (see the legend at the top of the page); universal caveats — local machine, missing workspace — are on the continuation page instead">issues</th></tr></thead><tbody>
  {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
   <td class="num">{{ row.num or '–' }}</td>
@@ -1089,9 +1090,11 @@ HACKS_HTML = """
 {% if deferred %}
 <hr style="border:none;border-top:2px solid #cbd5e1;margin:1.6rem 0 .7rem">
 <h2 style="margin:0 0 .7rem;font-size:1.05rem">deferred</h2>
-{% for g in deferred %}{{ group_block(g) }}{% endfor %}
+{% for g in deferred %}{{ group_block(g, open=False) }}{% endfor %}
 {% endif %}
-<details class="legend" style="margin-top:1rem">
+</body></html>
+""".replace("__LEGEND__", """
+<details class="legend" style="margin:0 0 .7rem">
  <summary>issue-tag legend</summary>
  <table style="margin-top:.5rem"><tbody>
   <tr><td class="flags"><span class="issue perm">edits lost</span></td>
@@ -1119,8 +1122,7 @@ HACKS_HTML = """
  </tbody></table>
  <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine (the system prompt's env block says this machine + today's date, not the container + April), and the original workspace/GPU/processes are absent. Three former universal caveats are fixed in code for future probes: the probe now runs the run's ORIGINAL CLI version (pinned via npx — same instructions/tools/behavior), local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes on clean-ending runs no longer get synthetic resume turns (--turn end cuts after the final assistant message). Runs that genuinely died mid-action keep them unavoidably — those carry the teal "extra resume turns" tag above. See each continuation page.</p>
 </details>
-</body></html>
-""".replace("__CSS__", CSS)
+""").replace("__CSS__", CSS)
 
 EM_QUESTIONS_HTML = """
 <!doctype html><html><head><meta charset="utf-8"><title>EM questions</title>
@@ -3120,7 +3122,18 @@ def continuation_hacks():
     continuation once it exists, else greys out (with a reason when the scaffold
     can't be reconstructed at all)."""
     cr = _context_recon_probes()
+    # Deferred section (below the divider, boxes closed): what we are not
+    # trying to reconstruct right now — codex (permanent data loss), qwen
+    # (needs a DashScope key), and individually deferred runs. OpenCode stays
+    # in the top section (planned).
+    deferred_engines = {"Codex", "Qwen"}
+    deferred_rids = {
+        # Owen 2026-07-13: #15 — the helper-agent report inside its restart
+        # notification is permanently lost
+        "claude_non_api_claude-opus-4-6_1m__10h_run1__bfcl_google_gemma-3-4b-pt_16955282",
+    }
     buckets: dict[tuple[str, str], list] = {}
+    dbuckets: dict[tuple[str, str], list] = {}
     for r in RUNS:
         if r.get("is_rollback"):
             continue
@@ -3134,7 +3147,9 @@ def continuation_hacks():
                "probe": cr.get(rid), "supported": supported, "reason": reason,
                "issues": _run_issues(t, cr.get(rid))}
         key = (_engine_label(t.scaffold, t.agent), r.get("agent_model") or "?")
-        buckets.setdefault(key, []).append(row)
+        target = (dbuckets if key[0] in deferred_engines or rid in deferred_rids
+                  else buckets)
+        target.setdefault(key, []).append(row)
 
     def order(key: tuple[str, str]):
         engine, model = key
@@ -3142,26 +3157,24 @@ def continuation_hacks():
               if engine in _HACK_ENGINE_ORDER else len(_HACK_ENGINE_ORDER))
         return (ei, model)
 
-    groups, n_total = [], 0
-    for key in sorted(buckets, key=order):
-        engine, model = key
-        rows = sorted(buckets[key],
-                      key=lambda row: ((row["r"].get("benchmark") or ""),
-                                       (row["r"].get("experiment") or "")))
-        n_total += len(rows)
-        groups.append({"engine": engine, "model": model, "rows": rows})
+    def build(bk: dict[tuple[str, str], list]) -> list[dict]:
+        out = []
+        for key in sorted(bk, key=order):
+            engine, model = key
+            rows = sorted(bk[key],
+                          key=lambda row: ((row["r"].get("benchmark") or ""),
+                                           (row["r"].get("experiment") or "")))
+            out.append({"engine": engine, "model": model, "rows": rows})
+        return out
+
+    groups, deferred = build(buckets), build(dbuckets)
+    n_total = sum(len(g["rows"]) for g in groups + deferred)
 
     # Surface any reward-hack highlight with no viewable trajectory row (would
     # otherwise silently vanish from this window).
     orphans = sorted(rid for rid, m in HL_META.items()
                      if m.get("is_reward_hack")
                      and not rid.startswith("rollback") and rid not in INDEX)
-    # Deferred section (below the divider): scaffolds we are not trying to
-    # reconstruct right now — codex (permanent data loss) and qwen (needs a
-    # DashScope key). OpenCode stays in the top section (planned).
-    deferred_engines = {"Codex", "Qwen"}
-    deferred = [g for g in groups if g["engine"] in deferred_engines]
-    groups = [g for g in groups if g["engine"] not in deferred_engines]
     return render_template_string(
         HACKS_HTML, groups=groups, deferred=deferred, n_total=n_total,
         orphans=orphans, label_class=_LABEL_CLASS, oai_pill=openai_pill,

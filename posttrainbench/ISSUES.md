@@ -2,8 +2,8 @@
 
 One section per issue flag from the context-reconstruction work. The per-run tags
 render in the **issues** column of the viewer's context-reconstruction window
-(`/continuations/hacks`, legend at the bottom of that page); the universal caveats
-apply to every probe and are listed after them.
+(`/continuations/hacks`; the tag legend sits at the top of that page, closed by
+default); the universal caveats apply to every probe and are listed after them.
 
 **Maintenance rule: whenever an issue is fixed, investigated, or its status
 changes, update this file AND the viewer tags/legend in the same change.**
@@ -84,7 +84,8 @@ repro pass pointed the wrong way.)
   the `--fail` repro (2026-07-13): `failed with exit code 1` — our earlier
   guess had the wrong format ("failed (exit code 1)"), fixed in recon_claude.
 - **Reconstructed with a permanent gap (purple tag, shown in the viewer as
-  `missing helper agent text` — renamed 2026-07-13 for readability):**
+  `missing helper agent text` — renamed 2026-07-13 for readability; the row
+  itself moved to the page's deferred section, Owen 2026-07-13):**
   opus-1M run1's (#15) single restart. The `--agent-task` repro (2026-07-13, CLI 2.1.76) pinned the
   agent-task notification wording (summary `Agent "<description>" completed` +
   `<result>` + `<usage>` + "Full transcript available at:" footer). All
@@ -338,7 +339,7 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 ---
 
-## Can't-reconstruct rows (greyed in the viewer; codex + qwen live below the "deferred" divider on /continuations/hacks since 2026-07-13, opencode stays in the top section as planned work)
+## Can't-reconstruct rows (greyed in the viewer; codex + qwen + #15 live below the "deferred" divider on /continuations/hacks, boxes closed by default; opencode stays in the top section as planned work)
 
 | scaffold | verdict | what it would take |
 |---|---|---|
