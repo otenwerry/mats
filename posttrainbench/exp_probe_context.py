@@ -93,6 +93,28 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
         "detail": f"probe runs locally: system-prompt env/cwd differ from the original "
                   f"container; CLI {local_version} vs original {orig_version}"})
 
+    # Replicate the original run's inference-effort setting (the agents'
+    # solve.sh scripts differ): claude_non_api passed `--effort high`,
+    # claude_non_api_max set CLAUDE_CODE_EFFORT_LEVEL=max, plain claude ran at
+    # the default. Recorded as a fidelity flag either way.
+    effort_args: list[str] = []
+    probe_env_overrides: dict[str, str] = {}
+    if traj.agent == "claude_non_api":
+        effort_args = ["--effort", "high"]
+        fidelity["flags"].append({
+            "code": "effort_replicated", "severity": "info",
+            "detail": "probe passes --effort high, matching claude_non_api solve.sh"})
+    elif traj.agent == "claude_non_api_max":
+        probe_env_overrides["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
+        fidelity["flags"].append({
+            "code": "effort_replicated", "severity": "info",
+            "detail": "probe sets CLAUDE_CODE_EFFORT_LEVEL=max, matching "
+                      "claude_non_api_max solve.sh"})
+    else:
+        fidelity["flags"].append({
+            "code": "effort_replicated", "severity": "info",
+            "detail": f"agent {traj.agent} ran at the CLI default effort; probe does too"})
+
     sid, lines = recon_claude.emit_session(bundle, cwd=str(cwd_dir),
                                            version=orig_version or "unknown")
     proj = Path.home() / ".claude" / "projects" / recon_claude.project_dir_name(str(cwd_dir))
@@ -104,11 +126,14 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
     print(f"installed session {sid} ({len(lines)} turns) -> {session_path}")
 
     cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json",
-           "--model", model, "--resume", sid, probe]
-    print(f"launching: claude --print --resume {sid} --model {model} (timeout {timeout}s)")
+           "--model", model, *effort_args, "--resume", sid, probe]
+    print(f"launching: claude --print --resume {sid} --model {model} "
+          f"{' '.join(effort_args)} (timeout {timeout}s)")
     t0 = datetime.datetime.now()
+    import os
     proc = subprocess.run(cmd, cwd=cwd_dir, capture_output=True, text=True,
-                          timeout=timeout)
+                          timeout=timeout,
+                          env={**os.environ, **probe_env_overrides})
     dt = (datetime.datetime.now() - t0).total_seconds()
     (out_dir / "probe_out.jsonl").write_text(proc.stdout)
     if proc.returncode != 0:

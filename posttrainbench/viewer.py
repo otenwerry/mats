@@ -1079,16 +1079,18 @@ HACKS_HTML = """
 <details class="legend" style="margin-top:1rem">
  <summary>issue-tag legend</summary>
  <table style="margin-top:.5rem"><tbody>
-  <tr><td class="flags"><span class="flag warn">restarts ×N</span></td>
-   <td>the agent process was restarted N times mid-run (only restarts still visible at the end cut are counted). What each restart delivered as a prompt was never recorded. For <i>reprompt</i> agents it's the known "You still have Xh Ym remaining…" nudge (time values estimated); for the other agents, post-restart replies point to background-task notifications (claude) or API-error retries (qwen) instead — the nudge template the reconstruction currently inserts there is probably wrong content.</td></tr>
+  <tr><td class="flags"><span class="flag warn">nudge restarts ×N</span></td>
+   <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values were not streamed but are recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
+  <tr><td class="flags"><span class="flag warn">unexplained restarts ×N</span></td>
+   <td>the agent process was restarted mid-run by an unknown mechanism — no relaunch loop exists for these agents in any harness branch, and post-restart replies point to background-task notifications (claude) or API-error retries (qwen), not a time nudge. The nudge template the reconstruction currently inserts at these points is probably wrong content.</td></tr>
   <tr><td class="flags"><span class="flag warn">task prompt rebuilt</span></td>
-   <td>the initial task prompt was a CLI argument and never saved. In runs that never compacted it is part of every reconstructed context, so it's regenerated from the harness's get_prompt.py — which may be newer than the run.</td></tr>
+   <td>the initial task prompt was a CLI argument and never saved. In runs that never compacted it is part of every reconstructed context, so it's regenerated from the harness's get_prompt.py. The drift is now measured: for pre-2026-04-04 runs (all claude/qwen reward hacks) the regenerated prompt differs from the original by exactly one word ("equipped" vs the original's "equiped" typo).</td></tr>
   <tr><td class="flags"><span class="flag warn">edits lost</span></td>
    <td>codex traces store only path + change-kind for each file edit; the edit contents were never saved and are unrecoverable.</td></tr>
   <tr><td class="flags"><span class="flag warn">reasoning lost</span></td>
    <td>codex: only reasoning summaries were saved — the replayable reasoning items lived in the rollout file, destroyed with the run's temp dir. opencode: the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely.</td></tr>
   <tr><td class="flags"><span class="flag warn">effort not replicated</span></td>
-   <td>the original subscription-Claude runs passed --effort high; probes currently resume at the CLI's default effort.</td></tr>
+   <td>the original subscription-Claude runs passed --effort high. exp_probe_context now replicates this; rows still tagged have a probe from before that fix (re-running the probe clears the tag).</td></tr>
   <tr><td class="flags"><span class="meta">–</span></td>
    <td>no per-run reconstruction issues detected at the end-of-run cut.</td></tr>
   <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
@@ -2916,32 +2918,38 @@ def _issue_facts(run_id: str) -> dict:
     return facts
 
 
-def _run_issues(t) -> list[dict]:
+def _run_issues(t, probe: dict | None = None) -> list[dict]:
     """[{tag, title}] reconstruction-unfaithfulness tags for one trajectory."""
     f = _issue_facts(t.run_id)
     issues = []
     if f["restarts_visible"]:
         if "reprompt" in (t.agent or ""):
-            detail = ("This agent's launch script has the reprompt loop: each restart "
-                      "re-launched the agent with the 'You still have Xh Ym remaining...' "
-                      "nudge (wording known; time values never recorded, estimated).")
+            issues.append({
+                "tag": f"nudge restarts ×{f['restarts_visible']}",
+                "title": (f"this agent's launch script re-launched the agent "
+                          f"{f['restarts_visible']} time(s) with the 'You still have Xh Ym "
+                          f"remaining...' nudge — wording known from the script; the exact "
+                          f"time values were not streamed but ARE recoverable from this "
+                          f"run's line timestamps (not yet wired into reconstruction)")})
         else:
-            detail = ("What each restart delivered was never recorded, and post-restart "
-                      "replies suggest it was NOT a time nudge (claude: background-task "
-                      "notifications; qwen: API-error retries). Reconstruction currently "
-                      "inserts the reprompt-loop nudge template here — probably wrong "
-                      "content for this run.")
-        issues.append({
-            "tag": f"restarts ×{f['restarts_visible']}",
-            "title": (f"the agent was restarted mid-run {f['restarts_visible']} time(s) "
-                      f"after the last compaction. " + detail)})
+            issues.append({
+                "tag": f"unexplained restarts ×{f['restarts_visible']}",
+                "title": (f"the agent was restarted mid-run {f['restarts_visible']} "
+                          f"time(s) after the last compaction by an unknown mechanism — "
+                          f"no relaunch loop exists for this agent in any harness branch, "
+                          f"and post-restart replies suggest background-task notifications "
+                          f"(claude) or API-error retries (qwen), not a time nudge. "
+                          f"Reconstruction currently inserts the nudge template here — "
+                          f"probably wrong content.")})
     if t.scaffold in ("claude", "qwen3max") and f["n_compactions"] == 0:
         issues.append({
             "tag": "task prompt rebuilt",
             "title": ("this run never compacted, so the initial task prompt (a CLI "
                       "argument, never recorded in the stream) is part of any "
                       "reconstructed context — regenerated from the harness's "
-                      "get_prompt.py, which may be newer than the run")})
+                      "get_prompt.py. Known drift for pre-2026-04-04 runs (all "
+                      "claude/qwen reward hacks): exactly one word — the original said "
+                      "'equiped', the regenerated says 'equipped'.")})
     if t.scaffold == "opencode":
         issues.append({
             "tag": "task prompt rebuilt",
@@ -2967,10 +2975,16 @@ def _run_issues(t) -> list[dict]:
                       "reasoning items lived in the rollout file, which was destroyed "
                       "with the run's temp dir")})
     if t.agent.startswith("claude_non_api"):
-        issues.append({
-            "tag": "effort not replicated",
-            "title": ("the original run passed --effort high (subscription agent); "
-                      "probes/resumes currently run at the CLI's default effort")})
+        # exp_probe_context now replicates the original effort setting and
+        # stamps an effort_replicated flag; only probes from before that fix
+        # (or missing probes' eventual re-runs) keep this tag.
+        flags = {fl.get("code") for fl in (probe or {}).get("flags", [])}
+        if probe is None or "effort_replicated" not in flags:
+            issues.append({
+                "tag": "effort not replicated",
+                "title": ("the original run passed --effort high (subscription agent); "
+                          "this run's probe predates the fix that replicates it, so the "
+                          "probe ran at the CLI's default effort")})
     return issues
 
 
@@ -3006,7 +3020,7 @@ def continuation_hacks():
         supported, reason = _probe_support(t.scaffold, t.agent)
         row = {"r": r, "hm": hm, "num": _INDEX_NUM.get(rid),
                "probe": cr.get(rid), "supported": supported, "reason": reason,
-               "issues": _run_issues(t)}
+               "issues": _run_issues(t, cr.get(rid))}
         key = (_engine_label(t.scaffold, t.agent), r.get("agent_model") or "?")
         buckets.setdefault(key, []).append(row)
 
