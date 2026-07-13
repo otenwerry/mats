@@ -8,10 +8,12 @@ apply to every probe and are listed after them.
 **Maintenance rule: whenever an issue is fixed, investigated, or its status
 changes, update this file AND the viewer tags/legend in the same change.**
 
-Tag colors in the viewer (= status): **red** permanent data loss, nothing will fix
-it · **amber** unresolved, still investigating · **grey** fixed in code — the tag
-survives only because that run's existing continuation predates the fix, so
-re-running the continuation clears it.
+Tag colors in the viewer (= status; own palette, distinct from the red/amber
+contamination and fidelity flags — key shown at the top of the page): **purple**
+permanent data loss, nothing will fix it · **blue** unresolved, still
+investigating · **green** fixed in code — the tag survives only because that
+run's existing continuation predates the fix, so re-running the continuation
+clears it.
 
 Status snapshot (2026-07-13): 30 reward-hack trajectories. 9 have completely
 verbatim reconstructed contexts (Claude API runs whose visible window starts at a

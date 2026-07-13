@@ -669,6 +669,12 @@ CSS = """
  .flag.info{background:#eef2f6;color:#475569;border:1px solid #cbd5e1}
  .flag.warn{background:#fff7e6;color:#8a5a00;border:1px solid #f0d28a}
  .flag.error{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
+ /* reconstruction-issue tags: own palette, distinct from the red/amber fidelity
+    and contamination flags */
+ .issue{display:inline-block;border-radius:4px;padding:0 7px;font-size:.72rem;font-weight:700;cursor:help}
+ .issue.perm{background:#f3e8ff;color:#6b21a8;border:1px solid #d8b4fe}
+ .issue.open{background:#e0edff;color:#1e40af;border:1px solid #93c5fd}
+ .issue.fixed{background:#e7f6ec;color:#166534;border:1px solid #a7d7b4}
  .pending{color:#9aa0aa}
  .cantflag{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;background:#f1f2f4;color:#6b7280;border:1px solid #d7dae0;cursor:help}
  .compaction{border:1px solid #d6c3f0;background:#faf7ff;border-radius:8px;margin:.6rem 0;overflow:hidden}
@@ -1047,6 +1053,7 @@ HACKS_HTML = """
 {{ subnav|safe }}
 <div class="pagehead"><h1>Reward-hack trajectories</h1>
  <span class="meta">{{ n_total }} trajectories · {{ groups|length }} model×scaffold group(s)</span></div>
+<p class="meta" style="margin:0 0 .6rem">issues: <span class="issue perm">permanent loss</span> <span class="issue open">unresolved</span> <span class="issue fixed">fixed — re-run clears</span></p>
 {% if orphans %}
 <p class="meta" style="color:#9a3412">⚠ {{ orphans|length }} reward-hack highlight(s) have no viewable trajectory row and are omitted here:
  {{ orphans|join(', ') }}</p>
@@ -1070,7 +1077,7 @@ HACKS_HTML = """
   <td class="num">{{ r.time_taken or '–' }}</td>
   <td class="flags">{% if hm.label %}<span class="lbl {{ label_class.get(hm.label,'') }}" title="final assessment (full provenance on the run page)">{{ hm.label }}</span>{% endif %}
    {% set op = oai_pill(r.run_id) %}{% if op %}<span class="apitag {{ op.cls }}" title="{{ op.title }}">{{ op.text }}</span>{% endif %}</td>
-  <td class="flags">{% for i in row.issues %}<span class="flag {{ i.sev }}" title="{{ i.title }}">{{ i.tag }}</span> {% else %}<span class="meta" title="no per-run reconstruction issues detected at the end cut">–</span>{% endfor %}</td>
+  <td class="flags">{% for i in row.issues %}<span class="issue {{ i.cls }}" title="{{ i.title }}">{{ i.tag }}</span> {% else %}<span class="meta" title="no per-run reconstruction issues detected at the end cut">–</span>{% endfor %}</td>
  </tr>
  {% endfor %}
  </tbody></table>
@@ -1078,21 +1085,20 @@ HACKS_HTML = """
 {% endfor %}
 <details class="legend" style="margin-top:1rem">
  <summary>issue-tag legend</summary>
- <p class="meta" style="margin:.5rem 0 .2rem">color = status: <span class="flag error">red</span> permanent data loss, nothing will fix it · <span class="flag warn">amber</span> unresolved, still investigating · <span class="flag info">grey</span> fixed in code — re-running this trajectory's continuation clears the tag.</p>
  <table style="margin-top:.5rem"><tbody>
-  <tr><td class="flags"><span class="flag error">edits lost</span></td>
+  <tr><td class="flags"><span class="issue perm">edits lost</span></td>
    <td>codex traces store only path + change-kind for each file edit; the edit contents were never saved and are unrecoverable.</td></tr>
-  <tr><td class="flags"><span class="flag error">reasoning lost</span></td>
+  <tr><td class="flags"><span class="issue perm">reasoning lost</span></td>
    <td>(codex) only reasoning summaries were saved — the replayable reasoning items lived in the rollout file, destroyed with the run's temp dir.</td></tr>
-  <tr><td class="flags"><span class="flag warn">reasoning lost</span></td>
+  <tr><td class="flags"><span class="issue open">reasoning lost</span></td>
    <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
-  <tr><td class="flags"><span class="flag warn">nudge restarts ×N</span></td>
+  <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
-  <tr><td class="flags"><span class="flag warn">unexplained restarts ×N</span></td>
+  <tr><td class="flags"><span class="issue open">unexplained restarts ×N</span></td>
    <td>the agent process was restarted mid-run by an unknown mechanism — no relaunch loop exists for these agents in any harness branch, and post-restart replies point to background-task notifications (claude) or API-error retries (qwen), not a time nudge. The nudge template the reconstruction currently inserts at these points is probably wrong content.</td></tr>
-  <tr><td class="flags"><span class="flag info">task prompt rebuilt</span></td>
+  <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
-  <tr><td class="flags"><span class="flag info">effort not replicated</span></td>
+  <tr><td class="flags"><span class="issue fixed">effort not replicated</span></td>
    <td>the original subscription-Claude runs passed --effort high; probes now replicate this. Rows still tagged have a probe from before that fix.</td></tr>
   <tr><td class="flags"><span class="meta">–</span></td>
    <td>no per-run reconstruction issues detected at the end-of-run cut.</td></tr>
@@ -2922,18 +2928,19 @@ def _issue_facts(run_id: str) -> dict:
 
 
 def _run_issues(t, probe: dict | None = None) -> list[dict]:
-    """[{tag, title, sev}] reconstruction-unfaithfulness tags for one trajectory.
-    sev drives the pill color: error (red) = permanent data loss, nothing will
-    fix it; warn (amber) = unresolved, still investigating; info (grey) = fixed
-    in code — the tag survives only because this run's existing continuation
-    predates the fix, so re-running it clears the tag."""
+    """[{tag, title, cls}] reconstruction-unfaithfulness tags for one trajectory.
+    cls drives the pill color (own .issue palette, distinct from the red/amber
+    fidelity/contamination flags): perm (purple) = permanent data loss, nothing
+    will fix it; open (blue) = unresolved, still investigating; fixed (green) =
+    fixed in code — the tag survives only because this run's existing
+    continuation predates the fix, so re-running it clears the tag."""
     f = _issue_facts(t.run_id)
     probe_flags = {fl.get("code") for fl in (probe or {}).get("flags", [])}
     issues = []
     if f["restarts_visible"]:
         if "reprompt" in (t.agent or ""):
             issues.append({
-                "tag": f"nudge restarts ×{f['restarts_visible']}", "sev": "warn",
+                "tag": f"nudge restarts ×{f['restarts_visible']}", "cls": "open",
                 "title": (f"this agent's launch script re-launched the agent "
                           f"{f['restarts_visible']} time(s) with the 'You still have Xh Ym "
                           f"remaining...' nudge — wording known from the script; the exact "
@@ -2941,7 +2948,7 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                           f"run's line timestamps (not yet wired into reconstruction)")})
         else:
             issues.append({
-                "tag": f"unexplained restarts ×{f['restarts_visible']}", "sev": "warn",
+                "tag": f"unexplained restarts ×{f['restarts_visible']}", "cls": "open",
                 "title": (f"the agent was restarted mid-run {f['restarts_visible']} "
                           f"time(s) after the last compaction by an unknown mechanism — "
                           f"no relaunch loop exists for this agent in any harness branch, "
@@ -2956,7 +2963,7 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                     or t.scaffold == "opencode")
     if needs_prompt and probe is not None and "prompt_era_matched" not in probe_flags:
         issues.append({
-            "tag": "task prompt rebuilt", "sev": "info",
+            "tag": "task prompt rebuilt", "cls": "fixed",
             "title": ("this run's context includes the regenerated initial task prompt, "
                       "and its continuation predates the era-matching fix — its context "
                       "said 'equipped' where the original said 'equiped' (the only "
@@ -2965,7 +2972,7 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
         model = t.run_id
         if any(m in model for m in _OPENCODE_THINKING):
             issues.append({
-                "tag": "reasoning lost", "sev": "warn",
+                "tag": "reasoning lost", "cls": "open",
                 "title": ("the opencode stream records no model reasoning, so this "
                           "thinking model's reasoning is absent from the trace entirely. "
                           "Open question: if opencode never replayed reasoning mid-run, "
@@ -2973,12 +2980,12 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
     if t.scaffold == "codex":
         if f["n_file_change"]:
             issues.append({
-                "tag": "edits lost", "sev": "error",
+                "tag": "edits lost", "cls": "perm",
                 "title": (f"codex traces record only path+kind for file edits — the "
                           f"actual patch bodies ({f['n_file_change']} file change(s)) "
                           f"are unrecoverable")})
         issues.append({
-            "tag": "reasoning lost", "sev": "error",
+            "tag": "reasoning lost", "cls": "perm",
             "title": ("only reasoning summaries were saved; the replayable (encrypted) "
                       "reasoning items lived in the rollout file, which was destroyed "
                       "with the run's temp dir")})
@@ -2987,13 +2994,13 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
         # effort_replicated flag; only pre-fix probes keep this tag.
         if probe is not None and "effort_replicated" not in probe_flags:
             issues.append({
-                "tag": "effort not replicated", "sev": "info",
+                "tag": "effort not replicated", "cls": "fixed",
                 "title": ("the original run passed --effort high (subscription agent); "
                           "this run's probe predates the fix that replicates it, so the "
                           "probe ran at the CLI's default effort. Re-running the "
                           "continuation clears this.")})
-    order = {"error": 0, "warn": 1, "info": 2}
-    return sorted(issues, key=lambda i: order[i["sev"]])
+    order = {"perm": 0, "open": 1, "fixed": 2}
+    return sorted(issues, key=lambda i: order[i["cls"]])
 
 
 def _context_recon_probes() -> dict[str, dict]:
