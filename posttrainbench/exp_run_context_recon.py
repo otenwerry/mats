@@ -44,7 +44,8 @@ def _support(traj) -> tuple[bool, str]:
     if traj.scaffold == "codex":
         return False, "codex traces lossy (no rollout/patch bodies) — can't reconstruct"
     if traj.scaffold == "qwen3max":
-        return False, "no qwen CLI to resume"
+        return False, ("qwen3max = Claude Code + DashScope endpoint; resumable in "
+                       "principle but needs a DashScope key + env overrides (not set up)")
     return False, f"unsupported scaffold {traj.scaffold}"
 
 

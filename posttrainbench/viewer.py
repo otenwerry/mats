@@ -1057,7 +1057,8 @@ HACKS_HTML = """
  <table style="margin-top:.5rem"><thead><tr>
   <th class="num" title="index number on the main trajectories page">#</th>
   <th>experiment</th><th>bench</th><th>base model</th>
-  <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th></tr></thead><tbody>
+  <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th>
+  <th title="per-run reconstruction-unfaithfulness tags at the standard end-of-run cut (hover each tag for detail); universal caveats — local machine, newer CLI, injected resume turns, missing workspace — are on the continuation page instead">issues</th></tr></thead><tbody>
  {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
   <td class="num">{{ row.num or '–' }}</td>
@@ -1069,6 +1070,7 @@ HACKS_HTML = """
   <td class="num">{{ r.time_taken or '–' }}</td>
   <td class="flags">{% if hm.label %}<span class="lbl {{ label_class.get(hm.label,'') }}" title="final assessment (full provenance on the run page)">{{ hm.label }}</span>{% endif %}
    {% set op = oai_pill(r.run_id) %}{% if op %}<span class="apitag {{ op.cls }}" title="{{ op.title }}">{{ op.text }}</span>{% endif %}</td>
+  <td class="flags">{% for i in row.issues %}<span class="flag warn" title="{{ i.title }}">{{ i.tag }}</span> {% else %}<span class="meta" title="no per-run reconstruction issues detected at the end cut">–</span>{% endfor %}</td>
  </tr>
  {% endfor %}
  </tbody></table>
@@ -2581,7 +2583,9 @@ def _probe_support(scaffold: str, agent: str) -> tuple[bool, str]:
         return False, ("codex traces are lossy (no rollout / patch bodies) — "
                        "the pre-cut context can't be reconstructed")
     if scaffold == "qwen3max":
-        return False, "no qwen CLI available to resume this scaffold"
+        return False, ("qwen3max ran Claude Code pointed at DashScope's "
+                       "Anthropic-compatible API — resumable in principle, but needs "
+                       "a DashScope key + env overrides (not set up)")
     return False, f"unsupported scaffold: {scaffold}"
 
 
@@ -2851,6 +2855,92 @@ def continuations():
                                   subnav=_subnav("continuations", window="early"))
 
 
+# Reconstruction-issue tags for the context-reconstruction window: per-run,
+# judged at the standard end-of-run cut. A run only gets a tag for a problem it
+# actually has (e.g. a run whose whole visible window sits after its last
+# compaction needs no rebuilt task prompt). Universal caveats that apply to
+# every probe identically (local machine, newer CLI, injected resume turns,
+# missing workspace) are NOT tagged here — they live in each probe's fidelity
+# flags on the continuation page.
+_ISSUE_FACTS_CACHE: dict[str, dict] = {}
+
+# opencode models with a hidden reasoning channel; the opencode stream saves no
+# reasoning at all, so for these runs the model's reasoning is simply gone.
+# (kimi-k2.5 is treated as non-thinking and gets no tag.)
+_OPENCODE_THINKING = ("kimi-k2-thinking", "gpt-5.1-codex-max", "gemini-3.1-pro")
+
+
+def _issue_facts(run_id: str) -> dict:
+    """Event-derived facts behind the issue tags (computed once per run)."""
+    if run_id in _ISSUE_FACTS_CACHE:
+        return _ISSUE_FACTS_CACHE[run_id]
+    evs = load_record(run_id).get("events", [])
+    inits = [i for i, e in enumerate(evs)
+             if e.get("type") == "system" and e.get("subtype") == "init"]
+    compacts = [i for i, e in enumerate(evs)
+                if e.get("type") == "system" and e.get("subtype") == "compact_boundary"]
+    last_c = compacts[-1] if compacts else -1
+    facts = {
+        "restarts_visible": sum(1 for i in inits[1:] if i > last_c),
+        "n_compactions": len(compacts),
+        "n_file_change": sum(1 for e in evs if e.get("type") == "codex_item"
+                             and e.get("subtype") == "file_change"),
+    }
+    _ISSUE_FACTS_CACHE[run_id] = facts
+    return facts
+
+
+def _run_issues(t) -> list[dict]:
+    """[{tag, title}] reconstruction-unfaithfulness tags for one trajectory."""
+    f = _issue_facts(t.run_id)
+    issues = []
+    if f["restarts_visible"]:
+        issues.append({
+            "tag": f"restarts ×{f['restarts_visible']}",
+            "title": (f"the agent was restarted mid-run {f['restarts_visible']} time(s) "
+                      f"after the last compaction. The nudge prompt each restart got was "
+                      f"never recorded; reconstruction inserts the known template with an "
+                      f"estimated time-remaining value. (For non-reprompt agents the "
+                      f"restart mechanism itself is unverified.)")})
+    if t.scaffold in ("claude", "qwen3max") and f["n_compactions"] == 0:
+        issues.append({
+            "tag": "task prompt rebuilt",
+            "title": ("this run never compacted, so the initial task prompt (a CLI "
+                      "argument, never recorded in the stream) is part of any "
+                      "reconstructed context — regenerated from the harness's "
+                      "get_prompt.py, which may be newer than the run")})
+    if t.scaffold == "opencode":
+        issues.append({
+            "tag": "task prompt rebuilt",
+            "title": ("the initial task prompt was a CLI argument and is not in the "
+                      "opencode stream; any reconstructed context needs it regenerated "
+                      "from the harness's get_prompt.py")})
+        model = t.run_id
+        if any(m in model for m in _OPENCODE_THINKING):
+            issues.append({
+                "tag": "reasoning lost",
+                "title": ("the opencode stream records no model reasoning, so this "
+                          "thinking model's reasoning is absent from the trace entirely")})
+    if t.scaffold == "codex":
+        if f["n_file_change"]:
+            issues.append({
+                "tag": "edits lost",
+                "title": (f"codex traces record only path+kind for file edits — the "
+                          f"actual patch bodies ({f['n_file_change']} file change(s)) "
+                          f"are unrecoverable")})
+        issues.append({
+            "tag": "reasoning lost",
+            "title": ("only reasoning summaries were saved; the replayable (encrypted) "
+                      "reasoning items lived in the rollout file, which was destroyed "
+                      "with the run's temp dir")})
+    if t.agent.startswith("claude_non_api"):
+        issues.append({
+            "tag": "effort not replicated",
+            "title": ("the original run passed --effort high (subscription agent); "
+                      "probes/resumes currently run at the CLI's default effort")})
+    return issues
+
+
 def _context_recon_probes() -> dict[str, dict]:
     """{run_id: probe} for the context-reconstruction campaign — at most one per
     trajectory (1 continuation each, cut at the end); if several exist, keep the
@@ -2882,7 +2972,8 @@ def continuation_hacks():
         t = runs.load(rid)
         supported, reason = _probe_support(t.scaffold, t.agent)
         row = {"r": r, "hm": hm, "num": _INDEX_NUM.get(rid),
-               "probe": cr.get(rid), "supported": supported, "reason": reason}
+               "probe": cr.get(rid), "supported": supported, "reason": reason,
+               "issues": _run_issues(t)}
         key = (_engine_label(t.scaffold, t.agent), r.get("agent_model") or "?")
         buckets.setdefault(key, []).append(row)
 
