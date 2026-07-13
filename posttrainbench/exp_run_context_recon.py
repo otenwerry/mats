@@ -93,7 +93,7 @@ def main() -> None:
         return
 
     print(f"\nrunning {len(runnable)} continuations into {CAMPAIGN}/ "
-          f"(cut at end, --turn last)\n")
+          f"(cut at the end of the trajectory, --turn end)\n")
     ok_n = fail_n = 0
     for i, t in enumerate(runnable, 1):
         print(f"[{i}/{len(runnable)}] {t.scaffold} · {t.run_id}")

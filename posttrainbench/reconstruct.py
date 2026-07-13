@@ -36,7 +36,9 @@ from lib import recon_claude, recon_codex, recon_opencode, runs, stream  # noqa:
 
 PROBE_SUPPORT = {
     "claude": "claude --resume (supported)",
-    "qwen3max": "unsupported in v1 (claude-format data, but needs the qwen CLI + key)",
+    "qwen3max": "unsupported for now (it ran Claude Code pointed at DashScope's "
+                "Anthropic-compatible API — resumable in principle with a DashScope "
+                "key + env overrides, not set up)",
     "opencode": "opencode run --session (needs opencode CLI + provider auth)",
     "codex": "unsupported (data is lossy: no rollout, no patch bodies)",
 }

@@ -18,9 +18,10 @@ agents/claude_reprompt/solve.sh:
     and maximize performance.
 The exact remaining time per relaunch was never recorded for runs without
 line timestamps, so we estimate it and flag the estimate. NB: for the
-non-reprompt agents (claude / claude_non_api / qwen3max) there is evidence
-this template is the wrong content entirely (see posttrainbench/ISSUES.md,
-"unexplained restarts").
+non-reprompt agents (claude / claude_non_api / qwen3max) this template is
+CONFIRMED-WRONG content — their restarts were background-task notifications
+(see posttrainbench/ISSUES.md, "background restarts"); it is only still
+inserted, loudly flagged, for restarts without a reviewed assignment.
 """
 from __future__ import annotations
 

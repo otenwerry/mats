@@ -24,6 +24,8 @@ Inside of the supermats directory, we have:
 - mats-local, which has all the data that I don't want to keep on github. Within this, we have folders with downloaded data (malt, posttrainbench) that should be treated as read-only, as well as folders for our own data that you're welcome to write to.
 - references, which clones relevant repos. Treat as read-only.
 
+By default, we do everything on main. Let me know if you feel the need to open a branch, otherwise just stick to main without talking about it. Let's stick to committing at the end of a chunk of changes. By default this will be once per session, at the end of the session, though sometimes we'll pivot from one thing to another at which point you can commit the first chunk of work. I don't actually care that much about when you commit so you can use your judgment and do it without permission, but please let me know when you do so. Only stage the files you touched, in case another agent is working on something else at the same time. 
+
 # Approach to interaction
 
 I know that you are an excellent programmer. I can generally trust that you are able to implement anything that needs to be implemented, and that if you make mistakes on the first pass, you are capable of autonomously processing the error message and coming up with a fix. However, I am far less confident in your decision-making ability. Often, you write some perfect code and then suggest a nonsense next step where there is an obviously better choice. 
@@ -43,6 +45,8 @@ For files that run for a while, e.g. because they're making lots of calls to LLM
 Lossy processing must be surfaced. Whenever a pipeline drops or degrades data — truncating context, clipping long fields, sampling, top-N caps, skipping unparseable items — you must (1) call this out to me explicitly at design time as a decision I get to veto, not bury it in the implementation; (2) record the omission as a stored, queryable flag on every affected output (not just a note inside a prompt or log); and (3) propagate a visible caveat to any downstream result that depends on the affected data. "The judge read 40% of the trace" is a finding about the judge, not a footnote.
 
 Big data files should be stored in mats-local so that they don't get stored on github. Feel free to make new folders within mats-local when relevant.
+
+posttrainbench/ISSUES.md is the canonical tracker for PTB reconstruction issues. Every time an issue is fixed, newly discovered, or changes status, update ISSUES.md AND the viewer's issue tags/legend in the same change — never let them drift apart. Issue tags use their own palette, distinct from the red/amber contamination and fidelity flags: purple = permanent data loss, blue = unresolved, teal = structural (an unavoidable artifact of resuming that trajectory's shape — known and recorded, not fixable), green = fixed in code, cleared by re-running that trajectory's continuation.
 
 When making visuals and viewers, include the minimum amount of information necessary to clearly communicate the data. For example, don't add textual explainers to figures unless I ask for them.
 

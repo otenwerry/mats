@@ -2,11 +2,11 @@
 
 PAID (two small claude calls, ~$0.10 with haiku).
 
-Hypothesis (see ISSUES.md, "unexplained restarts"): the mid-run `system:init`
-events in the claude/qwen runs came from something re-launching the CLI with
-`claude --continue` on the same session; the model's post-restart replies
-address background-task notifications, so whatever got injected at resume
-carried those.
+RESOLVED (see ISSUES.md, "background restarts"): the run-era CLI (2.1.76)
+waits for background tasks in `-p` mode and re-enters the session once per
+completed task, injecting an unstreamed <task-notification> user turn. This
+script's repro runs established that; it stays useful for pinning notification
+wordings we haven't observed yet (--fail, --agent-task).
 
 Phase-1 result on CLI 2.1.207 (2026-07-13): in `-p` mode the CLI does NOT wait
 for background tasks — it kills them ~5s after the final answer and exits with
@@ -64,6 +64,15 @@ PROMPT_AGENT = ("Use your Agent tool (also known as Task) to launch a subagent I
                 "Bash tool, then reply with exactly the word SUBAGENT_DONE.' "
                 "After launching it, do NOT wait for it — immediately reply with "
                 "exactly the word FINISHED and stop.")
+
+# --fail variant: capture the notification wording for a FAILED background
+# command (2 of the 6 reconstructed inserts in claude bfcl run1 (#2) are failed
+# tasks; the run-era "failed" wording is otherwise an assumption).
+PROMPT_FAIL = ("Using your Bash tool, start this command as a BACKGROUND task "
+               "(run_in_background=true): `sleep 45 && exit 1`. The command is "
+               "MEANT to fail — do not fix or retry it. Then, without waiting "
+               "for it, reply with exactly the word FINISHED and stop. Do not "
+               "poll or wait for the background task.")
 
 CONTINUE_PROMPT = "Continue."
 
@@ -142,10 +151,17 @@ def main() -> None:
     ap.add_argument("--agent-task", action="store_true",
                     help="launch a background SUBAGENT instead of a shell command "
                          "(captures the agent-task notification wording)")
+    ap.add_argument("--fail", action="store_true",
+                    help="the background command exits 1 (captures the FAILED-task "
+                         "notification wording)")
     args = ap.parse_args()
+    if args.agent_task and args.fail:
+        print("ERROR: --agent-task and --fail are separate variants; pick one")
+        sys.exit(2)
     if args.task_deadline is None:
         args.task_deadline = 90 if args.agent_task else 50
-    prompt = PROMPT_AGENT if args.agent_task else PROMPT
+    prompt = (PROMPT_AGENT if args.agent_task
+              else PROMPT_FAIL if args.fail else PROMPT)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("ERROR: ANTHROPIC_API_KEY not set and not found in mats/.env")

@@ -676,6 +676,7 @@ CSS = """
  .issue{display:inline-block;border-radius:4px;padding:0 7px;font-size:.72rem;font-weight:700;cursor:help}
  .issue.perm{background:#f3e8ff;color:#6b21a8;border:1px solid #d8b4fe}
  .issue.open{background:#e0edff;color:#1e40af;border:1px solid #93c5fd}
+ .issue.structural{background:#e0f5f3;color:#0f766e;border:1px solid #8fd8cf}
  .issue.fixed{background:#e7f6ec;color:#166534;border:1px solid #a7d7b4}
  .pending{color:#9aa0aa}
  .cantflag{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;background:#f1f2f4;color:#6b7280;border:1px solid #d7dae0;cursor:help}
@@ -1055,7 +1056,7 @@ HACKS_HTML = """
 {{ subnav|safe }}
 <div class="pagehead"><h1>Reward-hack trajectories</h1>
  <span class="meta">{{ n_total }} trajectories · {{ groups|length }} model×scaffold group(s)</span></div>
-<p class="meta" style="margin:0 0 .6rem">issues: <span class="issue perm">permanent loss</span> <span class="issue open">unresolved</span> <span class="issue fixed">fixed — re-run clears</span></p>
+<p class="meta" style="margin:0 0 .6rem">issues: <span class="issue perm">permanent loss</span> <span class="issue open">unresolved</span> <span class="issue structural">structural — unavoidable at resume</span> <span class="issue fixed">fixed — re-run clears</span></p>
 {% if orphans %}
 <p class="meta" style="color:#9a3412">⚠ {{ orphans|length }} reward-hack highlight(s) have no viewable trajectory row and are omitted here:
  {{ orphans|join(', ') }}</p>
@@ -1067,7 +1068,7 @@ HACKS_HTML = """
   <th class="num" title="index number on the main trajectories page">#</th>
   <th>experiment</th><th>bench</th><th>base model</th>
   <th class="num">score</th><th class="num">turns</th><th class="num">time</th><th>flags</th>
-  <th title="per-run reconstruction-unfaithfulness tags at the standard end-of-run cut (hover each tag for detail); universal caveats — local machine, newer CLI, injected resume turns, missing workspace — are on the continuation page instead">issues</th></tr></thead><tbody>
+  <th title="per-run reconstruction-unfaithfulness tags at the standard end-of-run cut (see the legend at the bottom of the page); universal caveats — local machine, newer CLI, missing workspace — are on the continuation page instead">issues</th></tr></thead><tbody>
  {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
   <td class="num">{{ row.num or '–' }}</td>
@@ -1096,8 +1097,12 @@ HACKS_HTML = """
    <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
   <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
-  <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span> <span class="issue perm">background restarts ×N</span></td>
-   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn. <b>Green</b>: every restart has a hand-reviewed reconstructed notification (restart_assignments.json; exit codes inferred) — re-running the continuation clears it. <b>Blue</b>: the faithful insert is deferred (qwen: replies are API errors, nothing to review) and reconstruction still inserts the known-wrong time-nudge template. <b>Purple</b>: reconstructed as far as the data allows, but part of the notification's content was never recorded (opus-1M run1: the background subagent's report text — its transcript isn't in the stream) — permanent gap.</td></tr>
+  <tr><td class="flags"><span class="issue fixed">background restarts ×N</span> <span class="issue open">background restarts ×N</span></td>
+   <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn. <b>Green</b>: every restart has a hand-reviewed reconstructed notification (restart_assignments.json; exit codes inferred) — re-running the continuation clears it. <b>Blue</b>: the faithful insert is deferred (qwen: replies are API errors, nothing to review) and reconstruction still inserts the known-wrong time-nudge template.</td></tr>
+  <tr><td class="flags"><span class="issue perm">missing helper agent text</span></td>
+   <td>a mid-run restart delivered a background helper agent's report, and the helper's transcript was never recorded (background-subagent transcripts aren't in the stream). The notification is rebuilt with every surviving field verbatim but without the report text — permanent gap, re-running never clears it.</td></tr>
+  <tr><td class="flags"><span class="issue structural">extra resume turns</span> <span class="issue fixed">extra resume turns</span></td>
+   <td>resuming a context that ends on an unanswered tool call makes the CLI insert two synthetic turns ("Continue from where you left off." / "No response requested.") before our question. <b>Teal</b>: this run genuinely died mid-action, so the insert is unavoidable — it is the trajectory's real ending shape (flagged per probe as resume_bridging_structural; the turns themselves are shown on the continuation page). <b>Green</b>: the run ends cleanly but its existing probe predates the --turn end fix; re-running clears it.</td></tr>
   <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
   <tr><td class="flags"><span class="issue fixed">effort not replicated</span></td>
@@ -1107,7 +1112,7 @@ HACKS_HTML = """
   <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
    <td>this scaffold's data or tooling doesn't allow rebuilding the context at all (hover the pill for the run-specific reason).</td></tr>
  </tbody></table>
- <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI, and the original workspace/GPU/processes are absent. Two former universal caveats are fixed in code for future probes: local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes no longer get "Continue from where you left off." bridging turns (--turn end cuts after the final assistant message — except runs that genuinely died mid-tool, where bridging is structural). See each continuation page.</p>
+ <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI, and the original workspace/GPU/processes are absent. Two former universal caveats are fixed in code for future probes: local skill/agent listings are no longer attached (fresh CLAUDE_CONFIG_DIR), and end-of-run probes on clean-ending runs no longer get synthetic resume turns (--turn end cuts after the final assistant message). Runs that genuinely died mid-action keep them unavoidably — those carry the teal "extra resume turns" tag above. See each continuation page.</p>
 </details>
 </body></html>
 """.replace("__CSS__", CSS)
@@ -2919,12 +2924,36 @@ def _issue_facts(run_id: str) -> dict:
     compacts = [i for i, e in enumerate(evs)
                 if e.get("type") == "system" and e.get("subtype") == "compact_boundary"]
     last_c = compacts[-1] if compacts else -1
+    # does the trajectory end mid-action? (claude-style streams only; meaningful
+    # when the caller gates by scaffold.) Mid-action = the last main-thread
+    # message is a tool_result, or the final assistant message left a tool call
+    # unanswered — either way a native resume must insert bridging turns.
+    ends_mid_action = False
+    main = [e for e in evs if not e.get("parent_tool_use_id")]
+    msgs = [e for e in main if e.get("type") in ("assistant", "user")]
+    if msgs and msgs[-1].get("type") == "user":
+        ends_mid_action = True
+    else:
+        # walk the trailing chunks of the final assistant API message (system
+        # status notices and the closing result record may interleave; any
+        # user/init/compact record ends the message)
+        for e in reversed(main):
+            t = e.get("type")
+            if t == "result" or (t == "system" and e.get("subtype") == "status"):
+                continue
+            if t != "assistant":
+                break
+            if any(isinstance(b, dict) and b.get("type") == "tool_use"
+                   for b in (e.get("blocks") or [])):
+                ends_mid_action = True
+                break
     facts = {
         "restarts_visible": sum(1 for i in inits[1:] if i > last_c),
         "restart_idxs": [i for i in inits[1:] if i > last_c],
         "n_compactions": len(compacts),
         "n_file_change": sum(1 for e in evs if e.get("type") == "codex_item"
                              and e.get("subtype") == "file_change"),
+        "ends_mid_action": ends_mid_action,
     }
     _ISSUE_FACTS_CACHE[run_id] = facts
     return facts
@@ -2956,16 +2985,20 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
             has_gap = any(assigned.get(str(i), {}).get("lost") for i in f["restart_idxs"])
             probe_fixed = "restart_notification_reconstructed" in probe_flags
             if covered and has_gap:
-                issues.append({
-                    "tag": f"background restarts ×{f['restarts_visible']}", "cls": "perm",
-                    "title": (f"reconstructed as far as the data allows: the notification "
-                              f"turn is rebuilt with every surviving field verbatim, but "
-                              f"part of its content was never recorded — "
-                              + "; ".join(sorted({assigned[str(i)]['lost']
-                                                  for i in f['restart_idxs']
-                                                  if assigned.get(str(i), {}).get('lost')}))
-                              + ". Permanent gap; the reconstruction omits the lost lines "
-                                "and flags them.")})
+                lost_desc = "; ".join(sorted({assigned[str(i)]["lost"]
+                                              for i in f["restart_idxs"]
+                                              if assigned.get(str(i), {}).get("lost")}))
+                title = (f"a mid-run restart delivered a background helper agent's "
+                         f"report, and the helper's transcript was never recorded — "
+                         f"the notification is rebuilt with every surviving field "
+                         f"verbatim but without the report text. Permanent gap. "
+                         f"({lost_desc})")
+                if not probe_fixed:
+                    title += (" This run's existing continuation also predates the "
+                              "rebuild (it still shows the old time-nudge insert); "
+                              "re-running applies the rebuilt notification.")
+                issues.append({"tag": "missing helper agent text", "cls": "perm",
+                               "title": title})
             elif covered and not probe_fixed:
                 issues.append({
                     "tag": f"background restarts ×{f['restarts_visible']}", "cls": "fixed",
@@ -3028,7 +3061,26 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                           "this run's probe predates the fix that replicates it, so the "
                           "probe ran at the CLI's default effort. Re-running the "
                           "continuation clears this.")})
-    order = {"perm": 0, "open": 1, "fixed": 2}
+    if t.scaffold in ("claude", "qwen3max"):
+        if f["ends_mid_action"]:
+            issues.append({
+                "tag": "extra resume turns", "cls": "structural",
+                "title": ("this run died mid-action (its last tool call never got an "
+                          "answer), so any resume of its end-of-run context makes the "
+                          "CLI insert two synthetic turns ('Continue from where you "
+                          "left off.' / 'No response requested.') before our question. "
+                          "That is the trajectory's real ending shape — unavoidable; "
+                          "recorded per probe (resume_bridging_structural flag + "
+                          "resume_turns.jsonl, rendered on the continuation page).")})
+        elif probe is not None and "probe_resume_injected_meta_turns" in probe_flags:
+            issues.append({
+                "tag": "extra resume turns", "cls": "fixed",
+                "title": ("this run ends on a clean assistant message, so an end-of-run "
+                          "resume needs no synthetic turns — but this row's existing "
+                          "probe predates the --turn end fix (its cut fell before the "
+                          "final message, forcing the CLI to insert two synthetic "
+                          "turns). Re-running the continuation clears this.")})
+    order = {"perm": 0, "open": 1, "structural": 2, "fixed": 3}
     return sorted(issues, key=lambda i: order[i["cls"]])
 
 

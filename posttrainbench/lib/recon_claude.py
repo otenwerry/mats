@@ -216,6 +216,24 @@ def build_context(traj: Trajectory, parsed: Parsed, plan: CutPlan) -> ContextBun
     if dangling:
         raise ValueError(f"cut at record {cut} leaves dangling tool_use ids: {dangling}")
 
+    # a context ending on a tool_result forces the resume CLI to insert two
+    # synthetic bridging turns ("Continue from where you left off." / "No
+    # response requested.") before the next prompt — observed on 2.1.181/2.1.207,
+    # fires only for tool_result endings. Structural for this cut shape; store
+    # it as a queryable flag (the injected turns themselves land in the probe's
+    # resume_turns.jsonl).
+    if messages and messages[-1].role == "user":
+        last_blocks = messages[-1].message.get("content")
+        if isinstance(last_blocks, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in last_blocks):
+            flags.append(_flag(
+                "resume_bridging_structural",
+                "context ends on a tool_result (the run died mid-action or the cut "
+                "falls at a tool boundary), so a native `claude --resume` inserts "
+                "two synthetic bridging turns before the next prompt — unavoidable "
+                "for this cut shape"))
+
     n_think = sum(1 for m in messages if isinstance(m.message.get("content"), list)
                   for b in m.message["content"] if b.get("type") == "thinking")
     if n_think:

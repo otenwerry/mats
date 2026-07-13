@@ -11,14 +11,16 @@ changes, update this file AND the viewer tags/legend in the same change.**
 Tag colors in the viewer (= status; own palette, distinct from the red/amber
 contamination and fidelity flags — key shown at the top of the page): **purple**
 permanent data loss, nothing will fix it · **blue** unresolved, still
-investigating · **green** fixed in code — the tag survives only because that
-run's existing continuation predates the fix, so re-running the continuation
-clears it.
+investigating · **teal** structural — an unavoidable artifact of resuming this
+trajectory's shape, not data loss and not fixable, but known and recorded ·
+**green** fixed in code — the tag survives only because that run's existing
+continuation predates the fix, so re-running the continuation clears it.
 
-Status snapshot (2026-07-13): 30 reward-hack trajectories. 9 have completely
-verbatim reconstructed contexts (Claude API runs whose visible window starts at a
-compaction summary) — but no probe yet counts as a fully faithful end-to-end
-resume (see Universal caveats).
+Status snapshot (2026-07-13): 30 reward-hack trajectories. 11 have completely
+verbatim reconstructed contexts (visible window starts at a compaction summary,
+no mid-run restarts: 9 API runs + the 2 subscription-sonnet runs #22 #23) — but
+no probe yet counts as a fully faithful end-to-end resume (see Universal
+caveats).
 
 ---
 
@@ -65,8 +67,8 @@ mechanism, no external watchdog anywhere. (The current CLI behaves differently:
 it kills background tasks ~5s after the final answer, which is why the first
 repro pass pointed the wrong way.)
 
-**PARTIALLY FIXED (2026-07-13) — 11 of 34 inserts hand-reviewed and wired in;
-23 deferred:**
+**PARTIALLY FIXED (2026-07-13) — 12 of 34 inserts hand-reviewed and wired in
+(11 fully + 1 with a permanent gap); 22 deferred:**
 
 - **Reviewed + reconstructed (green tag):** bfcl run1 (6) and opus-1M run3 (5).
   Manual review matched each restart to its background job via the ids/content
@@ -80,8 +82,9 @@ repro pass pointed the wrong way.)
   replies, rest assumed 0); the failed-task summary wording is an assumption
   (repro only observed a successful completion); one low-confidence entry
   (bfcl's vLLM-server task, assigned by elimination).
-- **Reconstructed with a permanent gap (purple tag):** opus-1M run1's single
-  restart. The `--agent-task` repro (2026-07-13, CLI 2.1.76) pinned the
+- **Reconstructed with a permanent gap (purple tag, shown in the viewer as
+  `missing helper agent text` — renamed 2026-07-13 for readability):**
+  opus-1M run1's (#15) single restart. The `--agent-task` repro (2026-07-13, CLI 2.1.76) pinned the
   agent-task notification wording (summary `Agent "<description>" completed` +
   `<result>` + `<usage>` + "Full transcript available at:" footer). All
   surviving fields are inserted verbatim (agentId, tool-use-id, output-file,
@@ -96,8 +99,10 @@ repro pass pointed the wrong way.)
   errors — nothing to review; assignments would be launch-order guesses).
   Keeps the old time-nudge insert with a loud KNOWN-WRONG flag
   (`continuation_prompt_estimated`).
-- Optional refinement if we want it later: a 30-second repro variant with a
-  failing command (`exit 1`) pins the failed-task summary wording.
+- The failed-task wording test is BUILT (`--fail` mode, 2026-07-13), not yet
+  run — it pins the wording assumed in 2 of #2's 6 inserts (~$0.05, ~2 min):
+
+      uv run python posttrainbench/exp_restart_repro.py --fail --cli "npx -y @anthropic-ai/claude-code@2.1.76"
 
 Original evidence trail (2026-07-12/13, kept for the record):
 
@@ -111,10 +116,11 @@ Original evidence trail (2026-07-12/13, kept for the record):
   complete"); qwen's mostly hit **API errors immediately** (DashScope rate
   limit / input length), i.e. crash-retries. None reference time remaining.
 - No trajectory anywhere echoes the nudge template.
-- **Consequence:** `lib/recon_claude.py` currently inserts the nudge template (with
-  an interpolated time estimate) at every mid-run init — for these 4 runs that is
-  probably **wrong content**. Not yet changed; what to insert instead is an open
-  design decision.
+- **Consequence (since addressed):** `lib/recon_claude.py` used to insert the
+  nudge template (with an interpolated time estimate) at every mid-run init —
+  wrong content for these 4 runs. It now inserts reconstructed notifications
+  where reviewed (see above); only deferred restarts still get the nudge, loudly
+  flagged.
 - **This is positive evidence of a different mechanism, not just caution:** the
   replies (12/12 address stale background tasks, 0 mention time), the scripts
   (loop agents restart 14–19×, non-loop codex agents exactly 0× — yet non-loop
@@ -136,7 +142,9 @@ Original evidence trail (2026-07-12/13, kept for the record):
   ids the models cite (e.g. b92a6ea) enter their context via the ordinary
   launch tool_result — so the "notification" the models answered was injected
   at resume, not streamed.
-- **TEST RESULT #2 (2026-07-13) — MECHANISM ESSENTIALLY CONFIRMED.** Running
+- **TEST RESULT #2 (2026-07-13) — intermediate conclusion, SUPERSEDED by the
+  2.1.76 repro (see the section header: the run-era CLI re-enters by itself;
+  no external relauncher).** Running
   `claude --continue` on a session with a pending background task reproduced
   the full PTB signature in one shot: multiple `system:init` events under one
   session id, an injected user turn that does NOT appear in the stream, and the
@@ -149,21 +157,40 @@ Original evidence trail (2026-07-12/13, kept for the record):
       <summary>No completion record was found for this background shell
       command from the previous session. ...</summary>
 
-  So the PTB restarts = something external re-ran `claude --continue`, and the
-  CLI injected task-notifications at resume. This is what reconstruction should
-  insert at restart points instead of the time-nudge template — pending two
-  remaining unknowns: (1) the run-era CLI's notification wording (re-run with
-  `--cli "npx -y @anthropic-ai/claude-code@2.1.76"` — note `-y`, plain npx
-  hangs on a hidden install prompt), and (2) what prompt text, if any, the
-  external relauncher passed (Maksym).
+  So this pass concluded the PTB restarts = something external re-ran
+  `claude --continue`, with the CLI injecting task-notifications at resume.
+  (Both then-open unknowns were since resolved by the 2.1.76 repro: the run-era
+  wording is captured verbatim, and there was no external relauncher — hence no
+  relauncher prompt text to recover. Note for pinned-CLI runs: use
+  `npx -y`, plain npx hangs on a hidden install prompt.)
 - **Extra unfaithfulness in the existing probes:** the 3 restart runs' pre-fix
   probe contexts ENDED on the synthetic nudge text (their `--turn last` cut fell
   right after a relaunch). `--turn end` re-runs fix the ending; the mid-context
   inserts stay until the mechanism is known.
-- **OWEN:** ask Maksym what relaunched the non-reprompt agents (and whether some
-  infra-level retry wrapper existed outside the repo).
+- ~~**OWEN:** ask Maksym what relaunched the non-reprompt agents~~ — resolved,
+  no Maksym needed (the CLI relaunched itself).
 
-### `task prompt rebuilt` (grey; now tags only runs with a pre-fix continuation — currently the 2 opus-1M rows)
+### `extra resume turns` (teal on the 7 mid-action enders: #1 #3 #5 #7 #9 #10 #13; green on clean enders with a pre-fix probe)
+
+Added 2026-07-13 (Owen: structural resume artifacts should be tagged per run,
+in their own category/color). Resuming a context that ends on an unanswered
+tool call makes the CLI insert two synthetic turns of its own ("Continue from
+where you left off." / "No response requested.") before our probe question.
+
+- **Teal (structural):** the 7 runs above genuinely died mid-action — their
+  final assistant message left a tool call unanswered, so the end cut snaps to
+  before it and the insert is unavoidable. This is the trajectory's real ending
+  shape, not a reconstruction bug. Stored per reconstruction as the
+  `resume_bridging_structural` fidelity flag (fires whenever a rebuilt context
+  ends on a tool_result); the injected turns themselves are saved in each
+  probe's `resume_turns.jsonl` and rendered on the continuation page.
+- **Green:** a clean-ending run whose existing probe predates the `--turn end`
+  fix also got the inserts (the old `--turn last` cut fell before the final
+  message); re-running clears those.
+- Mid-trajectory cuts at tool results (future resample experiments) hit the
+  same inserts — intervention design must account for them.
+
+### `task prompt rebuilt` (green; tags only runs with a pre-fix continuation — currently #15 and #20)
 
 The initial task prompt was a CLI argument, never recorded in any stream. Runs
 that never compacted keep it in every reconstructed context, so we regenerate it
@@ -229,25 +256,23 @@ resumed at default effort.
 
 ## Universal caveats (every probe; not tagged per run)
 
-### Resume-injected turns — MOSTLY FIXED for end-of-run probes (2026-07-13)
+### Resume-injected turns — no longer universal; now the per-run `extra resume turns` tag (2026-07-13)
 
 `claude --resume` on a context ending in a tool result injects a synthetic user
 turn ("Continue from where you left off.") plus an assistant reply ("No response
 requested."). Not our bug — it's the CLI's bridging behavior for resuming
-mid-agentic-turn — but it fired on our probes because `--turn last` deliberately
-cut *before* the final assistant message (a definition inherited from the
-resample use-case).
+mid-agentic-turn — but it fired on every first-campaign probe because
+`--turn last` deliberately cut *before* the final assistant message (a
+definition inherited from the resample use-case).
 
 - **FIXED for end probes:** new `--turn end` cuts *after* the final assistant
   message — the session ends on an assistant turn, the CLI appends the probe
-  directly, no bridging, and the agent's real closing summary stays in context.
+  directly, no inserts, and the agent's real closing summary stays in context.
   The campaign runner now uses it.
-- **Structural remainder:** 7 of the 15 claude/qwen reward-hack runs genuinely
-  died mid-tool (final assistant message has an unanswered tool call), so their
-  end cut snaps back and bridging is unavoidable — that's the trajectory's real
-  shape, recorded in the cut notes. Bridging also returns at any mid-trajectory
-  tool-result cut in future resample experiments: there it's a structural cost
-  of native CLI resume that intervention design must account for.
+- **Structural remainder — tagged per run since 2026-07-13:** see the
+  `extra resume turns` section above (teal on the 7 mid-action enders,
+  `resume_bridging_structural` fidelity flag; green where only a pre-fix probe
+  is affected).
 - Injected turns remain recorded per probe (`resume_turns.jsonl`) and rendered
   on continuation pages.
 
@@ -303,7 +328,8 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [x] ~~background-restarts reconstruction fix~~ — 12/34 reviewed + wired in 2026-07-13 (restart_assignments.json; run #15's agent-task wording pinned by the --agent-task repro, its subagent report permanently lost → purple); **still open:** qwen's 22, deferred by Owen — revisit when qwen becomes resumable
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
-- [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)
-- [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes bridging/attachments for the 8 runs that end on an assistant message
+- [x] ~~`exp_restart_repro.py` re-entry test~~ — DONE 2026-07-13 (three repro runs + `--agent-task`; mechanism confirmed, wordings captured)
+- [ ] **Test (exp approval, ~$0.05, ~2 min):** pin the FAILED-task notification wording (assumed in 2 of #2's 6 inserts): `uv run python posttrainbench/exp_restart_repro.py --fail --cli "npx -y @anthropic-ai/claude-code@2.1.76"`
+- [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes the extra resume turns/attachments for the 7 probeable clean-ending runs (the 8th clean ender is #54, not probeable)
 - [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out); CLI version pinning still optional/untested
 - [ ] **Research:** does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?
