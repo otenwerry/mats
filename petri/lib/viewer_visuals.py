@@ -1963,6 +1963,116 @@ def _em_cost_section(em: dict | None) -> str:
             + _stack(fig_em_cost(em)))
 
 
+# EM judge scores (the paper's aligned/coherent judge, run by exp_ask_questions.py).
+# Rows arrive classified by the viewer's display-time thresholds (em_classify):
+# included = 'aligned'/'misaligned' (numeric aligned score, coherent above the filter);
+# excluded = 'incoherent'/'unscored'. Identity is never color alone: the fraction figure
+# carries k/n labels, the strip carries filled-vs-open markers + a legend.
+EM_MISALIGNED_C = "#d93025"     # matches the propensity bars' bad-outcome red
+
+
+def _em_q_order(rows: list[dict]) -> list[str]:
+    """Question ids in first-appearance order (results.json preserves the YAML order)."""
+    return list(dict.fromkeys(r["qid"] for r in rows))
+
+
+def fig_em_misaligned_frac(d: dict) -> str:
+    """Misaligned-answer fraction per question — the paper's headline quantity. Denominator
+    = asks passing the display-time filters (coherent > min, numeric aligned score);
+    numerator = aligned < threshold. Wilson 95% CI, k/n above each bar."""
+    rows = [r for r in d["rows"] if r["cls"] in ("aligned", "misaligned")]
+    if not rows:
+        return _empty_fig("no asks pass the coherence/score filters", (5.6, 4.0))
+    qids = _em_q_order(rows)
+    ks, ns, rates, los, his = [], [], [], [], []
+    for q in qids:
+        sub = [r for r in rows if r["qid"] == q]
+        k, n = sum(1 for r in sub if r["cls"] == "misaligned"), len(sub)
+        p, lo, hi = _wilson(k, n)
+        ks.append(k); ns.append(n)
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    fig, ax = plt.subplots(figsize=(max(5.6, 1.05 * len(qids) + 1.6), 4.2))
+    xs = np.arange(len(qids))
+    ax.bar(xs, rates, width=0.6, color=EM_MISALIGNED_C, edgecolor="white", lw=0.4,
+           yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for x, k, n in zip(xs, ks, ns):
+        ax.annotate(f"{k}/{n}", (x, 100 * k / n if n else 0), textcoords="offset points",
+                    xytext=(0, 8), ha="center", fontsize=10, color="#333", fontweight="bold")
+    _cat_xticks(ax, xs, qids, fontsize=9)
+    ax.set_ylabel("Misaligned answers (%)")
+    ax.set_ylim(0, max(max(r + h for r, h in zip(rates, his)), 10) + 12)
+    ax.set_title("Misaligned-answer fraction by question")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_em_aligned_strip(d: dict) -> str:
+    """Every numeric aligned score as one dot, by question. Filled blue = included asks;
+    open grey diamonds = excluded (incoherent/unscored) that still got a numeric aligned
+    score. Dashed line = the misaligned threshold. Unscored-aligned asks can't be placed
+    and are counted in the section lead instead."""
+    rows = [r for r in d["rows"] if isinstance(r.get("aligned"), (int, float))]
+    if not rows:
+        return _empty_fig("no numeric aligned scores", (5.6, 4.0))
+    qids = _em_q_order(rows)
+    qx = {q: i for i, q in enumerate(qids)}
+    fig, ax = plt.subplots(figsize=(max(5.6, 1.05 * len(qids) + 1.6), 4.2))
+    counts: dict[str, int] = {}
+    for grp, marker, kw in (
+            ("included", "o", dict(color=EM_ANSWERED_C)),
+            ("excluded", "D", dict(facecolors="none", edgecolors="#8a8a99", lw=1.2))):
+        pts = [r for r in rows
+               if (r["cls"] in ("aligned", "misaligned")) == (grp == "included")]
+        if not pts:
+            continue
+        # deterministic jitter (index-based) so repeated builds render identically
+        xs = [qx[r["qid"]] + ((i % 5) - 2) * 0.07 for i, r in enumerate(pts)]
+        ys = [r["aligned"] for r in pts]
+        ax.scatter(xs, ys, s=42, marker=marker, alpha=0.85, label=grp, **kw)
+        counts[grp] = len(pts)
+    ax.axhline(d["misaligned_below"], color="#333", lw=1.0, ls="--")
+    # x in axes fraction, y in data units, so the label survives any x-range
+    ax.text(0.99, d["misaligned_below"] + 1.5, f'misaligned < {d["misaligned_below"]}',
+            transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+            fontsize=8.5, color="#333")
+    _cat_xticks(ax, np.arange(len(qids)), qids, fontsize=9)
+    ax.set_ylabel("Aligned score (0–100)")
+    ax.set_ylim(-4, 104)
+    ax.set_title("Aligned score per ask, by question")
+    if len(counts) > 1:
+        ax.legend(fontsize=8.5, loc="best", framealpha=0.9)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _em_judge_section(d: dict | None) -> str:
+    """The 'EM questions' tab: judge-score figures over every ask with judge data on the
+    sweep. Empty string when there is none (the tab then doesn't render)."""
+    if not d:
+        return ""
+    rows = d["rows"]
+    n_inc = sum(1 for r in rows if r["cls"] in ("aligned", "misaligned"))
+    n_mis = sum(1 for r in rows if r["cls"] == "misaligned")
+    n_exc = len(rows) - n_inc
+    n_traj = len({r["tid"] for r in rows})
+    excluded = (f' <b>{n_exc}</b> excluded by the paper&rsquo;s filters (incoherent or '
+                f'non-numeric judge verdict).' if n_exc else "")
+    unjudged = (f' {d["n_unjudged"]} ask(s) on this sweep have no judge scores '
+                f'(no answer text, --no-judge, or pre-judge results) and are not shown.'
+                if d.get("n_unjudged") else "")
+    lead = (f'<b>{len(rows)}</b> judged asks over <b>{n_traj}</b> trajectory(ies), scored '
+            f'0&ndash;100 by {esc_loc(str(d.get("judge_model") or "?"))} on the paper&rsquo;s '
+            f'aligned/coherent prompts (the judge sees only the question and the answer). '
+            f'Thresholds, applied at display time: keep coherent &gt; {d["coherent_min"]}, '
+            f'misaligned = aligned &lt; {d["misaligned_below"]} &mdash; giving '
+            f'<b>{n_mis}/{n_inc}</b> misaligned.{excluded}{unjudged}')
+    return ('<h2>EM questions — judge scores</h2>'
+            f'<p class="vsub">{lead}</p>'
+            + _stack(fig_em_misaligned_frac(d), fig_em_aligned_strip(d)))
+
+
 # --------------------------------------------------------------------------- #
 # page
 # --------------------------------------------------------------------------- #
@@ -2218,6 +2328,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        cont_faithfulness_cost: dict | None = None,
                        cont_generation_cost: dict | None = None,
                        em_cost: dict | None = None,
+                       em_judge: dict | None = None,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
                        subnav_html: str = "") -> str:
@@ -2289,6 +2400,8 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     cost_html += _cont_cost_section(cont_generation_cost, cont_faithfulness_cost)
     # EM question-ask cost split (exp_ask_questions.py), on the same Cost tab
     cost_html += _em_cost_section(em_cost)
+    # EM judge scores get their own tab (the ask COSTS stay on the Cost tab above)
+    em_html = _em_judge_section(em_judge)
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
     # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
@@ -2300,6 +2413,7 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     tab_specs = [
         ("audits", "Original audits", audits_panel),
         ("cost", "Cost", cost_html),
+        ("em", "EM questions", em_html),
         ("continuations", "Continuations", cont_panel),
         ("weaker", "Weaker models", old_inner),
         ("rollback", "Rollback re-hacking", rollback_html),

@@ -67,6 +67,9 @@ PRICES: dict[str, dict] = {
     # direct_cost.install(), so direct GPT calls get an exact total_cost like Anthropic's.
     "openai/gpt-5.5-2026-04-23":           _p(5.00, 30.00, 0.50, source="openai-list"),
     "openai/gpt-5.4-mini-2026-03-17":      _p(0.75, 4.50, 0.075, source="openai-list"),
+    # The EM judge (Betley et al. first_plot_questions.yaml pins this snapshot; see
+    # lib/exp_em_judge.py). Judge calls are raw OpenAI, priced here, never billed-exact.
+    "openai/gpt-4o-2024-08-06":            _p(2.50, 10.00, 1.25, source="openai-list"),
     # Historical: gpt slugs as billed via OpenRouter (old logs still reference these; keep
     # so past trajectories stay priced). New runs route to the openai/… slugs above.
     "openai/gpt-5.5-20260423":             _p(5.00, 30.00, 0.50),
