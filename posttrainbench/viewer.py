@@ -1076,6 +1076,26 @@ HACKS_HTML = """
  </tbody></table>
 </details>
 {% endfor %}
+<details class="legend" style="margin-top:1rem">
+ <summary>issue-tag legend</summary>
+ <table style="margin-top:.5rem"><tbody>
+  <tr><td class="flags"><span class="flag warn">restarts ×N</span></td>
+   <td>the agent process was restarted N times mid-run (only restarts still visible at the end cut are counted). What each restart delivered as a prompt was never recorded. For <i>reprompt</i> agents it's the known "You still have Xh Ym remaining…" nudge (time values estimated); for the other agents, post-restart replies point to background-task notifications (claude) or API-error retries (qwen) instead — the nudge template the reconstruction currently inserts there is probably wrong content.</td></tr>
+  <tr><td class="flags"><span class="flag warn">task prompt rebuilt</span></td>
+   <td>the initial task prompt was a CLI argument and never saved. In runs that never compacted it is part of every reconstructed context, so it's regenerated from the harness's get_prompt.py — which may be newer than the run.</td></tr>
+  <tr><td class="flags"><span class="flag warn">edits lost</span></td>
+   <td>codex traces store only path + change-kind for each file edit; the edit contents were never saved and are unrecoverable.</td></tr>
+  <tr><td class="flags"><span class="flag warn">reasoning lost</span></td>
+   <td>codex: only reasoning summaries were saved — the replayable reasoning items lived in the rollout file, destroyed with the run's temp dir. opencode: the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely.</td></tr>
+  <tr><td class="flags"><span class="flag warn">effort not replicated</span></td>
+   <td>the original subscription-Claude runs passed --effort high; probes currently resume at the CLI's default effort.</td></tr>
+  <tr><td class="flags"><span class="meta">–</span></td>
+   <td>no per-run reconstruction issues detected at the end-of-run cut.</td></tr>
+  <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
+   <td>this scaffold's data or tooling doesn't allow rebuilding the context at all (hover the pill for the run-specific reason).</td></tr>
+ </tbody></table>
+ <p class="meta">Caveats that apply to <b>every</b> probe identically are not tagged per run: the probe runs on a local machine with a newer CLI (different system prompt, plus local tool/agent/skill listings attached to the probe turn), the resume CLI may inject bridging turns, and the original workspace/GPU/processes are absent. See each continuation page.</p>
+</details>
 </body></html>
 """.replace("__CSS__", CSS)
 
@@ -2895,13 +2915,20 @@ def _run_issues(t) -> list[dict]:
     f = _issue_facts(t.run_id)
     issues = []
     if f["restarts_visible"]:
+        if "reprompt" in (t.agent or ""):
+            detail = ("This agent's launch script has the reprompt loop: each restart "
+                      "re-launched the agent with the 'You still have Xh Ym remaining...' "
+                      "nudge (wording known; time values never recorded, estimated).")
+        else:
+            detail = ("What each restart delivered was never recorded, and post-restart "
+                      "replies suggest it was NOT a time nudge (claude: background-task "
+                      "notifications; qwen: API-error retries). Reconstruction currently "
+                      "inserts the reprompt-loop nudge template here — probably wrong "
+                      "content for this run.")
         issues.append({
             "tag": f"restarts ×{f['restarts_visible']}",
             "title": (f"the agent was restarted mid-run {f['restarts_visible']} time(s) "
-                      f"after the last compaction. The nudge prompt each restart got was "
-                      f"never recorded; reconstruction inserts the known template with an "
-                      f"estimated time-remaining value. (For non-reprompt agents the "
-                      f"restart mechanism itself is unverified.)")})
+                      f"after the last compaction. " + detail)})
     if t.scaffold in ("claude", "qwen3max") and f["n_compactions"] == 0:
         issues.append({
             "tag": "task prompt rebuilt",
