@@ -1094,7 +1094,7 @@ HACKS_HTML = """
    <td>(opencode) the stream stores no reasoning at all, so a thinking model's reasoning is absent entirely. Open question: if opencode never replayed reasoning mid-run, resumes are faithful anyway.</td></tr>
   <tr><td class="flags"><span class="issue open">nudge restarts ×N</span></td>
    <td>this agent's launch script (the <i>reprompt</i> agents) re-launched the agent with the known "You still have Xh Ym remaining…" nudge whenever it finished early. Wording known; exact time values recoverable from these runs' line timestamps (not yet wired into reconstruction).</td></tr>
-  <tr><td class="flags"><span class="issue open">bg-task restarts ×N</span></td>
+  <tr><td class="flags"><span class="issue open">background restarts ×N</span></td>
    <td>mechanism confirmed (2026-07-13): the run-era CLI waits for background tasks in headless mode and re-enters the session once per completed task, injecting an unstreamed &lt;task-notification&gt; user turn — every affected run's background launches match its re-entries (6/6, 5/6, 22/22). The format is known and reconstructable; reconstruction still inserts the old time-nudge template at these points, which is wrong content — replacement pending.</td></tr>
   <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
@@ -2951,7 +2951,7 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                      "nudge text (--turn end re-run fixes the ending, not the "
                      "mid-context inserts)." if probe is not None else "")
             issues.append({
-                "tag": f"bg-task restarts ×{f['restarts_visible']}", "cls": "open",
+                "tag": f"background restarts ×{f['restarts_visible']}", "cls": "open",
                 "title": (f"mechanism CONFIRMED (2026-07-13): the run-era CLI waits for "
                           f"background tasks and re-enters the session once per completed "
                           f"task, injecting a <task-notification> user turn that is never "

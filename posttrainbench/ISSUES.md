@@ -41,7 +41,7 @@ maximize performance."
 - **TODO (code, if codex ever becomes reconstructable):** wire timestamp-derived
   times into the reconstruction instead of estimates.
 
-### `bg-task restarts ×N` (4 runs: claude bfcl run1 ×6, opus-1M ×1 and ×5, qwen ×22)
+### `background restarts ×N` (4 runs: claude bfcl run1 ×6, opus-1M ×1 and ×5, qwen ×22)
 
 **MECHANISM CONFIRMED (2026-07-13, three-part repro + crosscheck):** the run-era
 CLI (tested: 2.1.76) **waits for background tasks in `-p` mode and re-enters the
@@ -272,9 +272,9 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 
 ## Open questions / actions, collected
 
-- [x] ~~what relaunched the non-reprompt agents~~ — RESOLVED 2026-07-13: the run-era CLI itself (background-task re-entry; see `bg-task restarts`). No Maksym needed.
+- [x] ~~what relaunched the non-reprompt agents~~ — RESOLVED 2026-07-13: the run-era CLI itself (background-task re-entry; see `background restarts`). No Maksym needed.
 - [ ] **Owen → Maksym:** one saved `prompt.txt` from any pre-April run (settles task-prompt drift completely)
-- [ ] **Owen:** decide the `bg-task restarts` reconstruction fix — insert reconstructed `<task-notification>` turns (exit-code assumption + task↔re-entry matching strategy need your sign-off)
+- [ ] **Owen:** decide the `background restarts` reconstruction fix — insert reconstructed `<task-notification>` turns (exit-code assumption + task↔re-entry matching strategy need your sign-off)
 - [x] ~~decide era-exact prompt regeneration~~ — DONE 2026-07-13 (`lib/prompts.py` era-matches; `prompt_era_matched` flag)
 - [ ] **Owen:** DashScope key if we want the qwen3max row resumable; opencode CLI + provider auth if we want the 8 opencode rows
 - [ ] **Test (exp approval, ~$0.05):** `exp_restart_repro.py` — background-task → re-entry hypothesis for claude restarts (also try `--cli` pinned to 2.1.76)
