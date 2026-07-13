@@ -2772,22 +2772,25 @@ _NAV = [
 def _subnav(active: str, window: str = "early") -> str:
     """Global navigator shown at the top of every page:
     (1) top-level tabs (trajectories / continuations / old),
-    (2) the active top-level tab's subtabs,
-    (3) window pills (petri-style) — ONLY under continuations, below the subtabs.
+    (2) window pills (petri-style) — ONLY under continuations, above the subtabs,
+    (3) the active top-level tab's subtabs.
     `active` names the active subtab; `window` names the active window pill.
     Under continuations the subtabs are scoped to the active window (its own
-    list + cost pages). cheating report / timing / rates only appear once the
+    list + cost pages; "EM questions" belongs to the context-reconstruction
+    window only). cheating report / timing / rates only appear once the
     cheating report has been generated (categories.json)."""
     has_report = (HIGHLIGHTS / "categories.json").exists()
     win_by_key = {k: (lst, cost) for k, _lbl, lst, cost in _WINDOWS}
 
     def subtabs_for(top: str) -> list[tuple[str, str]]:
         if top == "continuations":
-            # list + cost are scoped to the active window; "EM questions" is a
-            # window-independent reference page (candidate probe questions).
+            # list + cost are scoped to the active window; "EM questions" only
+            # exists under the context-reconstruction window.
             lst, cost = win_by_key.get(window, win_by_key[_DEFAULT_WINDOW])
-            return [("continuations", lst), ("cost", cost),
-                    ("EM questions", "/continuations/questions")]
+            subs = [("continuations", lst), ("cost", cost)]
+            if window == "crt":
+                subs.append(("EM questions", "/continuations/questions"))
+            return subs
         subs = dict(_NAV)[top]
         if top == "trajectories" and not has_report:
             subs = [(n, h) for n, h in subs if n == "trajectories"]
@@ -2814,16 +2817,19 @@ def _subnav(active: str, window: str = "early") -> str:
         cls = ' class="active"' if name == active else ""
         sub_parts.append(f'<a href="{href}"{cls}>{name}</a>')
 
-    rows = [f'<div class="toptabs">{"".join(top_parts)}</div>',
-            f'<div class="subnav">{"".join(sub_parts)}</div>']
+    rows = [f'<div class="toptabs">{"".join(top_parts)}</div>']
 
-    # Row 3: window pills — continuations only, below the subtabs.
+    # Row 2: window pills — continuations only, above the subtabs.
     if parent == "continuations":
         win_parts = []
         for key, label, lst, _cost in _WINDOWS:
             cls = ' class="active"' if key == window else ""
             win_parts.append(f'<a href="{lst}"{cls}>{label}</a>')
         rows.append(f'<div class="winnav">{"".join(win_parts)}</div>')
+
+    # Row 3: subtabs of the active top-level tab (window-scoped under
+    # continuations).
+    rows.append(f'<div class="subnav">{"".join(sub_parts)}</div>')
 
     return "".join(rows)
 
@@ -3078,7 +3084,7 @@ def _em_questions() -> dict | None:
 @app.route("/continuations/questions")
 def em_questions_page():
     return render_template_string(EM_QUESTIONS_HTML, data=_em_questions(),
-                                  subnav=_subnav("EM questions", window=""))
+                                  subnav=_subnav("EM questions", window="crt"))
 
 
 def _render_continuation(probe_id: str, pdir: Path, window: str,
