@@ -508,6 +508,18 @@ tr.isnew td { background: #eafaf0; }
             border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .subnav a.active { color: #1558d6; border-bottom-color: #1558d6; }
 .subnav a:hover { text-decoration: none; color: #1558d6; }
+/* EM question-ask pages (em_<sweep>.html) */
+.emjump { font-size: 12.5px; font-weight: 400; margin-left: 10px; }
+.emmeta { color: #555; font-size: 12.5px; margin: 2px 0 10px; }
+.emq { border: 1px solid #e3e5ec; border-radius: 8px; background: #fff;
+       padding: 10px 14px; margin: 10px 0; max-width: 900px; }
+.emqtext { font-size: 13px; color: #1a1a2e; font-weight: 600; margin-bottom: 6px;
+           white-space: pre-wrap; }
+.emask { margin: 4px 0; }
+.emask summary { cursor: pointer; font-size: 12.5px; color: #444; }
+.emanswer { white-space: pre-wrap; font-size: 12.5px; color: #333; line-height: 1.5;
+            padding: 8px 10px; margin: 6px 0 2px; background: #f7f8fc;
+            border: 1px solid #e3e5ec; border-radius: 6px; }
 /* continuations page: baseline-only (screening-candidate) boxes -- muted + tagged so they
    read as less important than the completed experiments (they're also held out of the
    visuals). */
@@ -1715,6 +1727,12 @@ def sweep_continuations_file(key: str) -> str:
     """The per-sweep continuations page (only written for sweeps that own continuation
     runs; linked from a button beside the sweep page's title)."""
     return f"continuations_{key}.html"
+
+
+def sweep_em_file(key: str) -> str:
+    """The per-sweep EM-questions page (only written for sweeps whose trajectories have
+    exp_ask_questions.py results; linked from the subnav's EM item)."""
+    return f"em_{key}.html"
 
 
 def is_old_trajectory(a: dict) -> bool:
@@ -5202,6 +5220,151 @@ def write_manifest(audits: list[dict], rollback_meta: list[dict]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# EM question asks (exp_ask_questions.py): each campaign dir under mats-local/
+# petri/<campaign>/id<N>__<cut>/ holds a results.json of question asks on a
+# resumed trajectory context. Rendered as a per-sweep "EM" subnav page (each
+# block under the sweep that owns its ORIGINAL trajectory, like continuations),
+# plus an answered-vs-no-answer cost split on that sweep's Cost visuals.
+# --------------------------------------------------------------------------- #
+EM_SWEEPS: set[str] = set()   # sweeps with EM ask data this build; gates the subnav item
+
+
+def load_em_blocks() -> list[dict]:
+    """One block per ask-run dir (<campaign>/id<N>__<cut>/results.json). Unreadable
+    files are skipped LOUDLY (console) so a half-written run can't silently vanish."""
+    blocks: list[dict] = []
+    for rj in sorted(DATA.glob("*/id*__*/results.json")):
+        try:
+            data = json.loads(rj.read_text())
+            summary, asks = data["summary"], data["asks"]
+            tid = int(summary["trajectory_id"])
+        except Exception as e:
+            print(f"  WARNING: unreadable ask results {rj} ({type(e).__name__}: {e}); skipped")
+            continue
+        blocks.append({"campaign": rj.parent.parent.name, "tid": tid,
+                       "summary": summary, "asks": asks})
+    return blocks
+
+
+def group_em_by_sweep(blocks: list[dict], originals_by_id: dict) -> dict[str, list[dict]]:
+    """sweep key -> its EM blocks, by each block's ORIGINAL trajectory (same ownership
+    rule as continuations). A block whose original is gone falls to the current sweep."""
+    out: dict[str, list[dict]] = {}
+    for b in blocks:
+        a = originals_by_id.get(b["tid"])
+        b["orig"] = a
+        out.setdefault(sweep_key(a) if a else CURRENT_SWEEP, []).append(b)
+    return out
+
+
+_EM_HEAD_RE = re.compile(r"^\[M(\d+)\] (\w+)", re.M)
+
+
+def _em_cut_anchor(a: dict | None, cut_turn) -> str | None:
+    """Transcript anchor (M<n>) of the original's cut_turn-th assistant message -- the
+    turn the ask's question+answer replaces -- so the EM page can jump straight to the
+    cut point of the original trajectory."""
+    if not a or not a.get("transcript") or not cut_turn:
+        return None
+    asst = [int(h.group(1)) for h in _EM_HEAD_RE.finditer(a["transcript"])
+            if h.group(2).lower().startswith("assistant")]
+    return f"M{asst[cut_turn - 1]}" if 1 <= cut_turn <= len(asst) else None
+
+
+def em_cost_data(blocks: list[dict]) -> dict | None:
+    """Answered-vs-no-answer ask costs for the Visuals Cost tab, pooled across every
+    question and trajectory of the sweep (per Owen 2026-07-13; split further later).
+    "Answered" = the response contained any text (the same mechanical rule
+    exp_ask_questions.py records); tool-call-only and errored asks are no-answer.
+    Asks without a recorded cost are EXCLUDED from the means and counted."""
+    answered: list[float] = []
+    no_answer: list[float] = []
+    n_unpriced = 0
+    any_est = False
+    for b in blocks:
+        for r in b["asks"]:
+            c = r.get("cost_usd")
+            if not isinstance(c, (int, float)):
+                n_unpriced += 1
+                continue
+            (answered if r.get("answer") is not None else no_answer).append(float(c))
+            if not str(r.get("cost_source") or "").startswith("exact"):
+                any_est = True
+    if not (answered or no_answer):
+        return None
+    return {"answered": answered, "no_answer": no_answer,
+            "n_unpriced": n_unpriced, "exact": not any_est}
+
+
+def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> str:
+    """One sweep's EM page (em_<key>.html): every ask campaign whose originals live on
+    this sweep, one block per (trajectory, cut) with a jump to the original's page at
+    the cut anchor and each question's per-sample answers (collapsed)."""
+    parts: list[str] = []
+    by_campaign: dict[str, list[dict]] = {}
+    for b in blocks:
+        by_campaign.setdefault(b["campaign"], []).append(b)
+    for camp, bs in sorted(by_campaign.items()):
+        parts.append(f"<h2>{esc(camp)}</h2>")
+        for b in sorted(bs, key=lambda x: (x["tid"], str(x["summary"].get("cut")))):
+            s, a = b["summary"], b["orig"]
+            link = ""
+            if a:
+                page = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
+                anchor = _em_cut_anchor(a, s.get("cut_turn"))
+                href = f"pages/{page}" + (f"#{anchor}" if anchor else "")
+                link = f' <a class="emjump" href="{href}">original at the cut &rarr;</a>'
+            model = pretty_model(a["target"]) if a else esc(str(s.get("target_model") or "?"))
+            n_asks = s.get("n_asks") or len(b["asks"])
+            n_no = s.get("n_no_answer") or 0
+            cost = s.get("total_cost_usd")
+            parts.append(
+                f'<h3>#{b["tid"]} &mdash; {model} &mdash; cut {esc(str(s.get("cut")))} '
+                f'(turn {s.get("cut_turn")} of {s.get("n_target_turns")}){link}</h3>'
+                f'<div class="emmeta">{n_asks} ask(s), {n_asks - n_no} answered'
+                + (f", ${cost:.4f} total" if isinstance(cost, (int, float)) else "")
+                + "</div>")
+            by_q: dict[str, list[dict]] = {}
+            for r in b["asks"]:
+                by_q.setdefault(r.get("question_id") or "?", []).append(r)
+            for qid, rs in by_q.items():
+                items = []
+                for r in sorted(rs, key=lambda r: r.get("sample_index") or 0):
+                    status = ("error" if r.get("error")
+                              else "no answer" if r.get("answer") is None else "answered")
+                    bits = [status]
+                    if r.get("n_tool_uses"):
+                        bits.append(f'{r["n_tool_uses"]} tool call(s)')
+                    c = r.get("cost_usd")
+                    if isinstance(c, (int, float)):
+                        bits.append(f"${c:.4f}")
+                    if r.get("duration_s"):
+                        bits.append(f'{r["duration_s"]:.0f}s')
+                    body = (esc(r["answer"]) if r.get("answer") is not None
+                            else esc(r["error"]) if r.get("error")
+                            else "(no text in the response; the raw output is in the "
+                                 "ask dir's response.json)")
+                    items.append(
+                        f'<details class="emask"><summary>s{r.get("sample_index")} '
+                        f'&mdash; {esc(", ".join(bits))}</summary>'
+                        f'<div class="emanswer">{body}</div></details>')
+                parts.append(f'<div class="emq"><div class="emqtext">{esc(qid)}: '
+                             f'{esc(rs[0].get("question") or "")}</div>{"".join(items)}</div>')
+    heading = f"EM questions — sweep {sweep_label(key)}"
+    body = f"""
+{topnav(key)}
+{subnav("EM", key, has_cont=has_cont)}
+{page_head(esc(heading))}
+{''.join(parts)}
+"""
+    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
+            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div></body></html>")
+    out_file = sweep_em_file(key)
+    (OUT / out_file).write_text(page)
+    return out_file
+
+
+# --------------------------------------------------------------------------- #
 # Top nav (one tab per sweep) + the rollback re-hacking analysis frame that
 # feeds the matplotlib figures on the Visuals pages (see viewer_visuals.py).
 # --------------------------------------------------------------------------- #
@@ -5218,11 +5381,15 @@ def topnav(active: str) -> str:
 def subnav(active: str, key: str, has_cont: bool) -> str:
     """Second nav row (below the sweep tabs): links to the current sweep's subpages so you
     can move among them from any one without a back button. `active` names this subpage
-    ("trajectories" | "continuations" | "visuals"); `key` is the sweep; `has_cont` gates
-    the continuations link (only sweeps that own continuation runs have that page)."""
+    ("trajectories" | "continuations" | "EM" | "visuals"); `key` is the sweep; `has_cont`
+    gates the continuations link (only sweeps that own continuation runs have that page).
+    The EM item is gated by EM_SWEEPS (filled by main before any page is written), so no
+    call site needs to thread the flag."""
     items = [("trajectories", sweep_file(key))]
     if has_cont:
         items.append(("continuations", sweep_continuations_file(key)))
+    if key in EM_SWEEPS:
+        items.append(("EM", sweep_em_file(key)))
     items.append(("visuals", sweep_visuals_file(key)))
     links = "".join(
         f'<a href="{href}"{ACTIVE_CLS if name == active else ""}>{name}</a>'
@@ -5376,6 +5543,20 @@ async def main() -> None:
         if key not in cont_files:
             (OUT / sweep_continuations_file(key)).unlink(missing_ok=True)
 
+    # EM question asks (exp_ask_questions.py results): per-sweep EM subnav page +
+    # answered-vs-no-answer cost split on that sweep's visuals. EM_SWEEPS must be
+    # filled BEFORE any page is written so every subnav shows the EM item.
+    em_by_sweep = group_em_by_sweep(load_em_blocks(), originals_by_id)
+    EM_SWEEPS.clear()
+    EM_SWEEPS.update(em_by_sweep)
+    for key, bs in em_by_sweep.items():
+        f = write_em_page(key, bs, has_cont=bool(cont_by_sweep.get(key)))
+        print(f"wrote {OUT / f} ({sum(len(b['asks']) for b in bs)} ask(s) over "
+              f"{len(bs)} trajectory dir(s))")
+    for key, _, _, _ in SWEEPS:
+        if key not in em_by_sweep:
+            (OUT / sweep_em_file(key)).unlink(missing_ok=True)
+
     write_index(audits, annotations, all_merged, all_missing, all_resample_merged,
                 cont_files)
     src = "annotated" if annotations else "no annotations.json (run exp_annotate_hacks.py for hack-turn nav)"
@@ -5449,6 +5630,7 @@ async def main() -> None:
         fmodes = None if bare else failure_modes_data(subset)
         deadline = None if bare else deadline_notices_data(subset)
         cost = None if bare else cost_data(subset, annotations)
+        em_cost = em_cost_data(em_by_sweep.get(key) or [])
         sub_html = subnav("visuals", key, has_cont=bool(conts))
         try:
             import viewer_visuals
@@ -5461,6 +5643,7 @@ async def main() -> None:
                 cost=cost, cost_by_auditor=(key == "auditors"),
                 cont_faithfulness_cost=cont_faith_cost,
                 cont_generation_cost=cont_gen_cost,
+                em_cost=em_cost,
                 heading=f"Visuals — {set_label}",
                 audit_label=f"Original audit trajectories · {set_label}",
                 subnav_html=sub_html)

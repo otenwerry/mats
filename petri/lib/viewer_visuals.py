@@ -1907,6 +1907,62 @@ def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str
     )
 
 
+# EM question asks (exp_ask_questions.py) — answered vs no-answer, on the Cost tab.
+# Suite blue for answered; the suite orange for no-answer (validated colorblind-safe
+# pair; identity is also carried by the x-tick labels, never color alone).
+EM_ANSWERED_C = "#4C72B0"
+EM_NOANSWER_C = "#DD8452"
+
+
+def fig_em_cost(em: dict) -> str:
+    """Mean cost of one ask, answered vs no answer, pooled over every question and
+    trajectory with ask data on this sweep. n = priced asks in each group."""
+    groups = [("Answered", em["answered"], EM_ANSWERED_C),
+              ("No answer", em["no_answer"], EM_NOANSWER_C)]
+    groups = [(lbl, vals, c) for lbl, vals, c in groups if vals]
+    if not groups:
+        return _empty_fig("no priced asks", (4.6, 4.0))
+    tilde = "" if em["exact"] else "~"
+    means = [float(np.mean(vals)) for _, vals, _ in groups]
+    fig, ax = plt.subplots(figsize=(4.8, 4.2))
+    xs = np.arange(len(groups))
+    ax.bar(xs, means, width=0.55, color=[c for *_, c in groups],
+           edgecolor="white", lw=0.4)
+    for x, m in zip(xs, means):
+        ax.annotate(f"{tilde}{_usd(m)}", (x, m), textcoords="offset points",
+                    xytext=(0, 4), ha="center", fontsize=10, color="#333",
+                    fontweight="bold")
+    ax.set_xticks(xs, [f"{lbl}\n(n={len(vals)})" for lbl, vals, _ in groups], fontsize=9)
+    ax.set_ylabel("Mean cost per ask ($)")
+    ax.set_ylim(0, max(means) * 1.20)
+    ax.set_title("EM ask cost — answered vs no answer")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _em_cost_section(em: dict | None) -> str:
+    """The 'EM question asks' block on the Cost tab (renders on any sweep whose
+    trajectories have exp_ask_questions.py results). Empty string when there is none."""
+    if not em:
+        return ""
+    tilde = "" if em["exact"] else "~"
+    n_a, n_n = len(em["answered"]), len(em["no_answer"])
+    total = sum(em["answered"]) + sum(em["no_answer"])
+    unpriced = (f' {em["n_unpriced"]} ask(s) had no recorded cost and are excluded.'
+                if em.get("n_unpriced") else "")
+    exact_note = ("" if em["exact"] else
+                  " <b>~</b> marks a price&times;token estimate; asks bill exactly once "
+                  "routed through OpenRouter.")
+    lead = (f'{tilde}<b>{_usd(total)}</b> across <b>{n_a + n_n}</b> priced asks '
+            f'({n_a} answered, {n_n} no answer), pooled over every question and '
+            f'trajectory. &ldquo;Answered&rdquo; = the response contained any text; '
+            f'tool-call-only and errored asks count as no answer.{exact_note}{unpriced}')
+    return ('<h2 style="margin-top:34px;">EM question asks</h2>'
+            f'<p class="vsub">{lead}</p>'
+            + _stack(fig_em_cost(em)))
+
+
 # --------------------------------------------------------------------------- #
 # page
 # --------------------------------------------------------------------------- #
@@ -2161,6 +2217,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        cost_by_auditor: bool = False,
                        cont_faithfulness_cost: dict | None = None,
                        cont_generation_cost: dict | None = None,
+                       em_cost: dict | None = None,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
                        subnav_html: str = "") -> str:
@@ -2230,6 +2287,8 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     # and (optional, off-by-default) faithfulness-judge sub-blocks -- both separate Anthropic
     # passes. The existing 'Cost' block above stays over the ORIGINAL audit trajectories only.
     cost_html += _cont_cost_section(cont_generation_cost, cont_faithfulness_cost)
+    # EM question-ask cost split (exp_ask_questions.py), on the same Cost tab
+    cost_html += _em_cost_section(em_cost)
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
     # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
