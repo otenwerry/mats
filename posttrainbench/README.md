@@ -16,7 +16,7 @@ Layout:
 - `lib/` — the reconstruction package (`runs`, `stream`, `recon_*`, `prompts`) plus the
   viewer's helpers (`render`, `paths`, `locate`).
 - `highlights/` — the stamped RH labels/verdicts the viewer + `runs.reward_hacks()` read.
-- Outputs (probes, reconstructions) still land in `mats-local/posttrainbench2/`
+- Outputs (probes, reconstructions) land in `mats-local/posttrainbench_outputs/`
   (`runs.OUT_ROOT`); the raw HF mirror stays at `mats-local/posttrainbench/`.
 
 Goal, in order:
@@ -82,12 +82,12 @@ verbatim (per message), and every downstream result inherits the worst flag of i
 
 - `reconstruct.py` (free): `--list` (the 30 RH trajectories), `--report` (parse + viewer
   alignment + cut check for all 30), `--trajectory <run_id> --turn <viewer event idx|first_hack>`
-  (build a bundle under `mats-local/posttrainbench2/reconstructions/`). `--turn` is a
+  (build a bundle under `mats-local/posttrainbench_outputs/reconstructions/`). `--turn` is a
   viewer event index; mid-message indices snap down to the message boundary (recorded),
   sidechain/user indices are refused with nearby valid alternatives.
 - `exp_probe_context.py` (paid): reconstructs, installs a native session, resumes via
   the scaffold CLI, and asks the model to describe its context. Outputs under
-  `mats-local/posttrainbench2/probes/`.
+  `mats-local/posttrainbench_outputs/probes/`.
 
 Status: all 30 RH trajectories parse and align with the viewer exactly (claude 1 line =
 1 event; opencode expansion rule; codex passthrough incl. item.updated/error lines).
@@ -110,5 +110,7 @@ Resume mechanics facts (Claude Code 2.1.181):
 
 Probe scope: claude runs supported; opencode needs the opencode CLI + provider auth;
 codex refused (lossy data: no rollout, no patch bodies, reasoning summaries only);
-qwen3max refused (needs the qwen CLI). Probes leave session files under
-`~/.claude/projects/-Users-owenterry-supermats-mats-local-posttrainbench2-probes-*`.
+qwen3max refused (needs the qwen CLI). Clean-config probes (the default) keep their
+session files inside the probe dir's `claude_config/`; only `--user-config` probes
+leave them under `~/.claude/projects/` (early probes did so under
+`...-mats-local-posttrainbench2-probes-*` — the outputs dir's pre-rename name).

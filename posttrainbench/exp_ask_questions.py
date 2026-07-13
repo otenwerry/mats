@@ -17,7 +17,7 @@ Question sets (--questions, required):
         the plain variants only (no _json system prompt, no _template).
 Add new sets to QUESTION_SETS below as experiments need them.
 
-Outputs land in mats-local/posttrainbench2/<campaign>/<run_id>__ev<N>/
+Outputs land in mats-local/posttrainbench_outputs/<campaign>/<run_id>__ev<N>/
 (campaign defaults to questions_<set>):
   results.md        every answer, grouped by question — for reading
   results.json      the same data, machine-readable — for later judging

@@ -24,7 +24,7 @@ differ, and the local CLI version may differ from the original run's.
 OpenCode runs need the opencode CLI + provider auth; codex and qwen3max are
 refused (see reconstruct.py --list for reasons).
 
-Outputs land in mats-local/posttrainbench2/probes/<run_id>__ev<N>/:
+Outputs land in mats-local/posttrainbench_outputs/probes/<run_id>__ev<N>/:
   probe_result.md   the model's answer + expected-context crib for verification
   probe_out.jsonl   raw stream from the resumed CLI
   fidelity.json     reconstruction flags + probe-environment flags

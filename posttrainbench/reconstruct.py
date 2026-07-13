@@ -15,7 +15,7 @@ resolved event; invalid positions are refused with nearby valid alternatives,
 and mid-message positions snap down to their message boundary (recorded in
 fidelity.json).
 
-Output bundle: mats-local/posttrainbench2/reconstructions/<run_id>__ev<N>/
+Output bundle: mats-local/posttrainbench_outputs/reconstructions/<run_id>__ev<N>/
   fidelity.json     flags + stats + provenance summary (ALWAYS read this)
   provenance.json   per-message source (verbatim vs synthesized), raw line map
   context.jsonl     claude/qwen3max: the message list (API format)

@@ -29,7 +29,7 @@ RAW = ROOT / "mats-local" / "posttrainbench"        # read-only HF mirror
 VIEWER = RAW / "viewer_data"
 HIGHLIGHTS = Path(__file__).resolve().parents[1] / "highlights"  # in-repo, beside this package
 PTB_REPO = ROOT / "references" / "PostTrainBench"   # read-only harness clone
-OUT_ROOT = ROOT / "mats-local" / "posttrainbench2"  # our outputs (probes/reconstructions)
+OUT_ROOT = ROOT / "mats-local" / "posttrainbench_outputs"  # our outputs (probes/reconstructions)
 
 
 def _scaffold(run_dir_name: str) -> str:

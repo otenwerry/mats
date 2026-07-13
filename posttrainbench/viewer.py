@@ -43,7 +43,7 @@ from flask import Flask, abort, render_template_string, request
 import locate
 import paths
 import render as rnd
-import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench2/probes)
+import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench_outputs/probes)
 from lib import recon_claude  # restart_assignments() for the issues column
 
 # all data/output locations come from the shared paths module (handles the
