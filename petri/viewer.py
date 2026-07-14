@@ -4426,6 +4426,25 @@ def _continuation_first_hack_cell(ann: dict | None, transcript: str) -> str:
     return f'A{a_rel} <span class="meta">(A{a_abs})</span>'
 
 
+def _continuation_user_turns_cell(ann: dict | None, transcript: str) -> str:
+    """'User turns before first hack' cell for a continuation row: counted within the NEW
+    task only (user-role heads from the pivot turn up to the first hack; the pivot user turn
+    that presents the new task counts, so 1 = only the task-start message — same reading as
+    the main page's column). Falls back to the whole-transcript count for the no-prefix
+    baseline (identical by construction) and when the first hack lands inside the replayed
+    prefix (mirroring _continuation_first_hack_cell's absolute fallback). Muted dash when
+    unannotated (delegates to user_turns_before_cell)."""
+    m = first_hack_m(ann)
+    if not isinstance(m, int):
+        return user_turns_before_cell(m, transcript)
+    pivot = _continuation_cut_m(transcript)
+    if not isinstance(pivot, int) or m < pivot:
+        return user_turns_before_cell(m, transcript)
+    n = sum(1 for h in MSG_HEAD.finditer(transcript)
+            if h.group(2).lower() == "user" and pivot <= int(h.group(1)) < m)
+    return str(n)
+
+
 def _continuation_timing(cont: dict, ann: dict | None) -> tuple[int | None, int]:
     """(first_hack_rel, n_new_asst) for a continuation, for the visuals hack-timing figures.
     first_hack_rel = the first annotated hack turn's assistant-turn index counted from the
@@ -4588,7 +4607,7 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
     run link, like the main page) shows the assistant-turn index of the run's first annotated
     hack turn, or a muted dash when the run isn't annotated (non-hacks, and any hack the turn-
     annotator hasn't been run on). A 'user turns before first hack' column follows it (counted
-    over the WHOLE transcript incl. any replayed prefix, same helper as the main page). A
+    within the NEW task only — see _continuation_user_turns_cell). A
     'tags' column (the same failure_modes_cell chips as the sweep index) follows whenever any
     run in this B section carries tag data. DEAD / CRASHED / COMPACTED badges match the sweep
     index rows. `conts` is [(continuation dict, entry)] for ONE B id."""
@@ -4661,7 +4680,7 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
 
             cells = "".join(_cell(d) for d in ordered)
             fh = _continuation_first_hack_cell(annotations.get(page), c["transcript"])
-            ut = user_turns_before_cell(first_hack_m(annotations.get(page)), c["transcript"])
+            ut = _continuation_user_turns_cell(annotations.get(page), c["transcript"])
             tags_cell = f"<td class='tagcol'>{failure_modes_cell(c)}</td>" if show_tags else ""
             disp = c.get("display_run", c["epoch"])
             rows.append(f"<tr data-id='{page}'><td><a href='pages/{page}'>run {disp}</a>{flag}</td>"
