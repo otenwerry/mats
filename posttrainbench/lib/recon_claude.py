@@ -36,7 +36,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import prompts
-from .runs import Trajectory
+from .runs import OUT_ROOT, Trajectory
 from .stream import CutPlan, Parsed, _claude_msg_id, _is_main
 
 
@@ -62,7 +62,7 @@ def _flag(code: str, detail: str, severity: str = "warn") -> dict:
     return {"code": code, "severity": severity, "detail": detail}
 
 
-_ASSIGNMENTS_PATH = Path(__file__).resolve().parents[1] / "restart_assignments.json"
+_ASSIGNMENTS_PATH = OUT_ROOT / "restart_assignments.json"  # our data, off github
 _assignments_cache: dict | None = None
 
 
