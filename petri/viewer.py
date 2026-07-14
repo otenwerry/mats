@@ -1985,14 +1985,15 @@ def _meta_status(a: dict) -> str:
     return f"{base} &middot; compacted &times;{n}" if n else base
 
 
-def metadata_section(a: dict) -> str:
+def metadata_section(a: dict, extra: str = "") -> str:
     """The collapsed 'Metadata' section at the top of a trajectory page. Holds everything
     that used to sit above the judge sections -- the judge scores grid and the failure-mode
     tags -- plus every run factor that can vary: the three models, seed condition, auditor
     turn cap (max_turns), target reasoning on/off, pinned-SP / cross-seed-family flags, cost,
-    peak context, and how the run ended. Collapsed by default (a page opens straight to the
-    judge summary + transcript); the collapsed bar previews the target + condition so pages
-    are still scannable without expanding."""
+    peak context, and how the run ended. `extra` appends further mblocks (the hack-turn
+    annotation note from write_trajectory_page). Collapsed by default (a page opens straight
+    to the judge summary + transcript); the collapsed bar previews the target + condition so
+    pages are still scannable without expanding."""
     def cell(label: str, value: str) -> str:
         return (f'<div class="metacell"><div class="k">{esc(label)}</div>'
                 f'<div class="v">{value}</div></div>') if value else ""
@@ -2046,7 +2047,7 @@ def metadata_section(a: dict) -> str:
     prev = " &middot; ".join(prev_parts)
     return (f'<details class="sec metadata"><summary><h2>Metadata</h2>'
             f'<span class="meta metaprev">{prev}</span></summary>'
-            f'<div class="metabody">{scores_block}{run_block}</div></details>')
+            f'<div class="metabody">{scores_block}{run_block}{extra}</div></details>')
 
 
 def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
@@ -2061,8 +2062,8 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
     layout is defined in exactly one place and every page type looks the same by default.
     Shared layout, top to bottom: page head + back button, loud DEAD/CRASHED banners,
     page-specific `banners` (rollback/resample/continuation info boxes, prefix caveats),
-    the hack-turn caveat (built here from `ann`), the collapsed Metadata box
-    (metadata_section: scores grid, tags, run config, cost, context, ending), the three
+    the collapsed Metadata box (metadata_section: scores grid, tags, run config, cost,
+    context, ending, plus the hack-turn annotation note built here from `ann`), the three
     collapsible-open judge sections (+ single-dimension justifications when present),
     `justif_extra` (auditor-faithfulness / deviation notes, after the justification box),
     then the transcript with the floating turn nav, optional jump-to-cut button, and
@@ -2070,8 +2071,8 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 
     Page-specific inputs: `ann` is the hack-turn annotation entry (annotations.json entry
     or rollback_results.json entry -- both carry hack_turns/tldr; turns are filtered to
-    Ms present in this transcript). `hack_scope` is extra caveat wording (e.g. " (in the
-    new task)"). `cut_m` marks the replay/live pivot in the transcript and, with
+    Ms present in this transcript). `hack_scope` is extra annotation-note wording (e.g.
+    " (in the new task)"). `cut_m` marks the replay/live pivot in the transcript and, with
     `cut_btn_label`, adds the floating jump-to-cut toggle. `scratchpad`/`auditor_calls`/
     `auditor_asides`/`msg_turns` pass straight to transcript_html (callers own any
     splicing, e.g. rollback prefix scratchpads). Returns # unlocated hack quotes."""
@@ -2098,7 +2099,11 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
                                          auditor_calls=auditor_calls,
                                          auditor_asides=auditor_asides,
                                          msg_turns=msg_turns)
-    hack_caveat = ""
+    # hack-turn annotation info lives INSIDE the collapsed Metadata box (Owen 2026-07-14:
+    # no loud banner at the top of the page; the turns themselves are already marked in
+    # the transcript and counted in the floating nav). Keeps the tl;dr and the
+    # unlocated-quote count (lossy quote matching stays surfaced, just not shouted).
+    hack_block = ""
     if hack_list:
         n_quotes = sum(len(hacks[m].get("quotes", [])) for m in hacks)
         miss = (f" {unmatched} of {n_quotes} quote(s) could not be auto-located and are "
@@ -2108,9 +2113,10 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
                else "the hack-turn annotator (secondary judge)")
         tldr = (ann or {}).get("tldr") or ""
         tldr_html = f" <b>tl;dr:</b> {linkify(tldr)}" if tldr else ""
-        hack_caveat = (
-            f'<div class="hackcaveat">&#9888; <b>{len(hack_list)} hack turn(s)</b> marked '
-            f'below{hack_scope} by {who} &mdash; interpretive, spot-check against the '
+        hack_block = (
+            f'<div class="mblock"><div class="mblock-h">Hack-turn annotation</div>'
+            f'<b>{len(hack_list)} hack turn(s)</b> marked in the transcript{hack_scope} by '
+            f'{who} &mdash; interpretive, spot-check against the '
             f'transcript.{miss}{tldr_html}</div>')
 
     head = page_head(title, head_btn(back_href, "&larr; back"))
@@ -2123,8 +2129,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {'<div class="hackcaveat">&#9888; <b>DEAD AUDIT</b> &mdash; the target produced no output (empty transcript), so the judge scored an empty conversation. These scores are <b>not real data</b> (likely a bad model slug or API error). Excluded from the propensity stats.</div>' if a.get('dead') else ''}
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {banners}
-{hack_caveat}
-{metadata_section(a)}
+{metadata_section(a, extra=hack_block)}
 
 <details class="sec" open><summary><h2>Judge summary</h2></summary>
 <div class="note">{linkify(a['summary'])}</div>
