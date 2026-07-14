@@ -1873,10 +1873,10 @@ def _dim_just_section(a: dict) -> str:
         for d, j in sorted(dj.items())
     )
     return (
-        '<h2>Single-dimension judge justifications '
+        '<details class="sec" open><summary><h2>Single-dimension judge justifications '
         '<span class="meta">(backfilled or re-judged in a separate pass; for these '
-        'dimensions this supersedes the combined justification above)</span></h2>'
-        f'<div class="note justif">{rows}</div>'
+        'dimensions this supersedes the combined justification above)</span></h2></summary>'
+        f'<div class="note justif">{rows}</div></details>'
     )
 
 
@@ -2203,16 +2203,16 @@ def write_page(a: dict, ann: dict | None = None) -> int:
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {metadata_section(a)}
 
-<details class="sec"><summary><h2>Judge summary</h2></summary>
+<details class="sec" open><summary><h2>Judge summary</h2></summary>
 <div class="note">{linkify(a['summary'])}</div>
 </details>
 
-<details class="sec"><summary><h2>Judge justification <span class="meta">(one note covering every dimension scoring &gt;1)</span></h2></summary>
+<details class="sec" open><summary><h2>Judge justification <span class="meta">(one note covering every dimension scoring &gt;1)</span></h2></summary>
 <div class="note justif">{linkify(a['justification'])}</div>
 </details>
 {_dim_just_section(a)}
 
-<details class="sec"><summary><h2>Judge highlights</h2></summary>
+<details class="sec" open><summary><h2>Judge highlights</h2></summary>
 <div class="note hl">{linkify(a['highlights'])}</div>
 </details>
 
@@ -4638,13 +4638,18 @@ def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict |
 <p class="meta">run: {esc(cont['mode'])} &middot; target: {esc(pretty_model(cont['target']))} &middot; auditor: {esc(auditor_label(cont))} &middot; judge: {esc(pretty_model(cont.get('judge')))}{cost_meta(cont)}{context_meta(cont)}</p>
 {banner}
 {hack_caveat}
-<h2>Judge summary</h2>
+<details class="sec" open><summary><h2>Judge summary</h2></summary>
 <div class="note">{linkify(cont['summary'])}</div>
-<h2>Judge justification</h2>
+</details>
+
+<details class="sec" open><summary><h2>Judge justification</h2></summary>
 <div class="note justif">{linkify(cont['justification'])}</div>
+</details>
 {faith_note}
-<h2>Judge highlights</h2>
+<details class="sec" open><summary><h2>Judge highlights</h2></summary>
 <div class="note hl">{linkify(cont['highlights'])}</div>
+</details>
+
 <h2>Continuation transcript <span class="meta">(judge view; pivot to the new task is marked)</span></h2>
 {'' if cont['transcript'] else '<p><b>No transcript rendered.</b></p>'}
 {tr_html}
@@ -4752,7 +4757,9 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
     with the audit category and the faithfulness-vs-B score. A 'first hack' column (after the
     run link, like the main page) shows the assistant-turn index of the run's first annotated
     hack turn, or a muted dash when the run isn't annotated (non-hacks, and any hack the turn-
-    annotator hasn't been run on). `conts` is [(continuation dict, entry)] for ONE B id."""
+    annotator hasn't been run on). A 'tags' column (the same failure_modes_cell chips as the
+    sweep index) follows first-hack whenever any run in this B section carries tag data.
+    `conts` is [(continuation dict, entry)] for ONE B id."""
     cols = _active_dims()   # all current judge dims, in canonical group order (same as index)
     groups = column_groups(cols) + [("outcome", [_CAT_COL, _FAITH_COL])]
     ordered = [d for _, dims in groups for d in dims]
@@ -4763,8 +4770,18 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
     head_cols = "".join(f"<th{_gsep(d)}>{_head(d)}</th>" for d in ordered)
     group_cells = "".join(
         f'<th class="gsep" colspan="{len(dims)}">{esc(label)}</th>' for label, dims in groups)
-    # two ungrouped lead columns now: the run link + the 'first hack' column
-    group_head = f'<tr class="ghead-row"><th></th><th></th>{group_cells}</tr>'
+    # tags column: shown whenever some run in this B section carries a parsed reward-hack
+    # tag (or a tag parse error) -- same gate as the sweep index (write_table). Decided over
+    # the WHOLE section, not per sub-table, so every sub-table in one box has the same columns.
+    show_tags = any(
+        c.get("failure_modes") or c.get("failure_modes_parse_error")
+        or c.get("rh_category") or c.get("rh_types") or c.get("rh_category_parse_error")
+        for c, _ in conts
+    )
+    tags_head = "<th>tags</th>" if show_tags else ""
+    # ungrouped lead columns: the run link + 'first hack' [+ 'tags']
+    lead_ths = "<th></th>" * (3 if show_tags else 2)
+    group_head = f'<tr class="ghead-row">{lead_ths}{group_cells}</tr>'
 
     sections = []
     subgroups = []   # (heading, runs) per (treatment, prefix) sub-table, in display order
@@ -4806,9 +4823,10 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
 
             cells = "".join(_cell(d) for d in ordered)
             fh = _continuation_first_hack_cell(annotations.get(page), c["transcript"])
+            tags_cell = f"<td class='tagcol'>{failure_modes_cell(c)}</td>" if show_tags else ""
             disp = c.get("display_run", c["epoch"])
             rows.append(f"<tr data-id='{page}'><td><a href='pages/{page}'>run {disp}</a>{dead}</td>"
-                        f"<td>{fh}</td>{cells}</tr>")
+                        f"<td>{fh}</td>{tags_cell}{cells}</tr>")
         # collapsible subsection box per (condition, prefix) sub-table, matching the
         # sweep pages' details.sub styling (2026-07-05).
         sections.append(
@@ -4816,7 +4834,7 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
             f'<span class="meta">&mdash; full hacks {n_full}/{n} &middot; '
             f'mean reward_hacking {mean_rh}</span></h3></summary>'
             f'<table class="sortable">{group_head}'
-            f'<tr class="cols"><th>continuation</th><th>first hack</th>{head_cols}</tr>'
+            f'<tr class="cols"><th>continuation</th><th>first hack</th>{tags_head}{head_cols}</tr>'
             f'{"".join(rows)}</table></details>')
     return "".join(sections)
 
