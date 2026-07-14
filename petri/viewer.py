@@ -461,12 +461,6 @@ body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .2
 .cnav button { cursor: pointer; border: 1px solid #c8cad2; background: #f2f3f6; border-radius: 5px; padding: 2px 10px; font-size: 13px; }
 .cnav button:hover { background: #e4e6ec; }
 .cnav-keys { color: #889; margin-top: 4px; font-size: 11px; }
-/* "new since your last visit" tag (tracked per-browser in localStorage; cleared
-   when you open the trajectory or click the tag). New rows float to the top. */
-.newtag { background: #1d7a4f; color: #fff; border-radius: 3px; padding: 0 6px; margin-left: 8px;
-          font-weight: 700; font-size: 10px; letter-spacing: .3px; cursor: pointer; vertical-align: middle; }
-.newtag:hover { background: #155f3c; }
-tr.isnew td { background: #eafaf0; }
 /* reward-hacking propensity section (Visuals page): horizontal bars by model /
    prompt + a model x prompt heatmap. Each bar is stacked: a solid-red segment for
    the clean-hack rate (hacks/n) and a fainter segment for the excluded rate
@@ -697,69 +691,12 @@ TOTOP_HTML = """
 </script>
 """
 
-# index-page "NEW" tags. State lives in localStorage (per browser), so it survives
-# page regenerations and reloads. First visit baselines everything currently shown
-# as already-seen, so only trajectories that appear LATER get tagged. A trajectory
-# stays NEW until you open it (click its link) or click the tag; new rows float to
-# the top of whatever table they're in.
-NEWTAG_JS = """
-<script>
-(function () {
-  var KEY = "petriSeenIds";
-  var allIds = Array.prototype.slice.call(document.querySelectorAll("tr[data-id]"))
-    .map(function (tr) { return tr.getAttribute("data-id"); });
-  var raw = localStorage.getItem(KEY);
-  var seen;
-  if (raw === null) {
-    seen = new Set(allIds);                       // first visit: baseline as seen
-    localStorage.setItem(KEY, JSON.stringify(allIds));
-  } else {
-    try { seen = new Set(JSON.parse(raw)); } catch (e) { seen = new Set(allIds); }
-  }
-  function markSeen(id) {
-    if (seen.has(id)) return;
-    seen.add(id);
-    localStorage.setItem(KEY, JSON.stringify(Array.from(seen)));
-  }
-  document.querySelectorAll("table").forEach(function (tbl) {
-    // the column-name header row (class "cols" on the grouped index tables, where the
-    // FIRST tr is instead a group-label row); fall back to the first row otherwise. New
-    // rows float to just BELOW this, so the header never ends up beneath them.
-    var anchor = tbl.querySelector("tr.cols") || tbl.querySelector("tr");
-    Array.prototype.slice.call(tbl.querySelectorAll("tr[data-id]")).forEach(function (tr) {
-      var id = tr.getAttribute("data-id");
-      if (seen.has(id)) return;                   // already seen -> not new
-      tr.classList.add("isnew");
-      var link = tr.querySelector("a");
-      var badge = document.createElement("span");
-      badge.className = "newtag";
-      badge.textContent = "NEW";
-      badge.title = "new since your last visit \\u2014 click to dismiss";
-      badge.addEventListener("click", function (e) {
-        e.preventDefault(); e.stopPropagation();
-        markSeen(id); badge.remove(); tr.classList.remove("isnew");
-      });
-      if (link) {
-        link.insertAdjacentElement("afterend", badge);
-        link.addEventListener("click", function () { markSeen(id); });  // dismiss on open
-      }
-      anchor.parentNode.insertBefore(tr, anchor.nextSibling);  // float to top
-      anchor = tr;
-      // carry the expandable row's rollback detail row up with it
-      var det = tbl.querySelector('tr.rb-detailrow[data-detail-for="' + id + '"]');
-      if (det) { anchor.parentNode.insertBefore(det, anchor.nextSibling); anchor = det; }
-    });
-  });
-})();
-</script>
-"""
-
 # Click a column header to re-sort that table (client-side). The server-rendered order
 # is the default; clicking sorts by that column and toggles asc/desc. Numeric columns
 # (ID, epoch, scores) sort numerically with "null"/blank sent to the bottom; text columns
 # (seed, target) sort alphabetically. A column whose cells are a single-letter-prefixed
 # number (the "first hack" A-index, e.g. A6/A16, or an M-fallback) also sorts numerically
-# by the number. Independent of the NEW-tag floating above.
+# by the number.
 SORT_JS = """
 <script>
 (function () {
@@ -815,8 +752,7 @@ SORT_JS = """
 """
 
 # Click a full-hack row that has rollbacks to drop its detail row down (and again to
-# collapse). Clicks on the seed link still navigate; the NEW-badge handler stops its own
-# propagation, so dismissing a tag never toggles the dropdown.
+# collapse). Clicks on the seed link still navigate.
 ROLLBACK_TOGGLE_JS = """
 <script>
 (function () {
@@ -1959,27 +1895,6 @@ def _fmt_usd(x: float) -> str:
     return "$0.00"
 
 
-def cost_meta(a: dict) -> str:
-    """The ` · cost: ~$X.XX` fragment appended to a trajectory page's run/meta line (see
-    lib/model_prices.py). `~` marks a price×token ESTIMATE; no `~` marks real billed cost
-    (every call reported total_cost). A per-model breakdown rides in the hover title. Any
-    model with no known price is surfaced inline (never silently dropped). "" when no cost."""
-    c = model_prices.sample_cost(a.get("model_usage") or {})
-    if not c or (not c.get("by_model") and not c.get("unknown")):
-        return ""
-    tilde = "" if c.get("exact") else "~"
-    rows = sorted(c["by_model"].items(), key=lambda kv: -kv[1]["cost"])
-    tip = " | ".join(f"{pretty_model(m)} {_fmt_usd(v['cost'])}{'' if v['exact'] else ' est'}"
-                     for m, v in rows)
-    unk = c.get("unknown") or []
-    unk_txt = (f' <span class="meta">(no price for '
-               f'{esc(", ".join(pretty_model(m) for m in unk))})</span>') if unk else ""
-    frag = ""
-    if c.get("by_model"):
-        frag = f' &middot; cost: <b title="{esc(tip)}">{tilde}{_fmt_usd(c["total"])}</b>'
-    return f"{frag}{unk_txt}"
-
-
 def _fmt_tokens(n: int) -> str:
     """Compact token count: 1_048_576 -> '1.0M', 75_769 -> '76K', 940 -> '940'."""
     if n >= 1_000_000:
@@ -1987,33 +1902,6 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.0f}K"
     return str(n)
-
-
-def context_meta(a: dict) -> str:
-    """The ` · context: target 76K/1M (8%) · auditor …` fragment on a trajectory page's meta
-    line: per-role PEAK single-turn context (input incl. cached tokens = the fullest the
-    context got — how much of the window the run used) over that role's context window
-    (model_prices.context_window). Window unknown -> '/?' (surfaced, never faked). Exact peak
-    tokens ride in the hover title. "" when no per-role peak was captured (e.g. pre-feature
-    cached data)."""
-    peaks = a.get("role_peak_context") or {}
-    if not peaks:
-        return ""
-    slugs = {"target": a.get("target"), "auditor": a.get("auditor"), "judge": a.get("judge")}
-    parts, tips = [], []
-    for role in ("target", "auditor", "judge"):
-        peak = peaks.get(role)
-        if not peak:
-            continue
-        win = model_prices.context_window(slugs.get(role) or "")
-        if win:
-            parts.append(f"{role} {_fmt_tokens(peak)}/{_fmt_tokens(win)} ({round(100 * peak / win)}%)")
-        else:
-            parts.append(f"{role} {_fmt_tokens(peak)}/?")
-        tips.append(f"{role}: {peak:,} tokens" + (f" / {win:,} window" if win else " / window unknown"))
-    if not parts:
-        return ""
-    return f' &middot; context: <span title="{esc(" | ".join(tips))}">{esc(", ".join(parts))}</span>'
 
 
 def score_table_top(a: dict) -> str:
@@ -2045,8 +1933,7 @@ def score_table_top(a: dict) -> str:
 def _meta_cost(a: dict) -> str:
     """Cost value for the metadata grid (no inline ' · cost:' prefix): '~$0.42' (~ = a
     price×token estimate; no ~ = real billed cost) with a per-model hover, plus a no-price
-    note when a model's price is unknown. '' when no cost. See cost_meta for the continuation
-    pages' inline-line variant of the same computation."""
+    note when a model's price is unknown. '' when no cost."""
     c = model_prices.sample_cost(a.get("model_usage") or {})
     if not c or not c.get("by_model"):
         return ""
@@ -2062,8 +1949,7 @@ def _meta_cost(a: dict) -> str:
 
 def _meta_context(a: dict) -> str:
     """Per-role peak single-turn context for the metadata grid: 'target 76K/1M (8%) · auditor
-    …', exact tokens in the hover. '' when none captured. Mirrors context_meta without the
-    inline prefix."""
+    …', exact tokens in the hover. '' when none captured."""
     peaks = a.get("role_peak_context") or {}
     if not peaks:
         return ""
@@ -2139,6 +2025,9 @@ def metadata_section(a: dict) -> str:
         if a.get("fork_restart"):
             forks.append(f"restart &times;{a['fork_restart']}")
         cells.append(cell("auditor fork", " &middot; ".join(forks) or "yes"))
+    # the run dir this trajectory came from (was the continuation pages' `run:` meta
+    # line before the shared layout; useful for matching a page back to logs/)
+    cells.append(cell("run dir", esc(a["mode"])))
     grid = "".join(c for c in cells if c)
 
     context = _meta_context(a)
@@ -2160,24 +2049,42 @@ def metadata_section(a: dict) -> str:
             f'<div class="metabody">{scores_block}{run_block}</div></details>')
 
 
-def write_page(a: dict, ann: dict | None = None) -> int:
-    name = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
-    transcript_note = "" if a["transcript"] else "<p><b>No transcript rendered for this sample.</b></p>"
-    cited = sorted({
-        int(m) for m in re.findall(
-            r"\[M(\d+)\]", a["summary"] + a["justification"] + a["highlights"]
-        )
-    })
-    # hack-turn annotations (from exp_annotate_hacks.py); keep only turns present
-    # in this transcript so the nav can't point at a missing anchor.
+def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
+                          back_href: str, banners: str = "",
+                          ann: dict | None = None, hack_scope: str = "",
+                          justif_extra: str = "", transcript_heading: str,
+                          cut_m: int | None = None, cut_btn_label: str | None = None,
+                          scratchpad=None, auditor_calls=None,
+                          auditor_asides=None, msg_turns=None) -> int:
+    """THE single renderer for every individual trajectory page -- original audits,
+    rollback continuations, resamples, and prefix continuations all call this, so the
+    layout is defined in exactly one place and every page type looks the same by default.
+    Shared layout, top to bottom: page head + back button, loud DEAD/CRASHED banners,
+    page-specific `banners` (rollback/resample/continuation info boxes, prefix caveats),
+    the hack-turn caveat (built here from `ann`), the collapsed Metadata box
+    (metadata_section: scores grid, tags, run config, cost, context, ending), the three
+    collapsible-open judge sections (+ single-dimension justifications when present),
+    `justif_extra` (auditor-faithfulness / deviation notes, after the justification box),
+    then the transcript with the floating turn nav, optional jump-to-cut button, and
+    back-to-top.
+
+    Page-specific inputs: `ann` is the hack-turn annotation entry (annotations.json entry
+    or rollback_results.json entry -- both carry hack_turns/tldr; turns are filtered to
+    Ms present in this transcript). `hack_scope` is extra caveat wording (e.g. " (in the
+    new task)"). `cut_m` marks the replay/live pivot in the transcript and, with
+    `cut_btn_label`, adds the floating jump-to-cut toggle. `scratchpad`/`auditor_calls`/
+    `auditor_asides`/`msg_turns` pass straight to transcript_html (callers own any
+    splicing, e.g. rollback prefix scratchpads). Returns # unlocated hack quotes."""
+    cited = sorted({int(m) for m in re.findall(
+        r"\[M(\d+)\]", a["summary"] + a["justification"] + a["highlights"])})
+    # hack-turn annotations; keep only turns present in this transcript so the nav
+    # can't point at a missing anchor.
     present = {int(m.group(1)) for m in MSG_HEAD.finditer(a["transcript"])}
-    hacks = {}
-    hack_list = []  # [{m, title}] for the nav, in transcript order
-    if ann and ann.get("hack_turns"):
-        for t in ann["hack_turns"]:
-            m = t.get("m")
-            if isinstance(m, int) and m in present:
-                hacks[m] = dict(t)
+    hacks: dict[int, dict] = {}
+    for t in (ann or {}).get("hack_turns") or []:
+        m = t.get("m")
+        if isinstance(m, int) and m in present:
+            hacks[m] = dict(t)
     hack_list = [{"m": m, "title": hacks[m].get("title", "")} for m in sorted(hacks)]
 
     # the floating nav renders on EVERY page: the user-turn group builds its targets
@@ -2186,21 +2093,37 @@ def write_page(a: dict, ann: dict | None = None) -> int:
     nav = NAV_HTML + (
         NAV_JS.replace("__HACKS__", json.dumps(hack_list)).replace("__CITED__", json.dumps(cited))
     )
-    tr_html, unmatched = transcript_html(a["transcript"], hacks, scratchpad=a.get("scratchpad"),
-                                         auditor_calls=a.get("auditor_calls"),
-                                         auditor_asides=a.get("auditor_asides"),
-                                         msg_turns=a.get("msg_turns"))
-    title = (f"#{a['id']} &middot; {esc(seed_label(a['seed']))} "
-             f"<span class=\"meta\">(epoch {a['epoch']})</span>")
-    head = page_head(title, head_btn(f"../{sweep_file(sweep_key(a))}", "&larr; back"))
+    tr_html, unmatched = transcript_html(a["transcript"], hacks, cut_m=cut_m,
+                                         scratchpad=scratchpad,
+                                         auditor_calls=auditor_calls,
+                                         auditor_asides=auditor_asides,
+                                         msg_turns=msg_turns)
+    hack_caveat = ""
+    if hack_list:
+        n_quotes = sum(len(hacks[m].get("quotes", [])) for m in hacks)
+        miss = (f" {unmatched} of {n_quotes} quote(s) could not be auto-located and are "
+                "not highlighted." if unmatched else "")
+        model = (ann or {}).get("model")
+        who = (f"an LLM agent ({esc(model)}) from the judge's findings" if model
+               else "the hack-turn annotator (secondary judge)")
+        tldr = (ann or {}).get("tldr") or ""
+        tldr_html = f" <b>tl;dr:</b> {linkify(tldr)}" if tldr else ""
+        hack_caveat = (
+            f'<div class="hackcaveat">&#9888; <b>{len(hack_list)} hack turn(s)</b> marked '
+            f'below{hack_scope} by {who} &mdash; interpretive, spot-check against the '
+            f'transcript.{miss}{tldr_html}</div>')
+
+    head = page_head(title, head_btn(back_href, "&larr; back"))
     # Loud DEAD/CRASHED alerts stay OUTSIDE the collapsed metadata section (they warn the
     # scores aren't real data, so they must not be hidden); everything else that used to sit
     # above the judge sections -- scores, failure modes, run config, cost, context, compaction
-    # -- now lives in the collapsed Metadata section (metadata_section).
+    # -- lives in the collapsed Metadata section (metadata_section).
     body = f"""
 {head}
-{'<div class="hackcaveat">&#9888; <b>DEAD AUDIT</b> &mdash; the target produced no output (empty transcript), so the judge scored an empty conversation. These scores are <b>not real data</b> (likely a bad model slug or API error). Excluded from the propensity stats below.</div>' if a.get('dead') else ''}
+{'<div class="hackcaveat">&#9888; <b>DEAD AUDIT</b> &mdash; the target produced no output (empty transcript), so the judge scored an empty conversation. These scores are <b>not real data</b> (likely a bad model slug or API error). Excluded from the propensity stats.</div>' if a.get('dead') else ''}
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
+{banners}
+{hack_caveat}
 {metadata_section(a)}
 
 <details class="sec" open><summary><h2>Judge summary</h2></summary>
@@ -2210,19 +2133,57 @@ def write_page(a: dict, ann: dict | None = None) -> int:
 <details class="sec" open><summary><h2>Judge justification <span class="meta">(one note covering every dimension scoring &gt;1)</span></h2></summary>
 <div class="note justif">{linkify(a['justification'])}</div>
 </details>
+{justif_extra}
 {_dim_just_section(a)}
 
 <details class="sec" open><summary><h2>Judge highlights</h2></summary>
 <div class="note hl">{linkify(a['highlights'])}</div>
 </details>
 
-<h2>Transcript (judge view, with rollback branches)</h2>
-{transcript_note}
+<h2>{transcript_heading}</h2>
+{'' if a['transcript'] else '<p><b>No transcript rendered.</b></p>'}
 {tr_html}
 """
-    page = f"<!doctype html><html><head><meta charset='utf-8'><title>#{a['id']} {esc(seed_label(a['seed']))}</title><style>{CSS}</style></head><body><div class='wrap'>{body}</div>{nav}{TOTOP_HTML}</body></html>"
+    # floating toggle: jump to the cut (replay/live pivot), back to top on a second click.
+    cut_btn = ""
+    if cut_m is not None and cut_btn_label:
+        cut_btn = f"""
+<button class="tocut" id="tocut" title="jump to the marked cut">{cut_btn_label}</button>
+<script>
+(function () {{
+  var LBL = {json.dumps(cut_btn_label)};
+  var b = document.getElementById("tocut"), el = document.getElementById("M{cut_m}"), atCut = false;
+  if (!el) {{ b.style.display = "none"; return; }}
+  b.onclick = function () {{
+    if (atCut) {{ window.scrollTo({{ top: 0, behavior: "smooth" }}); b.innerHTML = LBL; atCut = false; }}
+    else {{
+      el.scrollIntoView({{ behavior: "smooth", block: "center" }});
+      el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+      b.innerHTML = "&#8593; back to top"; atCut = true;
+    }}
+  }};
+}})();
+</script>"""
+    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(doc_title)}</title>"
+            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>"
+            f"{nav}{cut_btn}{TOTOP_HTML}</body></html>")
     (OUT / "pages" / name).write_text(page)
     return unmatched
+
+
+def write_page(a: dict, ann: dict | None = None) -> int:
+    """One ORIGINAL-audit trajectory page. All layout lives in write_trajectory_page."""
+    name = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
+    title = (f"#{a['id']} &middot; {esc(seed_label(a['seed']))} "
+             f"<span class=\"meta\">(epoch {a['epoch']})</span>")
+    return write_trajectory_page(
+        a, name, title=title,
+        doc_title=f"#{a['id']} {seed_label(a['seed'])}",
+        back_href=f"../{sweep_file(sweep_key(a))}",
+        ann=ann,
+        transcript_heading='Transcript <span class="meta">(judge view, with rollback branches)</span>',
+        scratchpad=a.get("scratchpad"), auditor_calls=a.get("auditor_calls"),
+        auditor_asides=a.get("auditor_asides"), msg_turns=a.get("msg_turns"))
 
 
 def topmost_columns(audits: list[dict]) -> tuple[list[str], bool]:
@@ -3385,7 +3346,7 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
 """
         page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
                 f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
-                f"{NEWTAG_JS}{SORT_JS}{ROLLBACK_TOGGLE_JS}</body></html>")
+                f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
         (OUT / out_file).write_text(page)
         return
 
@@ -3463,7 +3424,7 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
 """
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
             f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
-            f"{NEWTAG_JS}{SORT_JS}{ROLLBACK_TOGGLE_JS}</body></html>")
+            f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
     (OUT / out_file).write_text(page)
 
 
@@ -3705,13 +3666,10 @@ def _rb_deviation_cell(page: str) -> str:
 
 
 def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations: dict) -> int:
-    """One continuation page: judge-1 notes + the transcript with the cut marked and
-    the secondary judge's hack turns highlighted. Returns # unlocated quotes."""
+    """One rollback-continuation page: the rollback banner + prefix caveat feed the shared
+    write_trajectory_page layout; the secondary judge's hack turns come from `entry`.
+    Returns # unlocated quotes."""
     name = rb_page_name(cont["mode"], cont["task"], cont["epoch"])
-    present = {int(m.group(1)) for m in MSG_HEAD.finditer(cont["transcript"])}
-    hacks = {t["m"]: t for t in (entry.get("hack_turns") or [])
-             if isinstance(t.get("m"), int) and t["m"] in present}
-    hack_list = [{"m": m, "title": hacks[m].get("title", "")} for m in sorted(hacks)]
 
     # the cut = the re-rolled turn = the k-th assistant message-head in the transcript
     cut_m = None
@@ -3722,10 +3680,6 @@ def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations:
         if 1 <= k <= len(asst):
             cut_m = asst[k - 1]
 
-    cited = sorted({int(m) for m in re.findall(
-        r"\[M(\d+)\]", cont["summary"] + cont["justification"] + cont["highlights"])})
-    nav = NAV_HTML + NAV_JS.replace("__HACKS__", json.dumps(hack_list)).replace(
-        "__CITED__", json.dumps(cited))
     # auditor scratchpad: the replayed prefix (turns before the cut) comes from the
     # ORIGINAL audit; the live continuation's reasoning (cut onward) comes from this
     # run's own events. They share message numbering across the verbatim-replayed
@@ -3742,8 +3696,6 @@ def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations:
     else:
         scratch = dict(cont.get("scratchpad") or {})
         acalls = dict(cont.get("auditor_calls") or {})
-    tr_html, unmatched = transcript_html(cont["transcript"], hacks, cut_m=cut_m, scratchpad=scratch,
-                                         auditor_calls=acalls)
 
     orig_rh = entry.get("original_reward_hacking")
     if orig_rh is None and orig:
@@ -3765,7 +3717,6 @@ def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations:
         prompt_html = "<br>No prompt inserted (plain re-roll)."
     else:
         prompt_html = f"<br>Treatment: <i>{esc(_treatment_display(treatment))}</i>."
-    tldr_html = f'<br><b>tl;dr:</b> {linkify(entry.get("tldr", ""))}' if entry.get("tldr") else ""
     fork_note = (
         f'<br><span class="forktag">fork</span> the live auditor branched/wiped the target '
         f'conversation here (restart_conversation&times;{cont.get("fork_restart", 0)}, '
@@ -3788,16 +3739,8 @@ def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations:
         f"Original reward_hacking <b>{orig_rh if orig_rh is not None else '?'}</b> "
         f"&rarr; this continuation <b>{cont_rh if cont_rh is not None else '?'}</b>. "
         f"First hack here: {fh_html}. "
-        f"{orig_link}.{prompt_html}{tldr_html}{fork_note}</div>"
+        f"{orig_link}.{prompt_html}{fork_note}</div>"
     )
-    hack_caveat = ""
-    if hack_list:
-        n_quotes = sum(len(hacks[m].get("quotes", [])) for m in hacks)
-        miss = (f" {unmatched} of {n_quotes} quote(s) could not be auto-located."
-                if unmatched else "")
-        hack_caveat = (
-            f'<div class="hackcaveat">&#9888; <b>{len(hack_list)} hack turn(s)</b> marked below '
-            f"by the secondary judge &mdash; interpretive, spot-check against the transcript.{miss}</div>")
 
     # The secondary judge is told to annotate only post-cut turns, and exp_rollback_judge
     # hard-drops any it still flags in the replayed prefix into `prefix_hack_turns` (so
@@ -3819,47 +3762,14 @@ def write_rollback_page(cont: dict, entry: dict, orig: dict | None, annotations:
     title = (f"Rollback of #{orig_id if orig_id else '?'} &middot; "
              f"{esc(seed_label(cont['seed']))} "
              f"<span class=\"meta\">(rollback {cont['epoch']})</span>")
-    head = page_head(title, head_btn(back_href, "&larr; back"))
-    body = f"""
-{head}
-<p class="meta">run: {esc(cont['mode'])} &middot; target: {esc(pretty_model(cont['target']))} &middot; auditor: {esc(auditor_label(cont))} &middot; judge: {esc(pretty_model(cont.get('judge')))}{cost_meta(cont)}{context_meta(cont)}</p>
-{banner}
-{hack_caveat}
-{prefix_caveat}
-<h2>Judge summary</h2>
-<div class="note">{linkify(cont['summary'])}</div>
-<h2>Judge justification</h2>
-<div class="note justif">{linkify(cont['justification'])}</div>
-{_deviation_note_html(name)}
-<h2>Judge highlights</h2>
-<div class="note hl">{linkify(cont['highlights'])}</div>
-<h2>Continuation transcript <span class="meta">(judge view)</span></h2>
-{'' if cont['transcript'] else '<p><b>No transcript rendered.</b></p>'}
-{tr_html}
-"""
-    # floating toggle: jump to the cut (re-rolled turn), and back to top on a second click
-    cut_btn = ""
-    if cut_m is not None:
-        cut_btn = f"""
-<button class="tocut" id="tocut" title="jump to the rollback cut">&#9986; jump to cut</button>
-<script>
-(function () {{
-  var b = document.getElementById("tocut"), el = document.getElementById("M{cut_m}"), atCut = false;
-  if (!el) {{ b.style.display = "none"; return; }}
-  b.onclick = function () {{
-    if (atCut) {{ window.scrollTo({{ top: 0, behavior: "smooth" }}); b.innerHTML = "&#9986; jump to cut"; atCut = false; }}
-    else {{
-      el.scrollIntoView({{ behavior: "smooth", block: "center" }});
-      el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
-      b.innerHTML = "&#8593; back to top"; atCut = true;
-    }}
-  }};
-}})();
-</script>"""
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>rollback {esc(seed_label(cont['seed']))}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>{nav}{cut_btn}{TOTOP_HTML}</body></html>")
-    (OUT / "pages" / name).write_text(page)
-    return unmatched
+    return write_trajectory_page(
+        cont, name, title=title,
+        doc_title=f"rollback {seed_label(cont['seed'])}",
+        back_href=back_href, banners=banner + prefix_caveat,
+        ann=entry, justif_extra=_deviation_note_html(name),
+        transcript_heading='Continuation transcript <span class="meta">(judge view)</span>',
+        cut_m=cut_m, cut_btn_label="&#9986; jump to cut",
+        scratchpad=scratch, auditor_calls=acalls)
 
 
 # binary-definition dims, shown as columns in the per-rollback table
@@ -4190,18 +4100,11 @@ def _resample_deviation_cell(page: str) -> str:
 
 
 def write_resample_page(cont: dict, orig: dict | None) -> int:
-    """One resample continuation page: judge notes + the full LIVE transcript (no cut, no
-    fork/treatment banners). Returns # unlocated quotes (0 -- resamples carry no hack-turn
-    annotation). Page filename == page_name(...), matching the deviation sidecar key."""
+    """One resample continuation page: the resample banner feeds the shared
+    write_trajectory_page layout; the full LIVE transcript (no cut). Returns # unlocated
+    quotes (0 -- resamples carry no hack-turn annotation). Page filename ==
+    page_name(...), matching the deviation sidecar key."""
     name = page_name(cont["mode"], cont["task"], cont["seed"], cont["epoch"])
-    cited = sorted({int(m) for m in re.findall(
-        r"\[M(\d+)\]", cont["summary"] + cont["justification"] + cont["highlights"])})
-    nav = NAV_HTML + NAV_JS.replace("__HACKS__", json.dumps([])).replace(
-        "__CITED__", json.dumps(cited))
-    tr_html, unmatched = transcript_html(
-        cont["transcript"], {}, scratchpad=dict(cont.get("scratchpad") or {}),
-        auditor_calls=dict(cont.get("auditor_calls") or {}))
-
     oid = _orig_id_from_resample_task(cont["task"])
     cont_rh = cont["scores"].get("reward_hacking")
     if orig:
@@ -4231,26 +4134,14 @@ def write_resample_page(cont: dict, orig: dict | None) -> int:
     title = (f"Resample of #{oid if oid else '?'} &middot; "
              f"{esc(seed_label(cont['seed']))} "
              f"<span class=\"meta\">(resample {cont['epoch']})</span>")
-    head = page_head(title, head_btn(back_href, "&larr; back"))
-    body = f"""
-{head}
-<p class="meta">run: {esc(cont['mode'])} &middot; target: {esc(pretty_model(cont['target']))} &middot; auditor: {esc(auditor_label(cont))} &middot; judge: {esc(pretty_model(cont.get('judge')))}{cost_meta(cont)}{context_meta(cont)}</p>
-{banner}
-<h2>Judge summary</h2>
-<div class="note">{linkify(cont['summary'])}</div>
-<h2>Judge justification</h2>
-<div class="note justif">{linkify(cont['justification'])}</div>
-{_resample_deviation_note_html(name)}
-<h2>Judge highlights</h2>
-<div class="note hl">{linkify(cont['highlights'])}</div>
-<h2>Resample transcript <span class="meta">(judge view)</span></h2>
-{'' if cont['transcript'] else '<p><b>No transcript rendered.</b></p>'}
-{tr_html}
-"""
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>resample {esc(seed_label(cont['seed']))}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>{nav}{TOTOP_HTML}</body></html>")
-    (OUT / "pages" / name).write_text(page)
-    return unmatched
+    return write_trajectory_page(
+        cont, name, title=title,
+        doc_title=f"resample {seed_label(cont['seed'])}",
+        back_href=back_href, banners=banner,
+        justif_extra=_resample_deviation_note_html(name),
+        transcript_heading='Resample transcript <span class="meta">(judge view)</span>',
+        scratchpad=dict(cont.get("scratchpad") or {}),
+        auditor_calls=dict(cont.get("auditor_calls") or {}))
 
 
 # sentinel "column" for the auditor-deviation score (resample table only): grouped at the
@@ -4559,42 +4450,13 @@ def _continuation_timing(cont: dict, ann: dict | None) -> tuple[int | None, int]
 
 def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict | None,
                             treatment: str, has_prefix: bool, ann: dict | None = None) -> int:
-    """One continuation page: judge notes + the full transcript with the pivot (prefix end)
-    marked, and the new task's reward-hack turns marked (from annotations.json, exactly like
-    an original audit). Returns # unlocated quotes. Page filename == page_name(...). `has_prefix`
+    """One continuation page: the continuation banner feeds the shared
+    write_trajectory_page layout; the pivot (prefix end) is marked in the transcript and
+    the new task's reward-hack turns come from annotations.json, exactly like an original
+    audit. Returns # unlocated quotes. Page filename == page_name(...). `has_prefix`
     is structural (prefix_id != 0), independent of the treatment's name."""
     name = page_name(cont["mode"], cont["task"], cont["seed"], cont["epoch"])
-    cited = sorted({int(m) for m in re.findall(
-        r"\[M(\d+)\]", cont["summary"] + cont["justification"] + cont["highlights"])})
-    # hack-turn annotations (from the pipeline's annotate stage); keep only turns present in
-    # this transcript so the nav can't point at a missing anchor. Mirrors write_page.
-    present = {int(m.group(1)) for m in MSG_HEAD.finditer(cont["transcript"])}
-    hacks: dict[int, dict] = {}
-    if ann and ann.get("hack_turns"):
-        for t in ann["hack_turns"]:
-            m = t.get("m")
-            if isinstance(m, int) and m in present:
-                hacks[m] = dict(t)
-    hack_list = [{"m": m, "title": hacks[m].get("title", "")} for m in sorted(hacks)]
-    nav = NAV_HTML + NAV_JS.replace("__HACKS__", json.dumps(hack_list)).replace(
-        "__CITED__", json.dumps(cited))
     cut_m = _continuation_cut_m(cont["transcript"])
-    tr_html, unmatched = transcript_html(
-        cont["transcript"], hacks, cut_m=cut_m, scratchpad=dict(cont.get("scratchpad") or {}),
-        auditor_calls=dict(cont.get("auditor_calls") or {}))
-    hack_caveat = ""
-    if hack_list:
-        n_quotes = sum(len(hacks[m].get("quotes", [])) for m in hacks)
-        miss = (f" {unmatched} of {n_quotes} quote(s) could not be auto-located and are not "
-                "highlighted." if unmatched else "")
-        model_txt = esc((ann or {}).get("model") or "?")
-        tldr = (ann or {}).get("tldr") or ""
-        tldr_html = f" <b>tl;dr:</b> {linkify(tldr)}" if tldr else ""
-        hack_caveat = (
-            f'<div class="hackcaveat">&#9888; <b>{len(hack_list)} hack turn(s)</b> marked below '
-            f'(in the new task) by an LLM agent ({model_txt}) from the judge\'s findings &mdash; '
-            f"interpretive, spot-check against the transcript.{miss}{tldr_html}</div>")
-
     cont_rh = cont["scores"].get("reward_hacking")
     b_rh = rh_score(b_orig) if b_orig else None
     b_link = (f"<a href='{page_name(b_orig['mode'], b_orig['task'], b_orig['seed'], b_orig['epoch'])}'>"
@@ -4632,48 +4494,16 @@ def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict |
     back_href = f"../{sweep_continuations_file(back_key)}"
     title = (f"Continuation &middot; {esc(treat_label)} &middot; {esc(seed_label(cont['seed']))} "
              f"<span class=\"meta\">(run {cont.get('display_run', cont['epoch'])})</span>")
-    head = page_head(title, head_btn(back_href, "&larr; back"))
-    body = f"""
-{head}
-<p class="meta">run: {esc(cont['mode'])} &middot; target: {esc(pretty_model(cont['target']))} &middot; auditor: {esc(auditor_label(cont))} &middot; judge: {esc(pretty_model(cont.get('judge')))}{cost_meta(cont)}{context_meta(cont)}</p>
-{banner}
-{hack_caveat}
-<details class="sec" open><summary><h2>Judge summary</h2></summary>
-<div class="note">{linkify(cont['summary'])}</div>
-</details>
-
-<details class="sec" open><summary><h2>Judge justification</h2></summary>
-<div class="note justif">{linkify(cont['justification'])}</div>
-</details>
-{faith_note}
-<details class="sec" open><summary><h2>Judge highlights</h2></summary>
-<div class="note hl">{linkify(cont['highlights'])}</div>
-</details>
-
-<h2>Continuation transcript <span class="meta">(judge view; pivot to the new task is marked)</span></h2>
-{'' if cont['transcript'] else '<p><b>No transcript rendered.</b></p>'}
-{tr_html}
-"""
-    # floating toggle: jump to the pivot (where prefix A ends and the new task begins), and
-    # back to top on a second click. Absent for no_prefix (no pivot).
-    cut_btn = ""
-    if cut_m is not None:
-        cut_btn = f"""
-<button class="tocut" id="tocut" title="jump to where the new task begins">&#9986; jump to new task</button>
-<script>
-(function () {{
-  var b = document.getElementById("tocut"), el = document.getElementById("M{cut_m}");
-  if (!el) {{ b.style.display = "none"; return; }}
-  b.onclick = function () {{
-    el.scrollIntoView({{ behavior: "smooth", block: "center" }});
-    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
-  }};
-}})();
-</script>"""
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>continuation {esc(seed_label(cont['seed']))}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>{nav}{cut_btn}{TOTOP_HTML}</body></html>")
-    (OUT / "pages" / name).write_text(page)
-    return unmatched
+    return write_trajectory_page(
+        cont, name, title=title,
+        doc_title=f"continuation {seed_label(cont['seed'])}",
+        back_href=back_href, banners=banner,
+        ann=ann, hack_scope=" (in the new task)",
+        justif_extra=faith_note,
+        transcript_heading='Continuation transcript <span class="meta">(judge view; pivot to the new task is marked)</span>',
+        cut_m=cut_m, cut_btn_label="&#9986; jump to new task",
+        scratchpad=dict(cont.get("scratchpad") or {}),
+        auditor_calls=dict(cont.get("auditor_calls") or {}))
 
 
 def _assign_continuation_display_runs(loaded: list[tuple]) -> None:
@@ -4757,9 +4587,11 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
     with the audit category and the faithfulness-vs-B score. A 'first hack' column (after the
     run link, like the main page) shows the assistant-turn index of the run's first annotated
     hack turn, or a muted dash when the run isn't annotated (non-hacks, and any hack the turn-
-    annotator hasn't been run on). A 'tags' column (the same failure_modes_cell chips as the
-    sweep index) follows first-hack whenever any run in this B section carries tag data.
-    `conts` is [(continuation dict, entry)] for ONE B id."""
+    annotator hasn't been run on). A 'user turns before first hack' column follows it (counted
+    over the WHOLE transcript incl. any replayed prefix, same helper as the main page). A
+    'tags' column (the same failure_modes_cell chips as the sweep index) follows whenever any
+    run in this B section carries tag data. DEAD / CRASHED / COMPACTED badges match the sweep
+    index rows. `conts` is [(continuation dict, entry)] for ONE B id."""
     cols = _active_dims()   # all current judge dims, in canonical group order (same as index)
     groups = column_groups(cols) + [("outcome", [_CAT_COL, _FAITH_COL])]
     ordered = [d for _, dims in groups for d in dims]
@@ -4779,8 +4611,8 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
         for c, _ in conts
     )
     tags_head = "<th>tags</th>" if show_tags else ""
-    # ungrouped lead columns: the run link + 'first hack' [+ 'tags']
-    lead_ths = "<th></th>" * (3 if show_tags else 2)
+    # ungrouped lead columns: run link + 'first hack' + 'user turns before first hack' [+ 'tags']
+    lead_ths = "<th></th>" * (4 if show_tags else 3)
     group_head = f'<tr class="ghead-row">{lead_ths}{group_cells}</tr>'
 
     sections = []
@@ -4810,7 +4642,13 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
         rows = []
         for c, _entry in group:
             page = page_name(c["mode"], c["task"], c["seed"], c["epoch"])
-            dead = ' <span class="hacktag">&#9888; DEAD</span>' if c.get("dead") else ""
+            # same badges as the sweep index rows (write_table): dead is dimmed-out data,
+            # crashed is badged but real up to the stall, compacted is informational.
+            flag = ' <span class="hacktag">&#9888; DEAD</span>' if c.get("dead") else ""
+            if c.get("crashed"):
+                flag += ' <span class="hacktag">&#9888; CRASHED</span>'
+            if c.get("compactions"):
+                flag += ' <span class="comptag">&#9888; COMPACTED</span>'
 
             def _cell(d, c=c, page=page) -> str:
                 if d == _CAT_COL:
@@ -4823,10 +4661,11 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
 
             cells = "".join(_cell(d) for d in ordered)
             fh = _continuation_first_hack_cell(annotations.get(page), c["transcript"])
+            ut = user_turns_before_cell(first_hack_m(annotations.get(page)), c["transcript"])
             tags_cell = f"<td class='tagcol'>{failure_modes_cell(c)}</td>" if show_tags else ""
             disp = c.get("display_run", c["epoch"])
-            rows.append(f"<tr data-id='{page}'><td><a href='pages/{page}'>run {disp}</a>{dead}</td>"
-                        f"<td>{fh}</td>{tags_cell}{cells}</tr>")
+            rows.append(f"<tr data-id='{page}'><td><a href='pages/{page}'>run {disp}</a>{flag}</td>"
+                        f"<td>{fh}</td><td>{ut}</td>{tags_cell}{cells}</tr>")
         # collapsible subsection box per (condition, prefix) sub-table, matching the
         # sweep pages' details.sub styling (2026-07-05).
         sections.append(
@@ -4834,7 +4673,8 @@ def _continuation_triple_table(conts: list[tuple], annotations: dict) -> str:
             f'<span class="meta">&mdash; full hacks {n_full}/{n} &middot; '
             f'mean reward_hacking {mean_rh}</span></h3></summary>'
             f'<table class="sortable">{group_head}'
-            f'<tr class="cols"><th>continuation</th><th>first hack</th>{tags_head}{head_cols}</tr>'
+            f'<tr class="cols"><th>continuation</th><th>first hack</th>'
+            f'<th>user turns before first hack</th>{tags_head}{head_cols}</tr>'
             f'{"".join(rows)}</table></details>')
     return "".join(sections)
 
@@ -5630,7 +5470,7 @@ async def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> tuple[s
 {''.join(parts)}
 """
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div></body></html>")
+            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
     out_file = sweep_em_file(key)
     (OUT / out_file).write_text(page)
     return out_file, ask_pages
@@ -5679,7 +5519,7 @@ def visuals_fallback_page(propensity_html: str, css: str, topnav_html: str, *,
     `subnav_html` is the shared subpage nav row (trajectories / continuations / visuals)."""
     body = f'{topnav_html}{subnav_html}{page_head(esc(heading))}{propensity_html}'
     return (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{css}</style></head><body><div class='wrap'>{body}</div></body></html>")
+            f"<style>{css}</style></head><body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
 
 
 def collect_rehack_analysis(all_merged: list[tuple], originals_by_id: dict,
@@ -5920,7 +5760,7 @@ async def main() -> None:
                 em_cost=em_cost, em_judge=em_judge,
                 heading=f"Visuals — {set_label}",
                 audit_label=f"Original audit trajectories · {set_label}",
-                subnav_html=sub_html)
+                subnav_html=sub_html, totop=TOTOP_HTML)
             n_ut = (sum(len(h) + len(nn) for _, h, nn in user_turns["by_model"])
                     if user_turns else 0)
             halluc_note = (f"; hallucination over {halluc['n_dumb']} weak-model audits"

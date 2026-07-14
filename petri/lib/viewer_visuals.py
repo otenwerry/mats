@@ -2331,7 +2331,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        em_judge: dict | None = None,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
-                       subnav_html: str = "") -> str:
+                       subnav_html: str = "", totop: str = "") -> str:
     """Full HTML for ONE visuals page. Since 2026-07-02 there is no single global
     visuals.html: each sweep gets its own page, linked from that sweep's trajectories
     page, passing only the sections that belong to that sweep — every section renderer
@@ -2428,7 +2428,7 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
 """
     return (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc_loc(heading)}</title>"
             f"<style>{css}{VISUALS_CSS}</style></head><body><div class='wrap vwrap'>{body}</div>"
-            f"</body></html>")
+            f"{totop}</body></html>")
 
 
 def _tab_layout(tabs: list[tuple]) -> str:
