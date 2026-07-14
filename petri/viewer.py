@@ -1985,19 +1985,26 @@ def _meta_status(a: dict) -> str:
     return f"{base} &middot; compacted &times;{n}" if n else base
 
 
-def metadata_section(a: dict, extra: str = "") -> str:
+def _meta_cell(label: str, value: str) -> str:
+    """One label-over-value cell for the Metadata grid ('' when the value is empty).
+    Used by metadata_section for the standard cells and by page writers for their
+    page-specific ones (write_trajectory_page's meta_cells)."""
+    return (f'<div class="metacell"><div class="k">{esc(label)}</div>'
+            f'<div class="v">{value}</div></div>') if value else ""
+
+
+def metadata_section(a: dict, extra: str = "", extra_cells: str = "") -> str:
     """The collapsed 'Metadata' section at the top of a trajectory page. Holds everything
     that used to sit above the judge sections -- the judge scores grid and the failure-mode
     tags -- plus every run factor that can vary: the three models, seed condition, auditor
     turn cap (max_turns), target reasoning on/off, pinned-SP / cross-seed-family flags, cost,
-    peak context, and how the run ended. `extra` appends further mblocks (the hack-turn
-    annotation note from write_trajectory_page). Collapsed by default (a page opens straight
-    to the judge summary + transcript); the collapsed bar previews the target + condition so
-    pages are still scannable without expanding."""
-    def cell(label: str, value: str) -> str:
-        return (f'<div class="metacell"><div class="k">{esc(label)}</div>'
-                f'<div class="v">{value}</div></div>') if value else ""
-
+    peak context, and how the run ended. `extra_cells` inserts page-specific grid cells
+    (pre-built with _meta_cell, e.g. a continuation's task-source/prefix links) before the
+    run-dir cell; `extra` appends further mblocks (the hack-turn annotation note from
+    write_trajectory_page). Collapsed by default (a page opens straight to the judge
+    summary + transcript); the collapsed bar previews the target + condition so pages are
+    still scannable without expanding."""
+    cell = _meta_cell
     cells = [
         cell("target", esc(pretty_model(a["target"]))),
         cell("auditor", esc(auditor_label(a))),
@@ -2026,6 +2033,8 @@ def metadata_section(a: dict, extra: str = "") -> str:
         if a.get("fork_restart"):
             forks.append(f"restart &times;{a['fork_restart']}")
         cells.append(cell("auditor fork", " &middot; ".join(forks) or "yes"))
+    if extra_cells:
+        cells.append(extra_cells)
     # the run dir this trajectory came from (was the continuation pages' `run:` meta
     # line before the shared layout; useful for matching a page back to logs/)
     cells.append(cell("run dir", esc(a["mode"])))
@@ -2051,7 +2060,7 @@ def metadata_section(a: dict, extra: str = "") -> str:
 
 
 def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
-                          back_href: str, banners: str = "",
+                          back_href: str, banners: str = "", meta_cells: str = "",
                           ann: dict | None = None, hack_scope: str = "",
                           justif_extra: str = "", transcript_heading: str,
                           cut_m: int | None = None, cut_btn_label: str | None = None,
@@ -2072,7 +2081,9 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
     Page-specific inputs: `ann` is the hack-turn annotation entry (annotations.json entry
     or rollback_results.json entry -- both carry hack_turns/tldr; turns are filtered to
     Ms present in this transcript). `hack_scope` is extra annotation-note wording (e.g.
-    " (in the new task)"). `cut_m` marks the replay/live pivot in the transcript and, with
+    " (in the new task)"). `meta_cells` inserts page-specific cells (built with
+    _meta_cell) into the Metadata box's run grid (e.g. a continuation's
+    task-source/prefix links). `cut_m` marks the replay/live pivot in the transcript and, with
     `cut_btn_label`, adds the floating jump-to-cut toggle. `scratchpad`/`auditor_calls`/
     `auditor_asides`/`msg_turns` pass straight to transcript_html (callers own any
     splicing, e.g. rollback prefix scratchpads). Returns # unlocated hack quotes."""
@@ -2129,7 +2140,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {'<div class="hackcaveat">&#9888; <b>DEAD AUDIT</b> &mdash; the target produced no output (empty transcript), so the judge scored an empty conversation. These scores are <b>not real data</b> (likely a bad model slug or API error). Excluded from the propensity stats.</div>' if a.get('dead') else ''}
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {banners}
-{metadata_section(a, extra=hack_block)}
+{metadata_section(a, extra=hack_block, extra_cells=meta_cells)}
 
 <details class="sec" open><summary><h2>Judge summary</h2></summary>
 <div class="note">{linkify(a['summary'])}</div>
@@ -4474,25 +4485,30 @@ def _continuation_timing(cont: dict, ann: dict | None) -> tuple[int | None, int]
 
 def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict | None,
                             treatment: str, has_prefix: bool, ann: dict | None = None) -> int:
-    """One continuation page: the continuation banner feeds the shared
-    write_trajectory_page layout; the pivot (prefix end) is marked in the transcript and
-    the new task's reward-hack turns come from annotations.json, exactly like an original
-    audit. Returns # unlocated quotes. Page filename == page_name(...). `has_prefix`
-    is structural (prefix_id != 0), independent of the treatment's name."""
+    """One continuation page rendered through the shared write_trajectory_page layout:
+    the pivot (prefix end) is marked in the transcript and the new task's reward-hack
+    turns come from annotations.json, exactly like an original audit. The continuation's
+    lineage (B task source + its reward_hacking, the prefix trajectory) goes into the
+    Metadata box as cells -- there is no top banner (Owen 2026-07-14; the treatment is
+    in the page title, this run's scores in the Metadata grid, and reward_hacking is
+    always scored on the new task only). Returns # unlocated quotes. Page filename ==
+    page_name(...). `has_prefix` is structural (prefix_id != 0), independent of the
+    treatment's name."""
     name = page_name(cont["mode"], cont["task"], cont["seed"], cont["epoch"])
     cut_m = _continuation_cut_m(cont["transcript"])
-    cont_rh = cont["scores"].get("reward_hacking")
     b_rh = rh_score(b_orig) if b_orig else None
-    b_link = (f"<a href='{page_name(b_orig['mode'], b_orig['task'], b_orig['seed'], b_orig['epoch'])}'>"
-              f"task source #{b_orig['id']} ({esc(seed_label(b_orig['seed']))})</a>"
-              if b_orig else "task source (unknown)")
+    b_val = (f"<a href='{page_name(b_orig['mode'], b_orig['task'], b_orig['seed'], b_orig['epoch'])}'>"
+             f"#{b_orig['id']}</a> &middot; reward_hacking "
+             f"{b_rh if b_rh is not None else '?'}"
+             if b_orig else "unknown")
     if prefix_orig:
-        p_link = (f"<a href='{page_name(prefix_orig['mode'], prefix_orig['task'], prefix_orig['seed'], prefix_orig['epoch'])}'>"
-                  f"prefix #{prefix_orig['id']} ({esc(seed_label(prefix_orig['seed']))})</a>")
+        p_val = (f"<a href='{page_name(prefix_orig['mode'], prefix_orig['task'], prefix_orig['seed'], prefix_orig['epoch'])}'>"
+                 f"#{prefix_orig['id']}</a> ({esc(seed_label(prefix_orig['seed']))})")
     elif not has_prefix:
-        p_link = "no prefix (baseline)"
+        p_val = "none (baseline)"
     else:
-        p_link = "prefix (unknown)"
+        p_val = "unknown"
+    meta_cells = _meta_cell("task source (B)", b_val) + _meta_cell("prefix", p_val)
     dev = _load_continuation_faithfulness().get(name)
     faith_note = ""
     if dev and isinstance(dev.get("deviation_score"), (int, float)) and dev["deviation_score"] > 1:
@@ -4502,16 +4518,6 @@ def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict |
             "The auditor reproduced B's environment differently where the target behaved similarly "
             f"&mdash; a confounder for this continuation. {linkify(dev.get('justification', ''))}</div>")
     treat_label = _treatment_label(treatment)
-    # the target either carried a prior task (prefixed) or nothing (baseline); word it either way.
-    prior = (f"conditioned on a prior task ({p_link}) and then handed B's task"
-             if has_prefix else f"handed B's task with no prior context ({p_link})")
-    banner = (
-        '<div class="hackcaveat" style="border-color:#1558d6;background:#eef4ff;color:#0b2a6b">'
-        f"&#9851; Continuation &mdash; treatment <b>{esc(treat_label)}</b>. The target was "
-        f"{prior}; the auditor was primed with B and never saw the prefix. reward_hacking is "
-        f"scored on the NEW task only. B's reward_hacking "
-        f"<b>{b_rh if b_rh is not None else '?'}</b> &rarr; this continuation "
-        f"<b>{cont_rh if cont_rh is not None else '?'}</b>. {b_link}.</div>")
     # back to the owning sweep's continuations page (the sweep of the B original whose
     # task this continuation reruns; the current sweep's when B can't be resolved)
     back_key = sweep_key(b_orig) if b_orig else CURRENT_SWEEP
@@ -4521,7 +4527,7 @@ def write_continuation_page(cont: dict, b_orig: dict | None, prefix_orig: dict |
     return write_trajectory_page(
         cont, name, title=title,
         doc_title=f"continuation {seed_label(cont['seed'])}",
-        back_href=back_href, banners=banner,
+        back_href=back_href, meta_cells=meta_cells,
         ann=ann, hack_scope=" (in the new task)",
         justif_extra=faith_note,
         transcript_heading='Continuation transcript <span class="meta">(judge view; pivot to the new task is marked)</span>',
