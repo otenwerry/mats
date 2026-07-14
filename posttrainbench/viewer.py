@@ -677,6 +677,9 @@ CSS = """
  .issue.open{background:#e0edff;color:#1e40af;border:1px solid #93c5fd}
  .issue.structural{background:#e0f5f3;color:#0f766e;border:1px solid #8fd8cf}
  .issue.fixed{background:#e7f6ec;color:#166534;border:1px solid #a7d7b4}
+ .reconstat{display:inline-block;margin-top:3px;border-radius:4px;padding:0 6px;font-size:.68rem;font-weight:700}
+ .reconstat.ok{background:#e7f6ec;color:#166534;border:1px solid #a7d7b4}
+ .reconstat.failed{background:#fde7e7;color:#b3261e;border:1px solid #f2b8b5}
  .pending{color:#9aa0aa}
  .cantflag{display:inline-block;border-radius:4px;padding:0 6px;font-size:.7rem;font-weight:700;background:#f1f2f4;color:#6b7280;border:1px solid #d7dae0;cursor:help}
  .compaction{border:1px solid #d6c3f0;background:#faf7ff;border-radius:8px;margin:.6rem 0;overflow:hidden}
@@ -991,12 +994,14 @@ CONTINUATION_HTML = ("""
  <h1>Continuation probe <span class="meta" style="font-weight:400">{{ p.run_id }} @ ev{{ p.cut_event }}</span></h1>
  <a class="headbtn" href="{{ back_href|default('/continuations') }}">&larr; {{ back_label|default('continuations') }}</a>
  <a class="headbtn" href="/run/{{ p.run_id }}">full trajectory &rarr;</a>
+ <a class="headbtn" href="#probe-cutoff">jump to cutoff &darr;</a>
 </div>
 <div class="contbanner">
  &#9851; Probe resumed from this trajectory's context cut before <b>event {{ p.cut_event }}</b>{% if p.snapped %} (snapped from {{ p.requested_turn }}){% endif %} — the turns below are that context; the probe question &amp; answer follow.{% if p.cost is not none %} · <b>${{ '%.4f'|format(p.cost) }}</b>{% endif %}
  {% if p.flags %}<div class="flagline">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span>{% endfor %}</div>{% endif %}
 </div>
 """ + _TRAJ_CORE_HTML + """
+<div class="sessdiv" id="probe-cutoff">— cutoff: reconstructed original context ends here (before event {{ p.cut_event }}) —</div>
 {% if p.injected_turns %}
 <div class="sessdiv">— resume boundary: turn(s) below were injected by the resume CLI, not part of the original trajectory —</div>
 {% for t in p.injected_turns %}
@@ -1072,7 +1077,7 @@ __LEGEND__
  {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
   <td class="num">{{ row.num or '–' }}</td>
-  <td>{% if row.probe %}<a href="/continuations/hacks/continuation/{{ row.probe.probe_id }}" title="context-reconstruction continuation">{{ r.experiment }}</a>{% else %}<span class="pending" title="{{ row.reason or 'continuation not run yet' }}">{{ r.experiment }}</span>{% if not row.supported %} <span class="cantflag" title="{{ row.reason }}">⚠ can’t reconstruct</span>{% endif %}{% endif %}</td>
+  <td>{% if row.probe %}<a href="/continuations/hacks/continuation/{{ row.probe.probe_id }}" title="context-reconstruction continuation">{{ r.experiment }}</a><br>{% if row.probe.completed %}<span class="reconstat ok" title="the end-context probe completed with a sensible answer; universal and per-run caveats still apply">approximately reconstructed</span>{% else %}<span class="reconstat failed" title="the probe did not return an answer; run the campaign command again to retry it">probe failed</span>{% endif %}{% else %}<span class="pending" title="{{ row.reason or 'continuation not run yet' }}">{{ r.experiment }}</span>{% if not row.supported %} <span class="cantflag" title="{{ row.reason }}">⚠ can’t reconstruct</span>{% endif %}{% endif %}</td>
   <td>{{ r.benchmark }}</td>
   <td>{{ r.trained_model }}</td>
   <td class="num">{{ '%.3f'|format(r.accuracy) if r.accuracy is not none else '–' }}</td>
@@ -1110,11 +1115,11 @@ __LEGEND__
   <tr><td class="flags"><span class="issue perm">missing helper agent text</span></td>
    <td>a mid-run restart delivered a background helper agent's report, and the helper's transcript was never recorded (background-subagent transcripts aren't in the stream). The notification is rebuilt with every surviving field verbatim but without the report text — permanent gap, re-running never clears it.</td></tr>
   <tr><td class="flags"><span class="issue structural">extra resume turns</span> <span class="issue fixed">extra resume turns</span></td>
-   <td>resuming a context that ends on an unanswered tool call makes the CLI insert two synthetic turns ("Continue from where you left off." / "No response requested.") before our question. <b>Teal</b>: this run genuinely died mid-action, so the insert is unavoidable — it is the trajectory's real ending shape (flagged per probe as resume_bridging_structural; the turns themselves are shown on the continuation page). <b>Green</b>: the run ends cleanly but its existing probe predates the --turn end fix; re-running clears it.</td></tr>
+   <td>resuming a context that ends on an unanswered tool call makes the CLI perform a synthetic bridge ("Continue from where you left off." / "No response requested.") before our question; run-era 2.1.9 persists only the assistant half in the session file. <b>Teal</b>: this run genuinely died mid-action, so the bridge is unavoidable — it is the trajectory's real ending shape (flagged per probe as resume_bridging_structural; the persisted turn is shown on the continuation page). <b>Green</b>: the run ends cleanly but its existing probe predates the --turn end fix; re-running clears it.</td></tr>
   <tr><td class="flags"><span class="issue fixed">task prompt rebuilt</span></td>
    <td>prompt regeneration is byte-exact since 2026-07-13 (era-matched wording; the only drift in our runs' window was one word, "equiped"→"equipped"). Rows still tagged have a continuation from before that fix.</td></tr>
   <tr><td class="flags"><span class="issue fixed">effort not replicated</span></td>
-   <td>the original subscription-Claude runs passed --effort high; probes now replicate this. Rows still tagged have a probe from before that fix.</td></tr>
+   <td>later subscription-Opus runs passed --effort high; earlier subscription-Sonnet runs used the CLI default. Probes now era-match both. Rows still tagged have a completed probe from before that fix.</td></tr>
   <tr><td class="flags"><span class="meta">–</span></td>
    <td>no per-run reconstruction issues detected at the end-of-run cut.</td></tr>
   <tr><td class="flags"><span class="cantflag">⚠ can’t reconstruct</span></td>
@@ -1188,20 +1193,8 @@ VISUALS_HTML = """
 {% if not probes %}
 <p class="meta">No probes yet — nothing to cost. Run <code>exp_probe_context.py</code> first.</p>
 {% else %}
-<p class="vsub"><b>${{ '%.4f'|format(total) }}</b> across <b>{{ n }}</b> context-reconstruction probe(s)
- (mean <b>${{ '%.4f'|format(mean) }}</b> per probe). This is the exact amount billed by the model
- API for each resume call.{% if n_unknown %} {{ n_unknown }} probe(s) had no recorded cost and are excluded.{% endif %}</p>
-{{ fig|safe }}
-<table class="costtable" style="margin-top:1rem"><thead><tr>
- <th>probe</th><th>scaffold</th><th class="num">cost</th></tr></thead><tbody>
-{% for p in probes %}
-<tr>
- <td><a href="{{ cont_base|default('/continuation/') }}{{ p.probe_id }}">{{ p.run_id }} @ ev{{ p.cut_event }}</a></td>
- <td>{{ p.scaffold }}</td>
- <td class="num">{% if p.cost is not none %}${{ '%.4f'|format(p.cost) }}{% else %}–{% endif %}</td>
-</tr>
-{% endfor %}
-</tbody></table>
+<p class="vsub"><b>${{ '%.4f'|format(mean) }}</b> average billed cost per completed probe
+ ({{ n }} priced probe{{ '' if n == 1 else 's' }}).{% if n_unknown %} {{ n_unknown }} failed or unpriced probe{{ '' if n_unknown == 1 else 's' }} excluded.{% endif %}</p>
 {% endif %}
 </body></html>
 """.replace("__CSS__", CSS)
@@ -2604,12 +2597,12 @@ def workspace(run_id: str):
 # to the raw stream / result md for probes that predate cost/Q&A recording, so #
 # every probe renders regardless of when it was produced.                      #
 # --------------------------------------------------------------------------- #
-# Each continuations window has its OWN probe directory, so its list/cost pages
-# only ever see that campaign's runs:
-#   early tests                  -> probes/               (exploratory, pre-existing)
-#   context reconstruction tests -> probes_context_recon/ (systematic, 1 per hack)
-PROBES_DIR = runs.OUT_ROOT / "probes"
-CONTEXT_RECON_DIR = runs.OUT_ROOT / "probes_context_recon"
+# Each continuations window has its own probe sources. The old systematic
+# campaign was reclassified as early tests on 2026-07-13; keeping its directory
+# read-only and routing it here preserves those outputs while the current page
+# starts from a genuinely empty campaign directory.
+EARLY_PROBE_DIRS = tuple(runs.OUT_ROOT / name for name in runs.EARLY_PROBE_CAMPAIGNS)
+CONTEXT_RECON_DIR = runs.OUT_ROOT / runs.CONTEXT_RECON_CAMPAIGN
 
 
 def _probe_support(scaffold: str, agent: str) -> tuple[bool, str]:
@@ -2679,7 +2672,7 @@ def _session_msg_text(rec: dict) -> str:
     return str(c)
 
 
-def _resume_turns(pdir: Path) -> tuple[list[dict], list[str]]:
+def _resume_turns(pdir: Path, probe_question: str | None) -> tuple[list[dict], list[str]]:
     """What the resume CLI appended to the installed session (resume_turns.jsonl):
     (injected turns before the probe question, attachment types added to it).
     The injected turns — e.g. the isMeta "Continue from where you left off." user
@@ -2690,22 +2683,42 @@ def _resume_turns(pdir: Path) -> tuple[list[dict], list[str]]:
     injected, attachments = [], []
     if not f.exists():
         return injected, attachments
+    records = []
     for ln in f.read_text().splitlines():
         try:
-            rec = json.loads(ln)
+            records.append(json.loads(ln))
         except json.JSONDecodeError:
             continue
-        t = rec.get("type")
-        if t == "user" and not rec.get("isMeta"):
-            break  # the probe question itself; injected turns end here
-        if t in ("user", "assistant"):
-            injected.append({"role": t, "meta": bool(rec.get("isMeta")),
-                             "text": _session_msg_text(rec)})
-    for ln in f.read_text().splitlines():
-        try:
-            rec = json.loads(ln)
-        except json.JSONDecodeError:
+
+    # Old CLIs can re-append/normalize some already-reconstructed records before
+    # writing the new probe turn. They retain their old timestamps and are not
+    # resume injections. Anchor on the exact probe question and walk backward
+    # only across the CLI's known bridge text. Run-era 2.1.9 persists just the
+    # assistant half ("No response requested."); newer CLIs may also persist the
+    # isMeta user half.
+    probe_i = next((i for i, rec in enumerate(records)
+                    if rec.get("type") == "user" and not rec.get("isMeta")
+                    and probe_question
+                    and _session_msg_text(rec).strip() == probe_question.strip()),
+                   len(records))
+    bridge = {"Continue from where you left off.", "No response requested."}
+    bridge_records = []
+    i = probe_i - 1
+    while i >= 0:
+        rec = records[i]
+        if rec.get("type") not in ("user", "assistant"):
+            i -= 1
             continue
+        if _session_msg_text(rec).strip() not in bridge:
+            break
+        bridge_records.append(rec)
+        i -= 1
+    for rec in reversed(bridge_records):
+        injected.append({"role": rec.get("type"),
+                         "meta": bool(rec.get("isMeta")),
+                         "text": _session_msg_text(rec)})
+
+    for rec in records:
         if rec.get("type") == "attachment":
             attachments.append((rec.get("attachment") or {}).get("type", "?"))
     return injected, attachments
@@ -2729,7 +2742,7 @@ def load_probe(pdir: Path) -> dict | None:
         answer = answer if answer is not None else strm["answer"]
     if question is None:
         question = _probe_question_from_md(pdir)
-    injected, attachments = _resume_turns(pdir)
+    injected, attachments = _resume_turns(pdir, question)
     return {
         "probe_id": pdir.name, "run_id": fid.get("run_id"),
         "scaffold": fid.get("scaffold"), "cut_event": fid.get("cut_event"),
@@ -2737,19 +2750,23 @@ def load_probe(pdir: Path) -> dict | None:
         "cut_notes": fid.get("cut_notes") or [], "flags": fid.get("flags") or [],
         "stats": fid.get("stats") or {}, "probe_env": fid.get("probe_env") or {},
         "cost": cost, "question": question, "answer": answer,
+        "completed": bool(answer),
         "injected_turns": injected, "probe_attachments": attachments,
     }
 
 
-def all_probes(pdir: Path = PROBES_DIR) -> list[dict]:
-    if not pdir.exists():
-        return []
+def all_probes(pdirs: Path | tuple[Path, ...] = EARLY_PROBE_DIRS) -> list[dict]:
+    if isinstance(pdirs, Path):
+        pdirs = (pdirs,)
     out = []
-    for d in sorted(pdir.iterdir()):
-        if d.is_dir():
-            p = load_probe(d)
-            if p:
-                out.append(p)
+    for pdir in pdirs:
+        if not pdir.exists():
+            continue
+        for d in sorted(pdir.iterdir()):
+            if d.is_dir():
+                p = load_probe(d)
+                if p:
+                    out.append(p)
     return out
 
 
@@ -2863,37 +2880,6 @@ def _subnav(active: str, window: str = "early") -> str:
     return "".join(rows)
 
 
-def _cost_fig_svg(probes: list[dict]) -> str:
-    """Inline-SVG bar chart of per-probe billed cost (Petri-style figure)."""
-    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
-    if not priced:
-        return ""
-    import io
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    labels = [f"{(p['run_id'] or '')[:24]}…@ev{p['cut_event']}" for p in priced]
-    vals = [p["cost"] for p in priced]
-    fig, ax = plt.subplots(figsize=(7, 0.7 + 0.5 * len(priced)))
-    ax.barh(range(len(priced)), vals, color="#1558d6")
-    ax.set_yticks(range(len(priced)))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.invert_yaxis()
-    ax.set_xlabel("billed cost (USD)")
-    for i, v in enumerate(vals):
-        ax.text(v, i, f" ${v:.4f}", va="center", fontsize=8)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    fig.tight_layout()
-    buf = io.StringIO()
-    fig.savefig(buf, format="svg")
-    plt.close(fig)
-    svg = buf.getvalue()
-    svg = svg[svg.index("<svg"):]
-    return (f'<figure class="fig">{svg}'
-            f'<figcaption>Exact cost billed per probe resume call.</figcaption></figure>')
-
-
 @app.route("/continuations")
 def continuations():
     probes = all_probes()
@@ -2984,6 +2970,12 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
     f = _issue_facts(t.run_id)
     probe_flags = {fl.get("code") for fl in (probe or {}).get("flags", [])}
     issues = []
+    if probe is not None and not probe.get("completed"):
+        issues.append({
+            "tag": "probe failed", "cls": "open",
+            "title": ("this continuation produced no model answer, so it has not "
+                      "validated the reconstruction. The campaign runner treats it "
+                      "as incomplete and retries it on the next run.")})
     if f["restarts_visible"]:
         if "reprompt" in (t.agent or ""):
             issues.append({
@@ -3072,21 +3064,23 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
     if t.agent.startswith("claude_non_api"):
         # exp_probe_context replicates the original effort setting and stamps an
         # effort_replicated flag; only pre-fix probes keep this tag.
-        if probe is not None and "effort_replicated" not in probe_flags:
+        if (probe is not None and probe.get("completed")
+                and "effort_replicated" not in probe_flags):
             issues.append({
                 "tag": "effort not replicated", "cls": "fixed",
-                "title": ("the original run passed --effort high (subscription agent); "
-                          "this run's probe predates the fix that replicates it, so the "
-                          "probe ran at the CLI's default effort. Re-running the "
-                          "continuation clears this.")})
+                "title": ("this run's completed probe predates the fix that "
+                          "era-matches subscription effort (default for the older "
+                          "Sonnet harness; --effort high for later Opus). Re-running "
+                          "the continuation clears this.")})
     if t.scaffold in ("claude", "qwen3max"):
         if f["ends_mid_action"]:
             issues.append({
                 "tag": "extra resume turns", "cls": "structural",
                 "title": ("this run died mid-action (its last tool call never got an "
                           "answer), so any resume of its end-of-run context makes the "
-                          "CLI insert two synthetic turns ('Continue from where you "
-                          "left off.' / 'No response requested.') before our question. "
+                          "CLI perform its synthetic bridge ('Continue from where you "
+                          "left off.' / 'No response requested.') before our question "
+                          "(run-era 2.1.9 persists only the assistant half). "
                           "That is the trajectory's real ending shape — unavoidable; "
                           "recorded per probe (resume_bridging_structural flag + "
                           "resume_turns.jsonl, rendered on the continuation page).")})
@@ -3127,11 +3121,7 @@ def continuation_hacks():
     # (needs a DashScope key), and individually deferred runs. OpenCode stays
     # in the top section (planned).
     deferred_engines = {"Codex", "Qwen"}
-    deferred_rids = {
-        # Owen 2026-07-13: #15 — the helper-agent report inside its restart
-        # notification is permanently lost
-        "claude_non_api_claude-opus-4-6_1m__10h_run1__bfcl_google_gemma-3-4b-pt_16955282",
-    }
+    deferred_rids = runs.CONTEXT_RECON_DEFERRED_RUN_IDS
     buckets: dict[tuple[str, str], list] = {}
     dbuckets: dict[tuple[str, str], list] = {}
     for r in RUNS:
@@ -3245,8 +3235,11 @@ def _render_continuation(probe_id: str, pdir: Path, window: str,
 
 @app.route("/continuation/<path:probe_id>")
 def continuation(probe_id: str):
-    return _render_continuation(probe_id, PROBES_DIR, "early",
-                                "/continuations", "early tests")
+    for pdir in EARLY_PROBE_DIRS:
+        if (pdir / probe_id / "fidelity.json").exists():
+            return _render_continuation(probe_id, pdir, "early",
+                                        "/continuations", "early tests")
+    abort(404)
 
 
 @app.route("/continuations/hacks/continuation/<path:probe_id>")
@@ -3259,14 +3252,14 @@ def _visuals_kwargs(probes: list[dict]) -> dict:
     priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
     n = len(priced)
     total = sum(p["cost"] for p in priced)
-    return dict(probes=probes, n=n, n_unknown=len(probes) - n, total=total,
-                mean=(total / n if n else 0.0), fig=_cost_fig_svg(probes))
+    return dict(probes=probes, n=n, n_unknown=len(probes) - n,
+                mean=(total / n if n else 0.0))
 
 
 @app.route("/visuals")
 def visuals():
     return render_template_string(
-        VISUALS_HTML, **_visuals_kwargs(all_probes(PROBES_DIR)),
+        VISUALS_HTML, **_visuals_kwargs(all_probes(EARLY_PROBE_DIRS)),
         cont_base="/continuation/", subnav=_subnav("cost", window="early"))
 
 

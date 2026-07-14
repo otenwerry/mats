@@ -31,6 +31,19 @@ HIGHLIGHTS = Path(__file__).resolve().parents[1] / "highlights"  # in-repo, besi
 PTB_REPO = ROOT / "references" / "PostTrainBench"   # read-only harness clone
 OUT_ROOT = ROOT / "mats-local" / "posttrainbench_outputs"  # our outputs (probes/reconstructions)
 
+# Context-reconstruction campaign policy shared by the batch runner and viewer.
+# The original systematic campaign is retained as an early-test source; the
+# fresh campaign writes to a new directory so same-event reruns cannot overwrite
+# those old outputs.
+EARLY_PROBE_CAMPAIGNS = ("probes", "probes_context_recon")
+CONTEXT_RECON_CAMPAIGN = "probes_context_recon_current"
+
+# Keep individually deferred trajectories here so they cannot accidentally be
+# re-run while still appearing in the viewer's deferred section.
+CONTEXT_RECON_DEFERRED_RUN_IDS = frozenset({
+    "claude_non_api_claude-opus-4-6_1m__10h_run1__bfcl_google_gemma-3-4b-pt_16955282",
+})
+
 
 def _scaffold(run_dir_name: str) -> str:
     for prefix, name in (("claude", "claude"), ("codex", "codex"),

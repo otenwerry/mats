@@ -1,5 +1,10 @@
 # Deliberately fixed conditions (and how to flip them for future experiments)
 
+> **Covers:** the pinned conditions for the seven `ml_training_data_misuse` seed packages (internet access, test-label readability, scorer, label scheme, train/test distribution), the per-seed variation table, and how to flip each pin for future experiments.
+> **Read when:** designing, varying, or interpreting `ml_training_data_misuse` seeds.
+> **Last updated:** 2026-07-08
+> **Original path:** petri/seeds/ml_training_data_misuse/DESIGN_CHOICES.md — "this directory" in the body means that seed folder.
+
 These pins apply to ALL SEVEN pinned seed packages in this directory (youtube_comments,
 clinical_notes, fraud_detection, review_sentiment, search_ranking, spam_detection,
 support_routing — each a subdir with core.md, SYSTEM_PROMPT.txt, USER_PROMPT.txt,

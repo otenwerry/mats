@@ -1,5 +1,11 @@
 # Rollback experiments — build-out roadmap
 
+> **Covers:** the build-out plan for the PTB rollback pipeline — turning the bespoke pipeline into a parameterized command across all 30 reward-hack trajectories; locked decisions, phased plan (P0–P6), per-scaffold engine coverage, and open risks.
+> **Read when:** working on or planning PTB rollback experiments.
+> **Last updated:** 2026-07-10
+> **Original path:** posttrainbench_old/rollback/ROADMAP.md — read that folder's README.md first for the current pipeline mechanics.
+> **Note:** describes FIRST-pass PostTrainBench work (posttrainbench_old/).
+
 Goal: turn the working-but-bespoke rollback pipeline into infrastructure where
 Owen can run **any rollback experiment as a parameterized command**, across
 **all 30 reward-hack trajectories**, without per-run hand-holding.

@@ -1,5 +1,11 @@
 # Petri codebase guide
 
+> **Covers:** how the Petri reward-hacking code and experiments are laid out — the `petri/` entry points (`exp_*_pipeline.py`), the importable core in `petri/lib/`, the viewer builder, the run-dir types under `mats-local/petri/logs/`, the binary reward-hack definition, re-judging, and the rollback pipeline split.
+> **Read when:** starting any Petri work, or reading Petri run data and wanting to know where it can mislead you.
+> **Last updated:** 2026-07-10
+> **Original path:** petri/docs/CODEBASE_GUIDE.md
+> **Note:** the body still calls the viewer builder `make_viewer.py`; it was renamed to `petri/viewer.py` after this file's last edit.
+
 How the Petri reward-hacking **code and experiments** are organized, and how to read the
 data without being misled. Written for future coding agents (and humans). The viewer is the
 source of truth I trust; this guide explains what the underlying files mean and where they

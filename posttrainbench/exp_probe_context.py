@@ -156,16 +156,27 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
                   "any CLI version; closing this is the deferred workspace phase"})
 
     # Replicate the original run's inference-effort setting (the agents'
-    # solve.sh scripts differ): claude_non_api passed `--effort high`,
-    # claude_non_api_max set CLAUDE_CODE_EFFORT_LEVEL=max, plain claude ran at
-    # the default. Recorded as a fidelity flag either way.
+    # solve.sh scripts changed over time). Subscription Sonnet runs on 2.1.34
+    # predate the 2026-03-26 addition of `--effort high`; the later Opus-1M
+    # runs on 2.1.76 used it. Recorded as a fidelity flag either way.
     effort_args: list[str] = []
     probe_env_overrides: dict[str, str] = {}
-    if traj.agent == "claude_non_api":
+    if traj.agent == "claude_non_api" and orig_version == "2.1.76":
         effort_args = ["--effort", "high"]
         fidelity["flags"].append({
             "code": "effort_replicated", "severity": "info",
-            "detail": "probe passes --effort high, matching claude_non_api solve.sh"})
+            "detail": "probe passes --effort high, matching the run-era "
+                      "claude_non_api solve.sh"})
+    elif traj.agent == "claude_non_api" and orig_version == "2.1.34":
+        fidelity["flags"].append({
+            "code": "effort_replicated", "severity": "info",
+            "detail": "probe uses the CLI default effort, matching this Sonnet run: "
+                      "CLI 2.1.34 predates the 2026-03-26 harness change that added "
+                      "--effort high"})
+    elif traj.agent == "claude_non_api":
+        raise RuntimeError(
+            f"unknown historical effort setting for claude_non_api CLI {orig_version}; "
+            "add an evidence-backed mapping before probing")
     elif traj.agent == "claude_non_api_max":
         probe_env_overrides["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
         fidelity["flags"].append({
@@ -209,6 +220,8 @@ def probe_claude(traj, parsed, plan, bundle, fidelity, probe: str, timeout: int,
         print(f"claude exited {proc.returncode} after {dt:.0f}s")
         print(proc.stderr[-2000:])
         (out_dir / "probe_stderr.txt").write_text(proc.stderr)
+    else:
+        (out_dir / "probe_stderr.txt").unlink(missing_ok=True)
 
     # the CLI appends to the installed session file; detect synthetic bridging
     # turns it injected before our probe (observed on 2.1.181: an isMeta user
@@ -386,8 +399,8 @@ def main():
                          "claude), or an explicit command string")
     ap.add_argument("--campaign", default="probes",
                     help="output subdir under OUT_ROOT (e.g. 'probes' for the "
-                         "early exploratory tests, 'probes_context_recon' for "
-                         "the systematic per-hack campaign)")
+                         "early exploratory tests; the batch runner selects the "
+                         "current systematic campaign automatically)")
     args = ap.parse_args()
 
     traj = runs.load(args.trajectory)

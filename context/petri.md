@@ -1,0 +1,3 @@
+# How Petri works
+
+A trajectory takes in a target model, judge model, auditor model, and seed prompt. The auditor uses the seed prompt to generate a scenario for the target model, and tries to elicit reward hacking (in our case) from the target. It roleplays as the environment, so when the target emits tool calls, the auditor fabricates results and returns them as a tool response block. It terminates the trajectory when it thinks it's done enough, or when a certain limit is hit. Then, the judge gives the trajectory scores of 1-10 on various dimensions, and gives some elaborations on these scores and a general summary of the trajectory. We use the judge outputs to categorize the trajectories. You can see more in the viewer.

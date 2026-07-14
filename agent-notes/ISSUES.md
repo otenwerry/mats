@@ -1,5 +1,11 @@
 # Reconstruction issues tracker
 
+> **Covers:** the PostTrainBench context-reconstruction issue tracker — per-run fidelity tags (nudge restarts, background restarts, edits lost, reasoning lost, effort, task-prompt rebuild, resume turns) and the universal caveats. Ties to `lib/recon_claude.py`, `exp_probe_context.py`, `lib/prompts.py`, and the viewer's issues column on `/continuations/hacks`.
+> **Read when:** doing PTB context-reconstruction / probe work, or reading a run's reconstruction-fidelity flags.
+> **Last updated:** 2026-07-13
+> **Original path:** posttrainbench/ISSUES.md
+> **Note:** the file's own rule — when an issue changes, update this file AND the viewer tags/legend in the same change.
+
 One section per issue flag from the context-reconstruction work. The per-run tags
 render in the **issues** column of the viewer's context-reconstruction window
 (`/continuations/hacks`; the tag legend sits at the top of that page, closed by
@@ -20,7 +26,14 @@ Status snapshot (2026-07-13): 30 reward-hack trajectories. 11 have completely
 verbatim reconstructed contexts (visible window starts at a compaction summary,
 no mid-run restarts: 9 API runs + the 2 subscription-sonnet runs #22 #23) — but
 no probe yet counts as a fully faithful end-to-end resume (see Universal
-caveats).
+caveats). The pre-fix systematic probes were reclassified into the viewer's
+**early tests** window on 2026-07-13; the current context-reconstruction campaign
+is in `probes_context_recon_current/`. Its first batch attempted 13 Claude
+trajectories: 11 completed with sensible context reports and are marked
+**approximately reconstructed** in the viewer; 2 subscription-Sonnet probes
+failed before inference because their run-era CLI rejects `--effort` (fixed in
+code; retry pending). “Approximately” retains the universal local-environment /
+missing-workspace caveat and, on 7 rows, the teal structural resume bridge.
 
 ---
 
@@ -176,8 +189,11 @@ Original evidence trail (2026-07-12/13, kept for the record):
 
 Added 2026-07-13 (Owen: structural resume artifacts should be tagged per run,
 in their own category/color). Resuming a context that ends on an unanswered
-tool call makes the CLI insert two synthetic turns of its own ("Continue from
+tool call makes the CLI perform a synthetic bridge of its own ("Continue from
 where you left off." / "No response requested.") before our probe question.
+The fresh run-era 2.1.9 probes persist only the assistant half in the session
+file; the continuation viewer now anchors on the exact probe question and shows
+that turn without misclassifying old records that the CLI re-appends/normalizes.
 
 - **Teal (structural):** the 7 runs above genuinely died mid-action — their
   final assistant message left a tool call unanswered, so the end cut snaps to
@@ -252,17 +268,25 @@ turns it is dropped (Claude and OpenAI alike).
     openai reasoning item-ids attached to TEXT/tool parts may be recoverable
     from our streams (the reasoning TEXT itself is not).
 
-### `effort not replicated` (4 claude_non_api runs)
+### `effort not replicated` (pre-fix probes for 2 subscription-Opus runs)
 
-Original subscription runs passed `--effort high`; the first probe campaign
-resumed at default effort.
+Historical correction from the harness git history (2026-07-13): subscription
+effort was not uniform. `--effort high` was added to
+`agents/claude_non_api/solve.sh` on 2026-03-26. The Sonnet runs used CLI 2.1.34
+and predate that change, so their original setting was the CLI default. The
+later Opus-1M runs used CLI 2.1.76 and did pass `--effort high`.
 
-- **FIXED in code (2026-07-13):** `exp_probe_context.py` now passes the original
-  agent's effort (`--effort high` for claude_non_api,
-  `CLAUDE_CODE_EFFORT_LEVEL=max` for claude_non_api_max) and stamps an
-  `effort_replicated` fidelity flag. The viewer tag clears automatically for
-  post-fix probes.
-- **TODO (paid, small):** re-run the 4 pre-fix probes to clear the tags.
+- **FIXED in code (2026-07-13):** `exp_probe_context.py` era-matches both cases
+  (2.1.34/default; 2.1.76/`--effort high`) and stamps an `effort_replicated`
+  fidelity flag. An unknown subscription CLI version now fails closed instead
+  of silently guessing.
+- **FIRST CURRENT-BATCH RESULT:** the one non-deferred Opus-1M probe completed
+  successfully at high effort. Both Sonnet probes failed before inference
+  because the initial implementation incorrectly passed the unsupported
+  `--effort high` flag to 2.1.34. The campaign runner now treats a fidelity file
+  without a model answer as incomplete, so the same command retries those two.
+- The other Opus-1M run is individually deferred for its permanently missing
+  helper-agent report; its old probe remains in **early tests**.
 
 ---
 
@@ -288,7 +312,7 @@ definition inherited from the resample use-case).
 - Injected turns remain recorded per probe (`resume_turns.jsonl`) and rendered
   on continuation pages.
 
-### Local CLI attachments — FIXED in code (2026-07-13), pending one validation probe
+### Local CLI attachments — FIXED and batch-validated (2026-07-13)
 
 The local Claude Code attaches its own system-reminder content to the probe turn
 (tool/agent/skill listings from Owen's machine — visible in `resume_turns.jsonl`,
@@ -306,11 +330,10 @@ noted on continuation pages). The original agents never saw these.
   (cwd/platform/date — the original cwd `/home/ben/task` is recorded in init
   events; fully closing this overlaps with the deferred
   workspace-reconstruction phase).
-- **TODO:** validate on ONE probe via `resume_turns.jsonl` before the batch
-  re-run (also confirms clean-config auth works and, if pinning, that the old
-  CLI resumes cleanly).
+- **VALIDATED:** all 11 successful current-campaign probes used a clean config;
+  none recorded a local attachment on the probe turn.
 
-### CLI version drift — FIXED in code (2026-07-13), pending the validation probe
+### CLI version drift — FIXED and batch-validated (2026-07-13)
 
 Originals used CLI 2.1.9 / 2.1.34 / 2.1.76; the first probe campaign ran the
 local 2.1.207 → different system-prompt instructions, tool schemas, CLI
@@ -328,8 +351,10 @@ behavior.
   every CLI version — verified in the 2.1.34 bundle. A pinned probe still
   says Owen's machine + today's date, not the container + April. That
   residual belongs to the deferred workspace-reconstruction phase.
-- **TODO:** the one-probe validation (below) now also validates that an old
-  CLI resumes our installed sessions cleanly.
+- **VALIDATED:** 11 successful current-campaign probes ran across the pinned
+  run-era versions (2.1.9, 2.1.34, and 2.1.76). Two additional 2.1.34 Sonnet
+  probes reached the CLI but rejected the initially wrong `--effort` option;
+  their retry is tracked in the effort section above.
 
 ### World/workspace mismatch
 
@@ -358,8 +383,8 @@ for real resample experiments. Workspace reconstruction is the deferred phase 2.
 - [ ] **Owen:** DashScope key if we want the qwen3max row (#54) resumable
 - [x] ~~`exp_restart_repro.py` re-entry test~~ — DONE 2026-07-13 (three repro runs + `--agent-task`; mechanism confirmed, wordings captured)
 - [x] ~~pin the FAILED-task notification wording~~ — DONE 2026-07-13 (Owen ran `--fail` on 2.1.76): `failed with exit code 1`, guessed format was wrong, recon_claude fixed
-- [ ] **Test (paid, one probe):** validate clean-config + `--turn end` on one trajectory via `resume_turns.jsonl`, then batch `exp_run_context_recon.py --rerun` — clears all green tags and removes the extra resume turns/attachments for the 7 probeable clean-ending runs (the 8th clean ender is #54, not probeable)
+- [ ] **Test (paid, 2 retries):** rerun `exp_run_context_recon.py --scaffold claude`; the 11 completed probes are skipped and only the two failed subscription-Sonnet probes retry. The deferred #15 remains excluded by shared campaign policy.
 - [x] ~~clean CLAUDE_CONFIG_DIR implementation~~ — DONE 2026-07-13 (default in exp_probe_context; `--user-config` opts out)
-- [x] ~~CLI version pinning~~ — DONE 2026-07-13 (default `--cli original` via npx; run-era resume behavior itself pending the validation probe)
+- [x] ~~CLI version pinning~~ — DONE + batch-validated 2026-07-13 (default `--cli original` via npx; 11 successful current-campaign probes used their run-era versions)
 - [x] ~~does opencode replay reasoning mid-chain? is kimi-k2.5 a thinking model?~~ — BOTH RESOLVED 2026-07-13 (v1.1.59 source-read): yes it replays (three mechanisms), and yes kimi-k2.5 thinks by default → `reasoning lost` is purple on all 8 opencode rows
 - [ ] **Owen:** create an opencode zen API key (sign in at https://opencode.ai/auth, add billing, copy the key) and add `OPENCODE_API_KEY=...` to mats/.env — unlocks the 8 opencode rows (with the permanent reasoning caveat; the kimi-k2-thinking row may refuse — that model was deprecated on zen 2026-03-06)

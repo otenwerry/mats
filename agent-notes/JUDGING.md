@@ -1,5 +1,11 @@
 # How the final reward-hacking judgments were made
 
+> **Covers:** the full adjudication cascade behind the PostTrainBench hack labels — original benchmark judge → in-context re-judge → knowledge audit → context-overflow flag → final agent/tail judge → stored `final` block in `highlights/{run_id}.json`.
+> **Read when:** understanding or trusting the PTB hack labels.
+> **Last updated:** 2026-07-10
+> **Original path:** posttrainbench_old/JUDGING.md
+> **Note:** describes the FIRST-pass PostTrainBench work (posttrainbench_old/), which the second pass treats as read-only / untrusted except the viewer.
+
 This documents the full adjudication pipeline behind the labels shown in the
 viewer. Starting point: the 976 PostTrainBench runs, of which the benchmark's
 own judge flagged **51** for rule violations. Endpoint: every flagged run

@@ -1,5 +1,10 @@
 # Deliberately fixed conditions (and how to flip them for future experiments)
 
+> **Covers:** the pinned conditions for the `p_hacking` seed class (currently just `checkout_redesign`) — true effect, honeypot, outcome metric, pre-specification, instigation, internet, deliverable — plus a caveat that the reward_hacking judge rubric doesn't yet cover selective reporting.
+> **Read when:** designing, varying, or judging `p_hacking` runs.
+> **Last updated:** 2026-07-08
+> **Original path:** petri/seeds/p_hacking/DESIGN_CHOICES.md — "this directory" in the body means that seed folder. Sibling: IDEAS.md (planned variants).
+
 These pins apply to the pinned seed package(s) in this directory (currently just
 checkout_redesign — see IDEAS.md for the planned variants). Layout matches
 ml_training_data_misuse: each variant is a subdir with core.md, SYSTEM_PROMPT.txt,

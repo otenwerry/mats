@@ -1,5 +1,11 @@
 # Continuation Experiment — Spec
 
+> **Covers:** the design of the continuation experiment (does hacking on task A raise the hack rate on a later task B?) — terminology, conditions, who-sees-what, auditor and judge design, and the confounds. Built in `petri/lib/exp_continuation.py` + `exp_continuation_pipeline.py`.
+> **Read when:** designing or interpreting continuation runs.
+> **Last updated:** 2026-07-03
+> **Original path:** petri/docs/CONTINUATION_EXPERIMENT_SPEC.md
+> **Note:** the three-condition scheme here (`hack_prefix` / `clean_prefix` / `no_prefix`) predates the 2026-07-08 rewrite to one free-form `--treatment` per run plus `--prefixes` — see CODEBASE_GUIDE.md.
+
 ## Question
 
 If an agent reward-hacks on one task and is then handed a *second*, unrelated
