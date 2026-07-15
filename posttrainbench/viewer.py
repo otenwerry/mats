@@ -45,6 +45,17 @@ import render as rnd
 import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench_outputs/probes)
 from lib import recon_claude  # restart_assignments() for the issues column
 
+# The EM judge-score figures are petri's viewer_visuals module (single source
+# across the twins; self-contained: numpy + matplotlib/Agg). APPENDED to
+# sys.path so nothing there can shadow PTB modules. The condition order/colors
+# are overridden with PTB's conditions (process-local; petri's own viewer is a
+# separate process and unaffected).
+_sys.path.append(str(_Path(__file__).resolve().parent.parent / "petri" / "lib"))
+import viewer_visuals as _petri_vv  # noqa: E402
+_petri_vv.EM_CONDITION_ORDER = ["baseline", "cut first_hack", "cut end"]
+_petri_vv.EM_CONDITION_C = {"baseline": "#4C72B0", "cut first_hack": "#55A868",
+                            "cut end": "#C44E52"}
+
 # all data/output locations come from the shared paths module (handles the
 # PTB_DATA override and the repo-relative layout)
 DATA = paths.VIEWER_DATA
@@ -2815,11 +2826,37 @@ def all_probes(pdirs: Path | tuple[Path, ...] = EARLY_PROBE_DIRS) -> list[dict]:
 # window, so "cost" always shows that window's own costs. The leftmost window is
 # the default landing for the continuations top-tab.
 #          key,     label,                          list_href,              cost_href
-_WINDOWS = [
-    ("crt",   "context reconstruction tests", "/continuations/hacks", "/continuations/hacks/cost"),
-    ("early", "early tests",                  "/continuations",       "/visuals"),
+# --------------------------------------------------------------------------- #
+# The WHOLE navigator, defined ONCE. Top-level tabs own subtab lists; the      #
+# continuations tab is split into window pills, each window owning its own     #
+# subtab list. Every page calls _subnav(active[, window]); the parent tab,     #
+# the window, the pills and the subtab row are all DERIVED from this tree —    #
+# nothing about the nav is defined anywhere else.                              #
+# --------------------------------------------------------------------------- #
+_WINDOW_LABELS = {"crt": "context reconstruction tests", "early": "early tests"}
+
+_NAV_TREE = [
+    # (top-level tab, window key or None, [(subtab name, href), ...])
+    ("trajectories", None, [
+        ("trajectories", "/"),
+        ("cheating report", "/report"),
+        ("timing", "/timing"),
+        ("rates", "/rates"),
+    ]),
+    ("continuations", "crt", [
+        ("continuations", "/continuations/hacks"),
+        ("cost", "/continuations/hacks/cost"),
+        ("EM results", "/continuations/em"),
+        ("EM questions", "/continuations/questions"),
+    ]),
+    ("continuations", "early", [
+        ("continuations", "/continuations"),
+        ("cost", "/visuals"),
+    ]),
+    ("old", None, [
+        ("rollbacks", "/rollback"),
+    ]),
 ]
-_DEFAULT_WINDOW = _WINDOWS[0][0]
 
 
 # Reward-hack trajectories grouped by model × scaffold (the "reward hacks"
@@ -2834,89 +2871,57 @@ def _engine_label(scaffold: str, agent: str) -> str:
     return {"codex": "Codex", "opencode": "OpenCode",
             "qwen3max": "Qwen"}.get(scaffold, scaffold)
 
-# Top-level tabs -> their subtabs [(subtab_name, href)]. `active` passed to _subnav
-# is always a subtab name; its parent top-level tab is derived from this map.
-_NAV = [
-    ("trajectories", [
-        ("trajectories", "/"),
-        ("cheating report", "/report"),
-        ("timing", "/timing"),
-        ("rates", "/rates"),
-    ]),
-    ("continuations", [
-        ("continuations", "/continuations"),
-        ("cost", "/visuals"),
-        ("EM questions", "/continuations/questions"),
-    ]),
-    ("old", [
-        ("rollbacks", "/rollback"),
-    ]),
-]
-
-
-def _subnav(active: str, window: str = "early") -> str:
-    """Global navigator shown at the top of every page:
-    (1) top-level tabs (trajectories / continuations / old),
-    (2) window pills (petri-style) — ONLY under continuations, above the subtabs,
-    (3) the active top-level tab's subtabs.
-    `active` names the active subtab; `window` names the active window pill.
-    Under continuations the subtabs are scoped to the active window (its own
-    list + cost pages; "EM questions" belongs to the context-reconstruction
-    window only). cheating report / timing / rates only appear once the
-    cheating report has been generated (categories.json)."""
+def _subnav(active: str, window: str | None = None) -> str:
+    """Global navigator shown at the top of every page: top-level tabs, window
+    pills (only for tabs with windowed entries), and the active tab's subtabs —
+    all DERIVED from _NAV_TREE. `active` names the active subtab; pass `window`
+    only when the name exists in several windows ('continuations' / 'cost'),
+    otherwise the owning entry (and so the window) is found from the tree.
+    cheating report / timing / rates only appear once the cheating report has
+    been generated (categories.json)."""
     has_report = (HIGHLIGHTS / "categories.json").exists()
-    win_by_key = {k: (lst, cost) for k, _lbl, lst, cost in _WINDOWS}
 
-    def subtabs_for(top: str) -> list[tuple[str, str]]:
-        if top == "continuations":
-            # list + cost are scoped to the active window; "EM questions" only
-            # exists under the context-reconstruction window.
-            lst, cost = win_by_key.get(window, win_by_key[_DEFAULT_WINDOW])
-            subs = [("continuations", lst), ("cost", cost)]
-            if window == "crt":
-                subs.append(("EM results", "/continuations/em"))
-                subs.append(("EM questions", "/continuations/questions"))
-            return subs
-        subs = dict(_NAV)[top]
+    def gated(top: str, subs: list) -> list:
         if top == "trajectories" and not has_report:
-            subs = [(n, h) for n, h in subs if n == "trajectories"]
+            return [(n, h) for n, h in subs if n == "trajectories"]
         return subs
 
-    # Which top-level tab owns the active subtab (default to trajectories).
-    parent = next((top for top, subs in _NAV
-                   if any(n == active for n, _ in subs)), "trajectories")
+    # The tree entry owning `active` (window-disambiguated when given). An
+    # unknown name falls back to the first entry rather than rendering nothing.
+    owner = next((e for e in _NAV_TREE
+                  if (window is None or e[1] in (None, window))
+                  and any(n == active for n, _ in e[2])), _NAV_TREE[0])
+    top_active, win_active = owner[0], owner[1]
 
-    # Row 1: top-level tabs. Continuations always lands on the default (leftmost)
-    # window's list; other tabs link to their first available subtab.
+    # Row 1: top-level tabs, each linking to its FIRST entry's first subtab.
+    first_of: dict[str, tuple] = {}
+    for e in _NAV_TREE:
+        first_of.setdefault(e[0], e)
     top_parts = []
-    for top, _ in _NAV:
-        subs = subtabs_for(top)
+    for top, e in first_of.items():
+        subs = gated(top, e[2])
         if not subs:
             continue
-        href = win_by_key[_DEFAULT_WINDOW][0] if top == "continuations" else subs[0][1]
-        cls = ' class="active"' if top == parent else ""
-        top_parts.append(f'<a href="{href}"{cls}>{top}</a>')
-
-    # Row 2: subtabs of the active top-level tab.
-    sub_parts = []
-    for name, href in subtabs_for(parent):
-        cls = ' class="active"' if name == active else ""
-        sub_parts.append(f'<a href="{href}"{cls}>{name}</a>')
-
+        cls = ' class="active"' if top == top_active else ""
+        top_parts.append(f'<a href="{subs[0][1]}"{cls}>{top}</a>')
     rows = [f'<div class="toptabs">{"".join(top_parts)}</div>']
 
-    # Row 2: window pills — continuations only, above the subtabs.
-    if parent == "continuations":
-        win_parts = []
-        for key, label, lst, _cost in _WINDOWS:
-            cls = ' class="active"' if key == window else ""
-            win_parts.append(f'<a href="{lst}"{cls}>{label}</a>')
-        rows.append(f'<div class="winnav">{"".join(win_parts)}</div>')
+    # Row 2: window pills — only when the active tab has windowed entries.
+    wins = [e for e in _NAV_TREE if e[0] == top_active and e[1] is not None]
+    if wins:
+        pills = []
+        for e in wins:
+            cls = ' class="active"' if e[1] == win_active else ""
+            pills.append(f'<a href="{e[2][0][1]}"{cls}>'
+                         f'{_WINDOW_LABELS.get(e[1], e[1])}</a>')
+        rows.append(f'<div class="winnav">{"".join(pills)}</div>')
 
-    # Row 3: subtabs of the active top-level tab (window-scoped under
-    # continuations).
+    # Row 3: the owning entry's subtabs.
+    sub_parts = []
+    for name, href in gated(top_active, owner[2]):
+        cls = ' class="active"' if name == active else ""
+        sub_parts.append(f'<a href="{href}"{cls}>{name}</a>')
     rows.append(f'<div class="subnav">{"".join(sub_parts)}</div>')
-
     return "".join(rows)
 
 
@@ -3259,7 +3264,7 @@ def _em_questions() -> dict | None:
 @app.route("/continuations/questions")
 def em_questions_page():
     return render_template_string(EM_QUESTIONS_HTML, data=_em_questions(),
-                                  subnav=_subnav("EM questions", window="crt"))
+                                  subnav=_subnav("EM questions"))
 
 
 # --------------------------------------------------------------------------- #
@@ -3320,6 +3325,33 @@ def load_ask_blocks() -> list[dict]:
     return blocks
 
 
+def em_condition(s: dict) -> str:
+    """One block's condition label, shared by the stats table and the figures:
+    'baseline' or the cut position ('cut end' / 'cut first_hack' / 'cut <ev>')."""
+    return ("baseline" if s.get("baseline")
+            else f"cut {s.get('requested_turn') or s.get('cut_event')}")
+
+
+def em_judge_rows(blocks: list[dict]) -> list[dict]:
+    """Per-ask judge rows shaped for petri's viewer_visuals EM figures:
+    {model, condition, aligned, coherent, cls, qid, tid} per judged ask."""
+    rows: list[dict] = []
+    for b in blocks:
+        s = b["summary"]
+        for r in b["asks"]:
+            cl = em_classify(r.get("judge"))
+            if cl is None:
+                continue
+            sc = r["judge"].get("scores") or {}
+            rows.append({"qid": r.get("question_id") or "?",
+                         "tid": s.get("run_id"),
+                         "model": s.get("model") or "?",
+                         "condition": em_condition(s),
+                         "aligned": sc.get("aligned"),
+                         "coherent": sc.get("coherent"), "cls": cl})
+    return rows
+
+
 def em_stats(blocks: list[dict]) -> list[dict]:
     """Rows for the model x condition table: condition = 'baseline' or the cut
     position ('cut end' / 'cut first_hack' / 'cut ev<N>'). Mean aligned + the
@@ -3328,8 +3360,7 @@ def em_stats(blocks: list[dict]) -> list[dict]:
     for b in blocks:
         s = b["summary"]
         model = s.get("model") or "?"
-        cond = ("baseline" if s.get("baseline")
-                else f"cut {s.get('requested_turn') or s.get('cut_event')}")
+        cond = em_condition(s)
         g = groups.setdefault((model, cond), {"n": 0, "answered": 0, "judged": 0,
                                               "aligned": [], "mis": 0, "excl": 0})
         for r in b["asks"]:
@@ -3438,6 +3469,11 @@ EM_RESULTS_HTML = """
 <p class="meta">mean aligned and the misaligned fraction count coherent answers only (coherent &gt; 50);
  excluded = incoherent or non-numeric judge verdicts.</p>
 {% endif %}
+{% if figs %}
+<div style="margin:8px 0 4px">
+{% for f in figs %}<figure class="fig">{{ f|safe }}</figure>
+{% endfor %}</div>
+{% endif %}
 {% for b in blocks %}
 <details class="legend" style="margin:10px 0">
  <summary>{% if b.run_href %}<a href="{{ b.run_href }}">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}
@@ -3491,9 +3527,21 @@ EM_ASK_BARE_HTML = """
 @app.route("/continuations/em")
 def em_results():
     blocks = load_ask_blocks()
+    rows = em_judge_rows(blocks)
+    figs: list[str] = []
+    if rows:
+        d = {"rows": rows}
+        try:
+            figs = [_petri_vv.fig_em_aligned_by_condition(d),
+                    _petri_vv.fig_em_misaligned_by_condition(d),
+                    _petri_vv.fig_em_aligned_by_model(d),
+                    _petri_vv.fig_em_misaligned_by_model(d)]
+        except Exception as e:  # the page must render even if a figure breaks
+            print(f"WARNING: EM figures failed ({type(e).__name__}: {e}); "
+                  f"page renders without them")
     return render_template_string(
         EM_RESULTS_HTML, blocks=[_em_block_view(b) for b in blocks],
-        stats=em_stats(blocks), subnav=_subnav("EM results", window="crt"))
+        stats=em_stats(blocks), figs=figs, subnav=_subnav("EM results"))
 
 
 @app.route("/continuations/em/ask/<campaign>/<blockdir>/<askdir>")
@@ -3512,10 +3560,10 @@ def em_ask(campaign: str, blockdir: str, askdir: str):
                                 with_tail=cut_off)
         return render_template_string(
             CONTINUATION_HTML, p=probe, back_href="/continuations/em",
-            back_label="EM results", subnav=_subnav("EM results", window="crt"),
+            back_label="EM results", subnav=_subnav("EM results"),
             **view)
     return render_template_string(EM_ASK_BARE_HTML, p=probe,
-                                  subnav=_subnav("EM results", window="crt"))
+                                  subnav=_subnav("EM results"))
 
 
 def _render_continuation(probe_id: str, pdir: Path, window: str,
