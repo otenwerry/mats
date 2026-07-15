@@ -1,3 +1,7 @@
+# Notes
+
+- [stuff in brackets=xyz] means the flag is optional, with xyz being the default value.
+
 # Petri
 
 ## Viewer
@@ -28,6 +32,17 @@ uv run exp_rollback_pipeline.py
 	[--concurrency=50]
 	[--annotate-model=judge]
 	[--dry-run, --skip-judge, --skip-viewer, --force-judge]
+
+## Ask propensity questions to resumed targets (auto-judged by the EM judge)
+uv run exp_ask_questions.py
+	--trajectory=<id,id or 'hacks'> --questions=em
+	[--n=1]
+	[--turn=last (or A-turn number, 'end', 'first_hack')]
+	[--only=<qid,qid>]
+	[--concurrency=50]
+	[--timeout=600]
+	[--campaign=questions_<set>]   # output subdirectory
+	[--no-judge, --dry-run]
 
 
 

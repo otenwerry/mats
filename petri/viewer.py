@@ -5214,7 +5214,11 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     from exp_ask_questions import with_question   # the ask's own fold rule (single source)
     s, a = b["summary"], b["orig"]
     ask_dir = b["dir"] / r["dir"]
-    msgs, _folded = with_question(context_msgs, r.get("question") or "")
+    # question_sent = the exact text sent (transition prefix + question); asks from
+    # before the transition existed stored only the bare question, which IS what
+    # they sent, so the fallback replays those faithfully too.
+    msgs, _folded = with_question(context_msgs,
+                                  r.get("question_sent") or r.get("question") or "")
     note = ""
     resp = ask_dir / "response.json"
     if resp.exists():
