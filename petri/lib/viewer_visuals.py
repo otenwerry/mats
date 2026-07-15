@@ -1974,6 +1974,41 @@ def fig_em_cost(em: dict) -> str:
     return _fig_to_svg(fig)
 
 
+def fig_em_cost_total(em: dict) -> str:
+    """TOTAL cost per model (every priced ask summed), same stacking as fig_em_cost
+    (target blue + judge orange) and the SAME row order (mean-total desc), so the two
+    charts read side by side. The annotation is the model's total; the title carries
+    the grand total."""
+    rows = em["by_model"]
+    if not rows:
+        return _empty_fig("no priced asks", (4.6, 4.0))
+    tilde = "" if em["exact"] else "~"
+    labels = [m for m, _, _ in rows]
+    sums = [float(np.sum(cs)) for _, cs, _ in rows]
+    jsums = [float(np.sum(js)) for _, _, js in rows]
+    ns = [len(cs) for _, cs, _ in rows]
+    tops = [s + j for s, j in zip(sums, jsums)]
+    fig, ax = plt.subplots(figsize=(max(4.8, 1.35 * len(rows) + 1.5), 4.2))
+    xs = np.arange(len(rows))
+    ax.bar(xs, sums, width=0.6, color=EM_ANSWERED_C, edgecolor="white", lw=0.4,
+           label="target ask")
+    ax.bar(xs, jsums, width=0.6, bottom=sums, color=EM_JUDGE_C, edgecolor="white",
+           lw=0.4, label="EM judge")
+    for x, t in zip(xs, tops):
+        ax.annotate(f"{tilde}{_usd(t)}", (x, t), textcoords="offset points",
+                    xytext=(0, 4), ha="center", fontsize=10, color="#333",
+                    fontweight="bold")
+    ax.set_xticks(xs, [f"{lbl}\n(n={n})" for lbl, n in zip(labels, ns)], fontsize=9)
+    ax.set_ylabel("Total cost ($)")
+    ax.set_ylim(0, max(tops) * 1.20)
+    ax.set_title(f"EM total cost by model — {tilde}{_usd(sum(tops))} overall")
+    if any(j > 0 for j in jsums):
+        ax.legend(fontsize=8.5, framealpha=0.9)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
 def _em_cost_section(em: dict | None) -> str:
     """The 'EM question asks' block on the Cost tab (renders on any sweep whose
     trajectories have exp_ask_questions.py results). Empty string when there is none."""
@@ -1996,7 +2031,8 @@ def _em_cost_section(em: dict | None) -> str:
             f'model.{exact_note}{judge_note}{unpriced}')
     return ('<h2 style="margin-top:34px;">EM question asks</h2>'
             f'<p class="vsub">{lead}</p>'
-            + _stack(fig_em_cost(em)))
+            '<div class="figgrid">'
+            + _figure(fig_em_cost(em)) + _figure(fig_em_cost_total(em)) + '</div>')
 
 
 # EM judge scores (the paper's aligned/coherent judge, run by exp_ask_questions.py).
