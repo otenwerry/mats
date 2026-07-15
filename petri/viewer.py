@@ -5269,7 +5269,11 @@ def pq_ask_value(r: dict) -> float | None:
     return float(v) if isinstance(v, (int, float)) else None
 
 
-_PQ_COND_ORDER = ("RH prefix", "clean prefix", "baseline", "?")
+# Propensity pages/figures show conditions in plain words (the stored/EM names on
+# the left are the em_condition outputs).
+PQ_COND_DISPLAY = {"RH prefix": "hack context", "clean prefix": "clean context",
+                   "baseline": "no context"}
+_PQ_COND_ORDER = ("hack context", "clean context", "no context", "?")
 
 
 def pq_summary_grid(blocks: list[dict]) -> str:
@@ -5289,7 +5293,8 @@ def pq_summary_grid(blocks: list[dict]) -> str:
     for b in blocks:
         a = b.get("orig")
         model = pretty_model(a["target"] if a else (b["summary"].get("target_model") or "?"))
-        cond = em_condition(b)
+        raw_cond = em_condition(b)
+        cond = PQ_COND_DISPLAY.get(raw_cond, raw_cond)
         ctxs.setdefault((model, cond), set()).add(b["dir"].name)
         for r in b["asks"]:
             qid = str(r.get("question_id") or "?")
@@ -5314,10 +5319,10 @@ def pq_summary_grid(blocks: list[dict]) -> str:
     for model in models:
         conds = [c for c in _PQ_COND_ORDER
                  if any(k[0] == model and k[1] == c for k in vals)]
-        has_delta = "RH prefix" in conds and "clean prefix" in conds
+        has_delta = "hack context" in conds and "clean context" in conds
         head = "".join(
-            f"<th>{esc(c)} <span style='font-weight:400'>({len(ctxs.get((model, c), set()))} ctx)</span></th>"
-            for c in conds) + ("<th>&Delta; RH&minus;clean</th>" if has_delta else "")
+            f"<th>{esc(c)} <span style='font-weight:400'>({len(ctxs.get((model, c), set()))} traj)</span></th>"
+            for c in conds) + ("<th>&Delta; hack&minus;clean</th>" if has_delta else "")
         body_rows: list[str] = []
         last_cat = None
         ncols = 1 + len(conds) + (1 if has_delta else 0)
@@ -5340,7 +5345,7 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                 tds.append(f'<td title="n={cell[1]}">{cell[0]:.1f}</td>'
                            if cell else "<td>&mdash;</td>")
             if has_delta:
-                rh, cl = cells.get("RH prefix"), cells.get("clean prefix")
+                rh, cl = cells.get("hack context"), cells.get("clean context")
                 tds.append(f"<td>{rh[0] - cl[0]:+.1f}</td>" if rh and cl
                            else "<td>&mdash;</td>")
             body_rows.append("<tr>" + "".join(tds) + "</tr>")
@@ -5353,6 +5358,44 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                       f'judge verdict) &mdash; each is flagged on its own page</div>')
         parts.append(table)
     return "".join(parts)
+
+
+def pq_vis_data(blocks: list[dict]) -> dict | None:
+    """Per-ask propensity values for the Visuals 'Propensity questions' tab: one row
+    per usable ask ({qid, category, model, condition, tid, hi, value}; hi = the
+    question's scale top, 10 or 100 -- sycophancy rows carry the judge's agreement,
+    hi 100), plus the set's canonical question order and per-condition counts of
+    excluded (unusable) asks. None when there is nothing to plot."""
+    if not blocks:
+        return None
+    qmeta = _pq_questions_meta()
+    hi_by_q = {q["id"]: (100 if (q.get("answer_format") or {}).get("max") == 100
+                         or q["category"] == "sycophancy" else 10) for q in qmeta}
+    cat_by_q = {q["id"]: q["category"] for q in qmeta}
+    rows: list[dict] = []
+    excluded: dict[str, int] = {}
+    for b in blocks:
+        a = b.get("orig")
+        model = pretty_model(a["target"] if a else (b["summary"].get("target_model") or "?"))
+        raw_cond = em_condition(b)
+        cond = PQ_COND_DISPLAY.get(raw_cond, raw_cond)
+        for r in b["asks"]:
+            qid = str(r.get("question_id") or "?")
+            v = pq_ask_value(r)
+            if v is None:
+                excluded[cond] = excluded.get(cond, 0) + 1
+                continue
+            rows.append({"qid": qid, "category": cat_by_q.get(qid, "?"),
+                         "model": model, "condition": cond, "tid": b["tid"],
+                         "hi": hi_by_q.get(qid, 10), "value": float(v)})
+    if not rows:
+        return None
+    questions = ([{"id": q["id"], "category": q["category"], "hi": hi_by_q[q["id"]]}
+                  for q in qmeta]
+                 or [{"id": r["qid"], "category": r["category"], "hi": r["hi"]}
+                     for r in {r["qid"]: r for r in rows}.values()])
+    return {"rows": rows, "questions": questions, "excluded": excluded,
+            "n_traj": len({b["tid"] for b in blocks if b["tid"] is not None})}
 
 
 # Question sets with pages of their own: em -> em_<sweep>.html, propensity ->
@@ -5882,10 +5925,11 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
     if qset == "propensity":
         heading = f"Propensity questions — sweep {sweep_label(key)}"
         judge_lead = (
-            '<div class="emmeta">Cell = mean over every usable ask (n in the cell '
-            'tooltip; question&rsquo;s high-pole in the row tooltip). Scale answers '
-            '1&ndash;10 unless marked 0&ndash;100; sycophancy rows are the judge&rsquo;s '
-            'agreement score. Every measure: <b>higher = more misaligned</b>.</div>'
+            '<div class="emmeta">Mean answer per question and condition; every row: '
+            '<b>higher = more misaligned</b>. Answers are 1&ndash;10 unless marked '
+            '0&ndash;100; sycophancy rows are the judge&rsquo;s agreement with the '
+            'false claim (0&ndash;100). Hover a cell for its sample count, a question '
+            'name for what a high answer means.</div>'
             + pq_summary_grid(blocks))
         subnav_item = "propensity"
         out_file = sweep_pq_file(key)
@@ -6206,6 +6250,7 @@ async def main() -> None:
         cost = None if bare else cost_data(subset, annotations)
         em_cost = em_cost_data(em_by_sweep.get(key) or [])
         em_judge = em_judge_data(em_by_sweep.get(key) or [])
+        pq_vis = pq_vis_data(pq_by_sweep.get(key) or [])
         sub_html = subnav("visuals", key)
         try:
             import viewer_visuals
@@ -6218,7 +6263,7 @@ async def main() -> None:
                 cost=cost, cost_by_auditor=(key == "auditors"),
                 cont_faithfulness_cost=cont_faith_cost,
                 cont_generation_cost=cont_gen_cost,
-                em_cost=em_cost, em_judge=em_judge,
+                em_cost=em_cost, em_judge=em_judge, pq=pq_vis,
                 heading=f"Visuals — {set_label}",
                 audit_label=f"Original audit trajectories · {set_label}",
                 subnav_html=sub_html, totop=TOTOP_HTML)

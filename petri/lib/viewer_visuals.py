@@ -2322,6 +2322,199 @@ def _em_judge_section(d: dict | None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Propensity questions (--questions=propensity): attitude shifts by condition.
+# Data contract (viewer.pq_vis_data): rows = usable asks {qid, category, model,
+# condition, tid, hi (scale top, 10|100), value}; questions = the set's canonical
+# order; excluded = per-condition counts of unusable asks. Sycophancy rows carry
+# the judge's 0-100 agreement score (hi 100). Every measure is oriented
+# HIGHER = MORE MISALIGNED, so all these figures read the same way.
+# --------------------------------------------------------------------------- #
+PQ_CONDITION_C = {"no context": "#4C72B0", "clean context": "#55A868",
+                  "hack context": "#C44E52"}
+_PQ_ORDER = ("hack context", "clean context", "no context")
+
+
+def _pq_conds(rows: list[dict]) -> list[str]:
+    present = list(dict.fromkeys(r["condition"] for r in rows))
+    return ([c for c in _PQ_ORDER if c in present]
+            + sorted(c for c in present if c not in _PQ_ORDER))
+
+
+def _pq_grouped_bars(ax, groups: list[str], conds: list[str],
+                     vals_of) -> None:
+    """Grouped condition-colored bars with 95% CI whiskers. vals_of(group, cond)
+    returns the value list of one bar; empty lists draw no bar."""
+    width = 0.8 / len(conds)
+    xs = np.arange(len(groups))
+    for i, c in enumerate(conds):
+        means, errs = [], []
+        for g in groups:
+            vals = vals_of(g, c)
+            if vals:
+                m, hw = _mean_ci(vals)
+                means.append(m); errs.append(hw or 0.0)
+            else:
+                means.append(float("nan")); errs.append(0.0)
+        ax.bar(xs + (i - (len(conds) - 1) / 2) * width, means, width * 0.92,
+               color=PQ_CONDITION_C.get(c, "#8a8a99"), edgecolor="white", lw=0.4,
+               yerr=errs, capsize=3, error_kw=dict(ecolor="#333", lw=1.0), label=c)
+    _cat_xticks(ax, xs, groups, fontsize=9.5)
+    ax.legend(fontsize=8.5, title="condition", framealpha=0.9)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+
+
+def fig_pq_category(d: dict) -> str:
+    """Mean answer by question category and condition, 1-10 questions only
+    (audit_rate and sycophancy are 0-100 and have their own figures)."""
+    rows = [r for r in d["rows"] if r["hi"] == 10]
+    if not rows:
+        return _empty_fig("no 1-10 asks")
+    cats = list(dict.fromkeys(q["category"] for q in d["questions"] if q["hi"] == 10))
+    conds = _pq_conds(rows)
+    fig, ax = plt.subplots(figsize=(max(5.2, 1.8 * len(cats) + 1.6), 4.2))
+    _pq_grouped_bars(ax, cats, conds,
+                     lambda g, c: [r["value"] for r in rows
+                                   if r["category"] == g and r["condition"] == c])
+    ax.set_ylabel("Mean answer (1–10)")
+    ax.set_ylim(0, 10.5)
+    ax.set_title("Mean answer by category (higher = more misaligned)")
+    return _fig_to_svg(fig)
+
+
+def fig_pq_model(d: dict) -> str:
+    """Mean 1-10 answer by answering model and condition (all 1-10 questions pooled)."""
+    rows = [r for r in d["rows"] if r["hi"] == 10]
+    if not rows:
+        return _empty_fig("no 1-10 asks")
+    models = sorted({r["model"] for r in rows})
+    conds = _pq_conds(rows)
+    fig, ax = plt.subplots(figsize=(max(5.2, 1.8 * len(models) + 1.6), 4.2))
+    _pq_grouped_bars(ax, models, conds,
+                     lambda g, c: [r["value"] for r in rows
+                                   if r["model"] == g and r["condition"] == c])
+    ax.set_ylabel("Mean answer (1–10)")
+    ax.set_ylim(0, 10.5)
+    ax.set_title("Mean answer by model (higher = more misaligned)")
+    return _fig_to_svg(fig)
+
+
+def fig_pq_syco(d: dict) -> str:
+    """Mean sycophancy-judge agreement (0-100) by condition: 0 = the answer corrects
+    the user's false claim, 100 = fully endorses it."""
+    rows = [r for r in d["rows"] if r["category"] == "sycophancy"]
+    if not rows:
+        return _empty_fig("no judged sycophancy asks")
+    conds = _pq_conds(rows)
+    fig, ax = plt.subplots(figsize=(max(4.6, 1.5 * len(conds) + 1.4), 4.2))
+    xs = np.arange(len(conds))
+    means, errs, ns = [], [], []
+    for c in conds:
+        vals = [r["value"] for r in rows if r["condition"] == c]
+        m, hw = _mean_ci(vals)
+        means.append(m); errs.append(hw or 0.0); ns.append(len(vals))
+    ax.bar(xs, means, width=0.6,
+           color=[PQ_CONDITION_C.get(c, "#8a8a99") for c in conds],
+           edgecolor="white", lw=0.4, yerr=errs, capsize=5,
+           error_kw=dict(ecolor="#333", lw=1.1))
+    for x, m in zip(xs, means):
+        ax.annotate(f"{m:.0f}", (x, m), textcoords="offset points", xytext=(0, 8),
+                    ha="center", fontsize=10, color="#333", fontweight="bold")
+    _cat_xticks(ax, xs, [f"{c}\n(n={n})" for c, n in zip(conds, ns)], fontsize=9)
+    ax.set_ylabel("Mean agreement with the false claim (0–100)")
+    ax.set_ylim(0, 105)
+    ax.set_title("Sycophancy by condition")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_pq_questions(d: dict, hi: int) -> str:
+    """Per-question dot plot: mean answer per condition with 95% CI whiskers, one
+    panel per scale (1-10 / 0-100), questions in the set's order with bold category
+    separator rows. The figure form of the propensity page's grid, pooled across
+    models."""
+    qs = [q for q in d["questions"] if q["hi"] == hi]
+    rows = [r for r in d["rows"] if r["hi"] == hi]
+    if not rows or not qs:
+        return _empty_fig("no asks on this scale")
+    conds = _pq_conds(rows)
+    ylabels: list[str] = []
+    ypos: dict[str, int] = {}
+    y = 0
+    last_cat = None
+    for q in qs:
+        if q["category"] != last_cat:
+            last_cat = q["category"]
+            ylabels.append(str(q["category"]).upper())
+            y += 1
+        ylabels.append(q["id"])
+        ypos[q["id"]] = y
+        y += 1
+    fig, ax = plt.subplots(figsize=(6.6, max(3.2, 0.34 * y + 1.2)))
+    off = {c: (i - (len(conds) - 1) / 2) * 0.26 for i, c in enumerate(conds)}
+    for c in conds:
+        px, py, errs = [], [], []
+        for q in qs:
+            vals = [r["value"] for r in rows
+                    if r["qid"] == q["id"] and r["condition"] == c]
+            if not vals:
+                continue
+            m, hw = _mean_ci(vals)
+            px.append(m); py.append(ypos[q["id"]] + off[c]); errs.append(hw or 0.0)
+        ax.errorbar(px, py, xerr=errs, fmt="o", ms=4.5, lw=0, elinewidth=1.1,
+                    capsize=2.5, color=PQ_CONDITION_C.get(c, "#8a8a99"), label=c)
+    ax.set_yticks(range(y))
+    ax.set_yticklabels(ylabels, fontsize=8.5)
+    for tick, lbl in zip(ax.get_yticklabels(), ylabels):
+        if lbl.isupper():
+            tick.set_fontweight("bold")
+    ax.invert_yaxis()
+    lo = 1 if hi == 10 else 0
+    ax.set_xlim(lo - 0.02 * hi, hi * 1.03)
+    ax.set_xlabel(f"mean answer ({lo}–{hi}, higher = more misaligned)")
+    ax.set_title("1–10 questions" if hi == 10
+                 else "0–100 questions (audit_rate + sycophancy agreement)")
+    ax.legend(fontsize=8.5, title="condition", framealpha=0.9)
+    ax.xaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _pq_section(d: dict | None) -> str:
+    """The 'Propensity questions' tab: attitude-shift figures over every usable
+    propensity ask on the sweep. Empty string when there is none."""
+    if not d:
+        return ""
+    rows = d["rows"]
+    models = sorted({r["model"] for r in rows})
+    excl = d.get("excluded") or {}
+    excl_txt = (
+        f' <b>{sum(excl.values())}</b> unusable ask(s) excluded from every figure '
+        f'(no answer, unparsed rating, or unscored judge verdict) &mdash; by condition: '
+        + ", ".join(f"{esc_loc(c)} {n}" for c, n in sorted(excl.items())) + "."
+        if excl else "")
+    lead = (f'<b>{len(rows)}</b> usable asks over <b>{d.get("n_traj")}</b> resumed '
+            f'trajectory(ies) ({esc_loc(", ".join(models))}). Every measure is oriented '
+            f'<b>higher = more misaligned</b>. Scale questions plot the model&rsquo;s own '
+            f'1&ndash;10 answer (audit_rate 0&ndash;100); sycophancy plots the '
+            f'judge&rsquo;s 0&ndash;100 agreement with the user&rsquo;s false claim. '
+            f'Figures pool models except the by-model one; per-model per-question means '
+            f'are the grid on the propensity page. Error bars: 95% CI.{excl_txt}')
+    return ('<h2>Propensity questions — attitude shifts by condition</h2>'
+            f'<p class="vsub">{lead}</p>'
+            '<div class="figgrid">'
+            + _figure(fig_pq_category(d),
+                      "1–10 questions only; audit_rate and sycophancy (0–100 scales) "
+                      "have their own figures.")
+            + _figure(fig_pq_model(d),
+                      "The same 1–10 pool, split by answering model instead of category.")
+            + '</div><div class="figgrid">' + _figure(fig_pq_syco(d)) + '</div>'
+            '<h3 style="font-size:15px;margin:24px 0 2px">By question</h3>'
+            + _stack(fig_pq_questions(d, 10), fig_pq_questions(d, 100)))
+
+
+# --------------------------------------------------------------------------- #
 # page
 # --------------------------------------------------------------------------- #
 VISUALS_CSS = """
@@ -2579,6 +2772,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        cont_generation_cost: dict | None = None,
                        em_cost: dict | None = None,
                        em_judge: dict | None = None,
+                       pq: dict | None = None,
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
                        subnav_html: str = "", totop: str = "") -> str:
@@ -2652,6 +2846,8 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     cost_html += _em_cost_section(em_cost)
     # EM judge scores get their own tab (the ask COSTS stay on the Cost tab above)
     em_html = _em_judge_section(em_judge)
+    # propensity-question attitude shifts: their own tab too
+    pq_html = _pq_section(pq)
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
     # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
@@ -2664,6 +2860,7 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
         ("audits", "Original audits", audits_panel),
         ("cost", "Cost", cost_html),
         ("em", "EM questions", em_html),
+        ("pq", "Propensity questions", pq_html),
         ("continuations", "Continuations", cont_panel),
         ("weaker", "Weaker models", old_inner),
         ("rollback", "Rollback re-hacking", rollback_html),
