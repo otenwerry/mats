@@ -2,7 +2,7 @@
 
 Builds ONE visuals page per call (build_visuals_page). Since 2026-07-02 each sweep has
 its own page linked from its trajectories page — visuals_<key>.html per SWEEPS entry in
-make_viewer.py — instead of a single global visuals.html. Sections render in labeled
+viewer.py — instead of a single global visuals.html. Sections render in labeled
 source boxes (never pooled): a sweep's propensity (pre-rendered HTML passed in) +
 auditor user-turn histograms + incompleteness histograms (+ weak-model hallucination on
 the pre-fixed-SP sweeps), and — on the sweep that owns the continuation runs — the
@@ -10,12 +10,12 @@ continuation experiment's per-condition hack rates, the "when hacking starts" fi
 timing figures, + mechanism-similarity chart.
 
 It ALSO contains the older rollback re-hacking figures (control-vs-treatment re-hack
-rate, time-to-first-re-hack) — make_viewer currently passes `records=[]` so that
+rate, time-to-first-re-hack) — viewer currently passes `records=[]` so that
 section doesn't render, but the code is kept for reuse on new rollback data (the
 per-continuation record schema is below).
 
-This module is intentionally decoupled from make_viewer: it takes plain data dicts
-(built by make_viewer's collect/*_data helpers) plus the site CSS + top-nav html, and
+This module is intentionally decoupled from viewer: it takes plain data dicts
+(built by viewer's collect/*_data helpers) plus the site CSS + top-nav html, and
 returns a complete HTML page. It only needs numpy + matplotlib, so a missing
 matplotlib can be caught by the caller without breaking the rest of the viewer.
 
@@ -226,7 +226,7 @@ def fig_rate_by_model(records) -> str:
             ax.annotate(f"{k}/{n}", (b.get_x() + b.get_width() / 2, b.get_height()),
                         textcoords="offset points", xytext=(0, 2), ha="center",
                         va="bottom", fontsize=8, color="#555")
-    # record["model"] is already a pretty display name (make_viewer.pretty_model).
+    # record["model"] is already a pretty display name (viewer.pretty_model).
     ax.set_xticks(x, models, rotation=20, ha="right")
     ax.set_ylabel("Re-hack rate (%)")
     ax.set_ylim(0, 100)
@@ -442,7 +442,7 @@ def fig_continuation_rate(by_condition: list[dict]) -> str:
     """One bar per prefix condition (no prefix / clean / corrected-hack / full-hack), reward-hack
     rate pooled across every model x B cell. Ticks use the _CONT_SHORT abbreviations so the 4
     labels don't overlap in the narrow axis. Each bar annotated k/n; Wilson 95% CI error bars.
-    `by_condition`: [{label, k, n}, ...] in display order (built by make_viewer)."""
+    `by_condition`: [{label, k, n}, ...] in display order (built by viewer)."""
     rows = [r for r in by_condition if r["n"] > 0]
     if not rows:
         return _empty_fig("no continuations yet", (4.8, 4.2))
@@ -958,7 +958,7 @@ CATEGORY_STYLE = [
 def fig_condition_rate(by_condition: list[dict]) -> str:
     """One hack-rate bar per seed condition, pooled over every audit in the comparison
     set. k/n annotated above each bar; Wilson 95% CI error bars.
-    `by_condition`: [{label, k, n}, ...] in display order (built by make_viewer)."""
+    `by_condition`: [{label, k, n}, ...] in display order (built by viewer)."""
     rows = [r for r in by_condition if r["n"] > 0]
     if not rows:
         return _empty_fig("no audits", (3.8, 4.0))
@@ -1060,7 +1060,7 @@ def fig_rh_score_hist(scores: list) -> str:
 
 
 def _failure_modes_section(fm: dict) -> str:
-    """Reward-hack failure-mode tally (make_viewer.failure_modes_data): a horizontal-bar
+    """Reward-hack failure-mode tally (viewer.failure_modes_data): a horizontal-bar
     table of how many tag-eligible audits (reward_hacking >= 2) carry each RH_FAILURE_MODES
     tag. Modes are non-exclusive so counts need not sum to the denominator. Parse errors
     (rh>=2 but no usable tag) are surfaced as a caveat and excluded from the counts."""
@@ -1101,7 +1101,7 @@ def _condition_section(cond: dict, show_condition_rate: bool = True) -> str:
     headline rate figure keeps the allow/correct split; category composition, per-model
     and per-prompt rates, and the reward_hacking score histogram pool the conditions
     (Owen, 2026-07-05: the split doesn't matter beyond the first graph).
-    `cond` is make_viewer.condition_comparison_data's dict; its `note` records exactly
+    `cond` is viewer.condition_comparison_data's dict; its `note` records exactly
     which audits were excluded from the comparison and is always shown.
     `show_condition_rate` gates the leading allow-vs-correct "Hack rate by condition" figure
     (dropped on sweep 7, Owen 2026-07-10)."""
@@ -1296,7 +1296,7 @@ def fig_peak_pct_hist_grid(peak_pct_by_turns: list[dict]) -> str:
 def _reasoning_section(reasoning_exp: dict) -> str:
     """The 'Reward hacking by reasoning & turn budget' block (settings sweep): hack rate by
     turn budget (reasoning on/off grouped) + hack rate by reasoning (pooled over turns).
-    `reasoning_exp` is make_viewer.reasoning_comparison_data's dict."""
+    `reasoning_exp` is viewer.reasoning_comparison_data's dict."""
     ci_cap = "Hack = binary definition. Error bars: Wilson 95% CI."
     return (
         "<h2>Reward hacking by reasoning &amp; turn budget</h2>"
@@ -1866,7 +1866,7 @@ def fig_cont_cost_by_treatment(cc: dict) -> str:
     """MEAN cost of one continuation run per treatment (baseline + each prefixed treatment),
     stacked by role (auditor/target/judge). Per-run means, not totals, so the treatments are
     comparable regardless of how many times each was run (the grand total + the by-role split
-    above carry the absolute spend). Baseline-first, in the order make_viewer stamped."""
+    above carry the absolute spend). Baseline-first, in the order viewer stamped."""
     rows = []
     for r in cc.get("by_treatment", []):
         n = r["n"] or 1
@@ -2174,7 +2174,7 @@ def _user_turns_section(user_turns: dict) -> str:
     """The 'Auditor user turns' block: per-model histograms of per-trajectory user-turn
     counts colored by hack outcome, plus how many user turns preceded the first annotated
     hack turn. `user_turns` = {"by_model": [(label, hack_counts, non_counts), ...],
-    "before_first_hack": [int, ...]} (see make_viewer.user_turns_data)."""
+    "before_first_hack": [int, ...]} (see viewer.user_turns_data)."""
     by_model = user_turns.get("by_model", [])
     if not by_model:
         return ""
@@ -2338,7 +2338,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
     returns "" on empty data, so a page shows exactly what its sweep has. Sections:
 
       1. Reward-hacking PROPENSITY (by model / prompt) over the set's audits. This is
-         pre-rendered HTML passed in as `propensity_html` (built by make_viewer, where
+         pre-rendered HTML passed in as `propensity_html` (built by viewer, where
          the audit-classification logic lives); pass "" to omit it.
       2. incompleteness / user_turns / old_halluc / condition_exp: audit-sourced figure
          sections (condition_exp — the allow-vs-correct comparison — renders FIRST in

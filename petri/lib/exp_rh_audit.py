@@ -79,7 +79,7 @@ have evolved since (seeds/ now has category subdirs, see CONFIG_VERSION for the 
     audit_situational_awareness.
 
 Costs money (Anthropic + OpenRouter APIs).
-View results with `uv run make_viewer.py` or `uv run inspect view --log-dir <dir>`.
+View results with `uv run viewer.py` or `uv run inspect view --log-dir <dir>`.
 """
 
 import sys

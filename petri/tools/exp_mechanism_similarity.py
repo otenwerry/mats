@@ -26,7 +26,7 @@ import pathlib
 from collections import defaultdict
 from typing import Literal
 
-# tools/ lives one level under petri/; put petri/ (for make_viewer) and petri/lib (for
+# tools/ lives one level under petri/; put petri/ (for viewer) and petri/lib (for
 # petri_paths, exp_continuation) on the path so this runs from anywhere.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -36,8 +36,8 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-import make_viewer
-from make_viewer import load_mode, load_originals_by_id, page_name
+import viewer
+from viewer import load_mode, load_originals_by_id, page_name
 from petri_paths import LOGS, ENV_FILE
 from exp_continuation import parse_continuation_task, CONTINUATION_PREFIX
 

@@ -100,13 +100,13 @@ from inspect_petri.tools import (
 from inspect_petri.tools._resume import RESUME_DESCRIPTION, _format_response_output
 from inspect_petri.tools._viewers import resume_viewer
 
-# make_viewer lives at the top level (parent of lib/); put it on the import path so
+# viewer lives at the top level (parent of lib/); put it on the import path so
 # this module works whether it's imported by a pipeline or run standalone from lib/.
 import sys as _sys, pathlib as _pathlib
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
 
-# reuse make_viewer's loaders so transcript numbering matches the viewer exactly
-from make_viewer import DATA, LOGS, load_mode, page_name
+# reuse viewer's loaders so transcript numbering matches the viewer exactly
+from viewer import DATA, LOGS, load_mode, page_name
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from exp_rh_audit import build_target_model, REASONING_EFFORT  # shared target reasoning config
@@ -432,7 +432,7 @@ _HEAD_RE = re.compile(r"^\[M(\d+)\] (\w+)", re.M)
 
 
 async def render_originals(refs: list[TrajRef]) -> dict[str, str]:
-    """Render the original trajectories' transcripts via make_viewer's own loader,
+    """Render the original trajectories' transcripts via viewer's own loader,
     so message numbering matches the viewer (and the annotation's `m`) exactly."""
     by_mode: dict[str, list[TrajRef]] = {}
     for r in refs:

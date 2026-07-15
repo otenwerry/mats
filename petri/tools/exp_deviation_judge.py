@@ -24,7 +24,7 @@ original and the continuation, tells the judge the cut point in each, and asks f
 deviation score
 plus a justification that cites [M#]. Results are written to a single sidecar,
 mats-local/petri/deviation_results.json, keyed by the continuation's viewer page name.
-make_viewer reads that sidecar and, when the score is >1, appends a note to that
+viewer reads that sidecar and, when the score is >1, appends a note to that
 continuation's "Judge justification" section.
 
 INTERPRETIVE CAVEAT (expect mostly 1s): in treatment runs (an anti-hack prompt is inserted
@@ -48,7 +48,7 @@ Usage:
   uv run tools/exp_deviation_judge.py --force               # re-judge (re-spend) everything
 
 Costs money (Anthropic API: the judge model). Then regenerate the viewer (free):
-  uv run make_viewer.py
+  uv run viewer.py
 """
 
 import asyncio
@@ -56,7 +56,7 @@ import json
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib on the path.
+# this tool lives in tools/; put the project root (for viewer) and ../lib on the path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
 sys.path.insert(0, str(_petri))
@@ -66,7 +66,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX,
     load_rollback_run, load_originals_by_id, rb_page_name,
     cut_m_in_transcript, _orig_id_from_task, _rollback_treatment, _loc_cond,
@@ -344,7 +344,7 @@ async def main() -> None:
     if failed:
         print(f"\n  NOTE: {failed} failed -- re-run to retry (incremental).")
     print("\nRegenerate the viewer (free) to surface the >1 notes in each rollback's "
-          "Judge justification section:  uv run make_viewer.py")
+          "Judge justification section:  uv run viewer.py")
 
 
 if __name__ == "__main__":

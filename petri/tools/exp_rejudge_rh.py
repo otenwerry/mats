@@ -17,7 +17,7 @@ from each transcript's stored judge score. That set is a superset of the final
 binary-hack set, so re-judging it is all we need (a few may drop below 5 -- expected).
 
 Output: mats-local/petri/rejudge_scores.json, keyed by traj_key, holding the fresh
-5-dim scores + summary/justification/highlights + the judge model. make_viewer's
+5-dim scores + summary/justification/highlights + the judge model. viewer's
 load_mode merges it in (full replacement), so the viewer, exp_annotate_hacks, and
 the rollback selection all see one consistent judge pass. Incremental (skips audits
 already in the file unless --force) and checkpointed after every audit.
@@ -29,7 +29,7 @@ Usage:
   uv run tools/exp_rejudge_rh.py --concurrency=50  # parallel judges (default 50)
   uv run tools/exp_rejudge_rh.py --force          # re-judge everything (re-spends)
   uv run tools/exp_rejudge_rh.py --model=anthropic/claude-opus-4-8
-Then regenerate the viewer (free): uv run make_viewer.py
+Then regenerate the viewer (free): uv run viewer.py
 
 Costs money (Anthropic API: the judge model).
 """
@@ -38,7 +38,7 @@ import asyncio
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -50,7 +50,7 @@ from inspect_scout import TranscriptContent, transcripts_from
 
 # single source of truth for paths, the binary definition, and the merge key
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
-from make_viewer import (
+from viewer import (
     LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, binary_hack_eval,
 )
 
@@ -198,7 +198,7 @@ async def main() -> None:
     if failed:
         print(f"  NOTE: {failed} audit(s) failed to re-judge -- they keep their old scores "
               "and will show as 'needs re-judge'; re-run to retry (incremental).")
-    print("\nRegenerate the viewer (free) to see the merged scores: uv run make_viewer.py")
+    print("\nRegenerate the viewer (free) to see the merged scores: uv run viewer.py")
 
 
 if __name__ == "__main__":

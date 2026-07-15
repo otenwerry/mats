@@ -34,7 +34,7 @@ import sys
 import traceback
 from datetime import datetime
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -45,8 +45,8 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
-import make_viewer
-from make_viewer import LOGS, traj_key, _load_rejudge
+import viewer
+from viewer import LOGS, traj_key, _load_rejudge
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 DIM = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--dim=")), None)
@@ -214,10 +214,10 @@ async def main() -> None:
         return
     print("\nrebuilding the viewer (free) so the overwritten scores show everywhere ...")
     try:
-        await make_viewer.main()
+        await viewer.main()
     except Exception as e:
         print(f"!! viewer rebuild failed (scores are safely written; run "
-              f"`uv run make_viewer.py` manually): {type(e).__name__}: {e}")
+              f"`uv run viewer.py` manually): {type(e).__name__}: {e}")
         traceback.print_exc()
 
 

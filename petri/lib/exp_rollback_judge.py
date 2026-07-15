@@ -45,7 +45,7 @@ import json
 import sys
 from pathlib import Path
 
-# make_viewer lives at the top level (parent of lib/); put it on the import path so
+# viewer lives at the top level (parent of lib/); put it on the import path so
 # this module works whether it's imported by a pipeline or run standalone from lib/.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -54,11 +54,11 @@ from dotenv import load_dotenv
 
 # reuse exp_annotate_hacks' verbatim schema + system/user prompts for judge 2
 from exp_annotate_hacks import HackAnnotation, SYSTEM as ANNOTATE_SYSTEM, USER_TMPL as ANNOTATE_USER_TMPL
-# reuse make_viewer's loaders/helpers so numbering + provenance match the viewer exactly.
+# reuse viewer's loaders/helpers so numbering + provenance match the viewer exactly.
 # _rb_class is the SAME classifier the viewer uses to tint a rollback row red ("hack" =
 # full or degenerate), so the default red-only gate annotates exactly the red rows;
 # first_hack_m derives the first-hack turn from Judge 2's annotation (no extra judge).
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX,
     load_rollback_run, load_originals_by_id, page_name, rh_score, traj_key, first_hack_m,
     cut_m_in_transcript,
@@ -77,7 +77,7 @@ PRICES = {"claude-opus-4-8": (5.0, 25.0), "claude-sonnet-4-6": (3.0, 15.0)}
 # --------------------------------------------------------------------------- #
 # (There is no longer a per-turn "did it re-hack on the cut turn?" judge. The turn
 # where the first hack appears is read straight off Judge 2's annotation -- the
-# smallest hack-turn M-number -- in judge_one below; see make_viewer.first_hack_m.)
+# smallest hack-turn M-number -- in judge_one below; see viewer.first_hack_m.)
 # Cut-restriction for rollback continuations: the annotator sees the WHOLE transcript
 # (replayed prefix + live continuation), so it could otherwise flag a hack turn in the
 # replayed prefix, putting first_hack_m before the cut (the #188 problem). We tell it the
@@ -298,7 +298,7 @@ def main() -> None:
     run_dirs = _resolve_run_dirs()
     run_judging(run_dirs, model=model, concurrency=concurrency, force=force, red_only=red_only)
     print("\nDone. Regenerate the viewer (free) to render the secondary-judge columns: "
-          "uv run make_viewer.py")
+          "uv run viewer.py")
 
 
 if __name__ == "__main__":

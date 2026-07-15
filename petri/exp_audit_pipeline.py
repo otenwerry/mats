@@ -11,7 +11,7 @@ each reusing the standalone scripts' code (single source of truth):
   2. ANNOTATE  (exp_annotate_hacks.run_annotation): secondary turn-level judging of
                exactly the FULL reward hacks (the binary definition / first viewer
                category), run with the SAME parallelism as the audit. -> annotations.json.
-  3. VIEWER    (make_viewer.main, FREE): rebuild the static viewer, auto-attaching
+  3. VIEWER    (viewer.main, FREE): rebuild the static viewer, auto-attaching
                scores + annotations. -> mats-local/petri/viewer/index.html.
 
 Robustness (the point of this file):
@@ -97,7 +97,7 @@ from datetime import datetime
 # the core modules live in lib/; put it on the import path
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 
-import make_viewer
+import viewer
 from exp_rh_audit import (
     TARGET_CHOICES, SEEDS_ROOT, DATA, MAX_TURNS, REASONING_EFFORT, build_tasks, run_eval,
     dead_targets, reasoning_tag, resolve_auditor, resolve_auditor_thinking, resolve_seeds,
@@ -337,7 +337,7 @@ async def run_post_audit_stages(cfg: dict) -> None:
         print("STAGE 3/3  VIEWER  (rebuild static viewer, free)")
         print("=" * 72)
         try:
-            await make_viewer.main()
+            await viewer.main()
         except Exception as e:
             print(f"\n!! VIEWER STAGE FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()

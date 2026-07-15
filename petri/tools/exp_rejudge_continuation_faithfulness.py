@@ -26,7 +26,7 @@ Usage:
 --dir accepts a bare run-dir name (resolved under logs/) or an absolute path.
 
 Costs money (Anthropic judge only). Then regenerate the viewer (free):
-  uv run make_viewer.py
+  uv run viewer.py
 """
 
 import asyncio
@@ -39,7 +39,7 @@ sys.path.insert(0, str(_petri))
 
 import exp_continuation as C
 from exp_continuation import parse_continuation_task, run_faithfulness_for_dir
-from make_viewer import load_mode
+from viewer import load_mode
 from petri_paths import LOGS
 
 DEFAULT_MODEL = "claude-opus-4-8"
@@ -94,7 +94,7 @@ async def main() -> None:
         run_dir, b_refs_by_id, model=model, concurrency=concurrency,
         force=True, conditions=conditions)
 
-    print("\nDone. Regenerate the viewer (free) to surface the updated verdicts:  uv run make_viewer.py")
+    print("\nDone. Regenerate the viewer (free) to surface the updated verdicts:  uv run viewer.py")
 
 
 if __name__ == "__main__":

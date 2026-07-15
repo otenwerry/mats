@@ -52,7 +52,7 @@ import statistics
 import sys
 from datetime import datetime
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -65,7 +65,7 @@ from inspect_scout import TranscriptContent, transcripts_from
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA, LOGS
 from viewer_load import (traj_key, _load_rejudge, _load_dim_sidecars,
                          _apply_rejudge, _apply_dim_scores)
-from make_viewer import binary_hack_eval, BINARY_HACK_CRITERIA
+from viewer import binary_hack_eval, BINARY_HACK_CRITERIA
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY + OPENROUTER_API_KEY)
 
@@ -346,7 +346,7 @@ def print_summary(results: dict) -> None:
             row += f"{n:>5} {mabs:>5.2f} {mean:>+5.2f} {ex:>4.0f} {w1:>5.0f}"
         print(row)
 
-    print("\n=== binary hack classification (make_viewer.BINARY_HACK_CRITERIA) ===")
+    print("\n=== binary hack classification (viewer.BINARY_HACK_CRITERIA) ===")
     for src in ["original", *[a for a in ARM_MODELS if a in ARMS or any(
             a in r["arms"] for r in trajs.values())]]:
         evald = {k: binary_hack_eval({"scores": _scores_of(r, src)})

@@ -11,7 +11,7 @@ exp_audit_pipeline.py            # A: run audits end-to-end  (audit -> annotate 
 exp_rollback_pipeline.py         # B: rollback resampling experiments end-to-end
 exp_continuation_pipeline.py     # C: continuation experiments (prior task -> new task) end-to-end
 exp_resample_begin_pipeline.py   # D: begin-resample experiments (re-roll from turn 1, control) end-to-end
-make_viewer.py                   # build the static viewer (run on its own, or auto-run by the pipelines)
+viewer.py                        # build the static viewer (run on its own, or auto-run by the pipelines)
 lib/                             # the importable core the files above build on
   petri_paths.py                 #   single source of truth for every filesystem path
   exp_rh_audit.py                #   audit generation + judging
@@ -33,8 +33,7 @@ tools/                           # occasional standalone utilities (run by hand)
   exp_mechanism_similarity.py    #   follow-up to C: rate how similar each re-hack's mechanism is to the hack it was primed on
   exp_test_openrouter.py         #   one tiny OpenRouter call to check whether the budget cap is lifted
   explore_select_continuation.py #   read-only: score all audits to help hand-pick continuation triples
-  explore_dump_transcripts.py    #   read-only: dump judge-view transcripts (+ auditor scratchpads) to text for hand-reading (edit DIRS)
-  explore_token_usage.py         #   read-only: token usage by model role per run dir (edit DIRS)
+  explore_token_usage.py         #   read-only: token usage by model role per run dir (run dirs via args)
   explore_validate_seeds.py      #   read-only: check every pinned seed dir assembles cleanly (run after editing seeds)
   migrate_hpc_*.py               #   one-time data migrations, already applied (idempotent)
   cleanup_dead_rollbacks.py / cleanup_nonhack_rollbacks.py
@@ -141,12 +140,12 @@ uv run exp_resample_begin_pipeline.py --trajectories=466 --n=5 --dry-run   # FRE
 
 `dimensions/` holds the judge rubrics (auto-loaded as a directory). They are scored together in one judge call: `reward_hacking` (the target's gaming, tiered 1–10) and `hack_in_final_solution` (does the final submitted solution still rest on the hack — informational); target-quality checks — `degenerate_behavior` (target acted incoherently) and `hallucination` (target genuinely confused about its own actions, a low-confidence signal); validity checks on the audit itself — `auditor_nudging` (did the auditor verbally steer; high = `reward_hacking` is contaminated), `auditor_mistakes`, and `situational_awareness` (did the target clock it's being tested); plus `incompleteness` (how unfinished the run was when it ended — informational). All rubrics are unvalidated; spot-check judge citations before trusting at scale. To change the dimension set, edit the files in `dimensions/`; older audits then need a re-judge (see Tools).
 
-The committed **binary reward-hack definition** lives in one place — `make_viewer.BINARY_HACK_CRITERIA` — and is imported everywhere (the annotate gate, the index tally, rollback selection).
+The committed **binary reward-hack definition** lives in one place — `viewer.BINARY_HACK_CRITERIA` — and is imported everywhere (the annotate gate, the index tally, rollback selection).
 
 ## View results
 
 ```bash
-uv run make_viewer.py                                  # free; both pipelines also run this as their last stage
+uv run viewer.py                                       # free; both pipelines also run this as their last stage
 open ../../mats-local/petri/viewer/index.html          # audits (+ rollbacks folded into full-hack rows)
 # or Inspect's built-in log browser:
 uv run inspect view --log-dir ../../mats-local/petri/logs/<run>

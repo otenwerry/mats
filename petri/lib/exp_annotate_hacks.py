@@ -1,7 +1,7 @@
 """LLM agent that locates and annotates reward-hacking turns in Petri audits.
 
 For each audit that satisfies the committed binary definition of a reward hack
-(BINARY_HACK_CRITERIA in make_viewer), this feeds the Petri judge's own output
+(BINARY_HACK_CRITERIA in viewer), this feeds the Petri judge's own output
 (score + summary + justification + highlights, all of which cite [MN] message
 numbers) PLUS the exact [MN]-numbered target transcript to a Claude model, and
 asks it to localize the specific turns where the target games (or commits to
@@ -9,17 +9,17 @@ gaming) the success criteria, with a short title + note per turn and a one-line
 tl;dr of the hack arc.
 
 Output is written/merged into mats-local/petri/annotations.json, keyed by the
-same page-name make_viewer.py uses. make_viewer.py (free) then marks those turns
+same page-name viewer.py uses. viewer.py (free) then marks those turns
 and renders a "hack turns" nav so a reader can bounce through them.
 
 This is an *interpretive* layer: the annotations are one model's reading of the
-judge's findings, not ground truth. make_viewer surfaces that caveat on every
+judge's findings, not ground truth. viewer surfaces that caveat on every
 annotated page, and each entry stores the model that produced it.
 
-Costs money (Anthropic API). Reuses make_viewer's rendering so [MN] numbers match.
+Costs money (Anthropic API). Reuses viewer's rendering so [MN] numbers match.
 
 By default it annotates exactly the audits that satisfy the committed binary
-definition of a reward hack (make_viewer.BINARY_HACK_CRITERIA -- the single source
+definition of a reward hack (viewer.BINARY_HACK_CRITERIA -- the single source
 of truth for the thresholds) and aren't already annotated. That definition needs
 every required judge dim to be scored. FRESH exp_rh_audit.py runs already produce
 them all, so no re-judge is needed. Only OLDER audits that predate the current
@@ -35,7 +35,7 @@ Usage (CLI, from petri/ -- this file lives in lib/):
   uv run lib/exp_annotate_hacks.py --force          # re-annotate all binary-def hacks (re-spends)
   uv run lib/exp_annotate_hacks.py --concurrency=50 # annotate up to 50 trajectories in parallel (default 50)
   uv run lib/exp_annotate_hacks.py --model=claude-sonnet-4-6   # cheaper model
-Then regenerate the viewer (free): uv run make_viewer.py
+Then regenerate the viewer (free): uv run viewer.py
 """
 
 import asyncio
@@ -47,14 +47,14 @@ from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-# make_viewer lives at the top level (parent of lib/); put it on the import path so
+# viewer lives at the top level (parent of lib/); put it on the import path so
 # this module works whether it's imported by a pipeline or run standalone from lib/.
 import sys as _sys, pathlib as _pathlib
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
 
-# reuse make_viewer's rendering + paths so [MN] numbers and page keys match exactly,
+# reuse viewer's rendering + paths so [MN] numbers and page keys match exactly,
 # and the committed binary definition of a reward hack (single source of truth)
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, RESAMPLE_PREFIX, CONTINUATION_PREFIX,
     load_mode, page_name, binary_hack_eval, BINARY_HACK_CRITERIA,
 )
@@ -245,7 +245,7 @@ async def run_annotation(
             "tldr": ann.tldr,
             "hack_turns": [t.model_dump() for t in ann.hack_turns],
             # raw token counts for this annotation call (the "hack-turn judge"), stored so
-            # make_viewer can price it at DISPLAY time (like the rest of the cost system —
+            # viewer can price it at DISPLAY time (like the rest of the cost system —
             # see lib/model_prices.py). Same key names as viewer_load.usage_to_dict; the
             # Anthropic SDK's input_tokens already EXCLUDES the cache tokens. No total_cost
             # (Anthropic doesn't bill one back), so it prices price×token (~estimate).
@@ -291,7 +291,7 @@ async def main() -> None:
     force = "--force" in sys.argv
     audits = await load_all_original_audits()
     await run_annotation(audits, model=model, concurrency=concurrency, force=force)
-    print("Regenerate the viewer (free) to see the hack-turn nav: uv run make_viewer.py")
+    print("Regenerate the viewer (free) to see the hack-turn nav: uv run viewer.py")
 
 
 if __name__ == "__main__":

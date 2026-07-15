@@ -7,7 +7,7 @@ changes the judge's behavior on a specific trajectory -- without re-spending on 
 sweep. It re-runs Petri's ACTUAL judge (`audit_judge`, same model/prompt exp_rh_audit.py
 uses) over that one trajectory's existing transcript, scoring every current dimension, and
 writes a FULL-REPLACEMENT entry into mats-local/petri/rejudge_scores.json (the same overlay
-channel exp_rejudge_main.py uses). make_viewer's load layer merges it in (scores + summary +
+channel exp_rejudge_main.py uses). viewer's load layer merges it in (scores + summary +
 justification + highlights) and re-parses the RH_CATEGORY / RH_TYPES lines, so the viewer
 reflects the fresh judgment. The .eval log is never touched -- delete the trajectory's entry
 in rejudge_scores.json to revert.
@@ -31,7 +31,7 @@ import pathlib
 import subprocess
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -42,7 +42,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
-from make_viewer import LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key
+from viewer import LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key
 from viewer_load import parse_rh_category
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
@@ -60,11 +60,11 @@ if TARGET_ID is None:
     raise SystemExit("usage: uv run tools/exp_rejudge_one.py --id=<viewer id> [--run-dir=<name>] [--skip-viewer]")
 TARGET_ID = int(TARGET_ID)
 
-# trajectory-id registry (key -> stable viewer id), the same map make_viewer assigns from.
+# trajectory-id registry (key -> stable viewer id), the same map viewer assigns from.
 _REG_FILE = DATA / "trajectory_ids.json"
 REGISTRY = json.loads(_REG_FILE.read_text()) if _REG_FILE.exists() else {}
 if not REGISTRY:
-    raise SystemExit(f"no {_REG_FILE} -- run `uv run make_viewer.py` first to assign trajectory ids.")
+    raise SystemExit(f"no {_REG_FILE} -- run `uv run viewer.py` first to assign trajectory ids.")
 
 
 def _key(mode: str, task: str, seed: str, epoch: int) -> str:
@@ -113,7 +113,7 @@ async def main() -> None:
     if c is None:
         raise SystemExit(f"could not find a trajectory with id #{TARGET_ID}"
                          + (f" in {RUN_DIR}/" if RUN_DIR else "")
-                         + " -- check the id (and run `uv run make_viewer.py` if it's brand new).")
+                         + " -- check the id (and run `uv run viewer.py` if it's brand new).")
     print(f"[setup] found: #{c['id']}  {c['mode']}/{c['seed']} e{c['epoch']} (task {c['task']})")
 
     scanner = audit_judge(dimensions=dims, model=MODEL)
@@ -162,10 +162,10 @@ async def main() -> None:
     print(f"wrote {REJUDGE_FILE}")
 
     if SKIP_VIEWER:
-        print("\n--skip-viewer: not rebuilding. Run `uv run make_viewer.py` to see it in the viewer.")
+        print("\n--skip-viewer: not rebuilding. Run `uv run viewer.py` to see it in the viewer.")
         return
     print("\n[viewer] rebuilding (free) ...", flush=True)
-    subprocess.run([sys.executable, str(_petri / "make_viewer.py")], check=True)
+    subprocess.run([sys.executable, str(_petri / "viewer.py")], check=True)
 
 
 if __name__ == "__main__":

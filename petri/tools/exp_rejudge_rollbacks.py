@@ -19,8 +19,8 @@ from its finished, rendered transcript (handling the prompt-insertion +1 shift e
 
 Run the rollback cleanup FIRST (cleanup_nonhack_rollbacks.py) so this only spends on
 the continuations we're keeping. Output is merged into mats-local/petri/rejudge_scores.json
-(keyed by traj_key), which make_viewer.load_mode already merges for rollback dirs, so
-the rollbacks page picks up the fresh scores on the next `uv run make_viewer.py`.
+(keyed by traj_key), which viewer.load_mode already merges for rollback dirs, so
+the rollbacks page picks up the fresh scores on the next `uv run viewer.py`.
 
 Usage:
   uv run tools/exp_rejudge_rollbacks.py                 # re-judge all surviving continuations not yet done
@@ -36,7 +36,7 @@ import json
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -47,7 +47,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, _rollback_treatment, _loc_cond, binary_hack_eval,
     cut_m_in_transcript, render_transcript, load_originals_by_id,
     _orig_id_from_task, _reroll_turn_from_original,
@@ -223,7 +223,7 @@ async def main() -> None:
           f"situational_awareness=1, degenerate_behavior<=3)")
     if failed:
         print(f"  NOTE: {failed} failed -- they keep their old 3-dim scores; re-run to retry (incremental).")
-    print("\nRegenerate the viewer (free) to merge the fresh scores: uv run make_viewer.py")
+    print("\nRegenerate the viewer (free) to merge the fresh scores: uv run viewer.py")
 
 
 if __name__ == "__main__":

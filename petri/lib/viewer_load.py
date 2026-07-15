@@ -1,18 +1,18 @@
-"""The make_viewer LOAD LAYER: turns logs/ run dirs into plain audit dicts and rollback
+"""The viewer LOAD LAYER: turns logs/ run dirs into plain audit dicts and rollback
 grids, with an on-disk cache so unchanged dirs never re-read their .eval archives.
 
-Split out of make_viewer.py (2026-07-02) so the cache's code signature covers exactly the
+Split out of viewer.py (2026-07-02) so the cache's code signature covers exactly the
 code that shapes the cached data:
 
   cache key = the dir's *.eval files (name + mtime + size)
             + the score overlays (rejudge_scores.json + dim_scores/*.json)
             + the source of THIS FILE and petri_paths.py
 
-make_viewer.py is NOT part of the key, so display/rendering edits there rebuild warm (all
+viewer.py is NOT part of the key, so display/rendering edits there rebuild warm (all
 cache hits, seconds -- this is what makes iterating on the viewer fast). THE RULE THAT
 KEEPS THE CACHE HONEST: any code whose output lands in the cached objects -- new
 audit-dict fields, transcript rendering, scratchpad/tool-call extraction, score overlays --
-must live in this file (or petri_paths.py), never in make_viewer.py. Under that rule a
+must live in this file (or petri_paths.py), never in viewer.py. Under that rule a
 change to cached-data logic can never serve stale output.
 
 Profiling context (measured at cache introduction): ~97% of a cold viewer build is reading
@@ -22,7 +22,7 @@ on top (twice per dir per build). Both are pure dir -> data functions, so we mem
 output to mats-local/petri/.viewer_cache/ (pure derived data, never committed).
 
 IF THE CACHE EVER CAUSES PROBLEMS, escape hatches in increasing permanence:
-  1. One-off bypass:  uv run make_viewer.py --no-cache   (or MAKE_VIEWER_NO_CACHE=1)
+  1. One-off bypass:  uv run viewer.py --no-cache   (or MAKE_VIEWER_NO_CACHE=1)
   2. Purge it:        rm -rf mats-local/petri/.viewer_cache   (forces a clean full rebuild)
   3. Permanently OFF: set `_CACHE_ENABLED = False` below.
   4. FULLY REMOVE the feature: delete _CACHE_DIR, _CACHE_ENABLED, _code_sig, _overlay_sig,
@@ -102,9 +102,9 @@ _CACHE_ENABLED = (os.environ.get("MAKE_VIEWER_NO_CACHE") != "1") and ("--no-cach
 
 def _code_sig() -> str:
     """Hash of the source files whose logic shapes load_mode/rollback_grid output -- THIS file
-    and petri_paths.py. make_viewer.py is deliberately NOT included: rendering/display edits
+    and petri_paths.py. viewer.py is deliberately NOT included: rendering/display edits
     there must never invalidate the cache. Any edit HERE still busts every entry. (Note:
-    model_prices.py is intentionally NOT here — costs are computed in make_viewer's display
+    model_prices.py is intentionally NOT here — costs are computed in viewer's display
     layer from the raw token counts cached here, so a price tweak only needs a warm rebuild.)"""
     h = hashlib.sha256()
     for p in (Path(__file__), Path(__file__).resolve().parent / "petri_paths.py"):
@@ -212,7 +212,7 @@ def _msg_text(msg) -> str:
 # auditor, or an Anthropic auditor with extended thinking) arrives as ContentReasoning
 # blocks on the auditor's model events. We carry it inside the same scratchpad string,
 # wrapped in these markers, so the scratchpad stays a dict[int, str] (continuation
-# splicing etc. untouched); make_viewer splits the markers back out and renders an
+# splicing etc. untouched); viewer splits the markers back out and renders an
 # [Auditor reasoning] block. Auditor-written text never collides with the markers in
 # practice, and a collision would only mislabel a span, not lose it.
 AUDITOR_REASONING_OPEN = "<auditor_reasoning>"
@@ -943,13 +943,13 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # TARGET run knobs AS RUN (stamped by exp_rh_audit). max_turns = the
                         # auditor turn cap; reasoning = native target reasoning on/off (None on
                         # runs predating the flag). Surfaced as skim columns + the reasoning
-                        # visuals on the settings sweep (see make_viewer write_table /
+                        # visuals on the settings sweep (see viewer write_table /
                         # reasoning_comparison_data).
                         max_turns=(log.eval.metadata or {}).get("max_turns"),
                         reasoning=(log.eval.metadata or {}).get("reasoning"),
                         # FIXED-SP field: True = this run pinned the target system prompt via
                         # --fixed_sp (stamped into log.eval.metadata by exp_rh_audit).
-                        # Informational only: the sweep split (see SWEEPS in make_viewer)
+                        # Informational only: the sweep split (see SWEEPS in viewer)
                         # is an explicit run-dir list, not this flag.
                         fixed_sp=bool((log.eval.metadata or {}).get("fixed_sp")),
                         # PINNED-SEED-DIR runs only: which conditions/<c>.md fragment the
@@ -991,8 +991,8 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         ended_via_end_conv=ended_via_end_conv,
                         # per-model token counts + real billed cost (if any), for the viewer's
                         # cost line. Kept as raw tokens (not a $ figure) so price-table edits
-                        # only need a warm make_viewer rebuild, not a cold log re-read. Cost is
-                        # computed at display time in make_viewer via model_prices.sample_cost.
+                        # only need a warm viewer rebuild, not a cold log re-read. Cost is
+                        # computed at display time in viewer via model_prices.sample_cost.
                         model_usage=usage_to_dict(s.model_usage or {}),
                         # SAME usage split by ROLE (auditor/target/judge) instead of by slug, so
                         # cost can be attributed to a role even when two roles share one model slug

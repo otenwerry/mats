@@ -98,7 +98,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 
 from inspect_ai import eval_set
 
-import make_viewer
+import viewer
 import exp_continuation as C
 from exp_rh_audit import DIMENSIONS
 
@@ -265,7 +265,7 @@ async def run_pipeline(cfg: dict) -> None:
         print("\n[dry-run] plan validated (treatment + prefixes + new tasks). No generation, no cost.")
         return
 
-    run_dir = make_viewer.LOGS / f"{cfg['run_dir_stem']}-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
+    run_dir = viewer.LOGS / f"{cfg['run_dir_stem']}-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n[generate] eval_set -> {run_dir}")
     print("           (spends on the target provider; the REGULAR judge runs inline) ...")
@@ -329,11 +329,11 @@ async def run_pipeline(cfg: dict) -> None:
     # (or a bad task name) makes faithfulness, annotation, AND the Continuations page come up empty
     # with no obvious cause. Fail loudly here instead. (This is exactly the bug that made a whole
     # run invisible once.) A partial drop is surfaced as a warning, not silently tolerated.
-    loaded = await make_viewer.load_mode(run_dir)
+    loaded = await viewer.load_mode(run_dir)
     if not loaded:
         raise SystemExit(
             f"[fatal] eval_set wrote ~{expected} sample(s) to {run_dir.name}, but the viewer "
-            f"loader (make_viewer.load_mode) sees 0 of them. This is almost always a judge "
+            f"loader (viewer.load_mode) sees 0 of them. This is almost always a judge "
             f"score-key mismatch: load_mode keys on the 'audit_judge' score, so the continuation "
             f"judge must register under name='audit_judge'. Nothing downstream will populate. "
             f"Re-inspect with MAKE_VIEWER_NO_CACHE=1 and do NOT trust this run.")
@@ -366,10 +366,10 @@ async def run_pipeline(cfg: dict) -> None:
             concurrency=cfg["concurrency"], force=cfg["force_annotate"])
 
     if cfg["skip_viewer"]:
-        print("\n[viewer] skipped (--skip-viewer). Rebuild with: uv run make_viewer.py")
+        print("\n[viewer] skipped (--skip-viewer). Rebuild with: uv run viewer.py")
     else:
         print("\n[viewer] rebuilding ...")
-        await make_viewer.main()
+        await viewer.main()
 
     print(f"\nDone. Continuations are in {run_dir.name}/ (Continuations page on the viewer).")
 

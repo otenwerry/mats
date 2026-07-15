@@ -4,7 +4,6 @@
 > **Read when:** starting any Petri work, or reading Petri run data and wanting to know where it can mislead you.
 > **Last updated:** 2026-07-10
 > **Original path:** petri/docs/CODEBASE_GUIDE.md
-> **Note:** the body still calls the viewer builder `make_viewer.py`; it was renamed to `petri/viewer.py` after this file's last edit.
 
 How the Petri reward-hacking **code and experiments** are organized, and how to read the
 data without being misled. Written for future coding agents (and humans). The viewer is the
@@ -28,7 +27,7 @@ which lives next to the data.
     with the new task's original + a faithfulness instruction). Retired the old
     `--full-hack-prefixes/--corrected-hack-prefixes/--clean-prefixes + --conditions` scheme and
     the separate `exp_baseline_pipeline.py` (the baseline is now just `--prefixes=none`).
-  - `make_viewer.py` — builds the static viewer (run on its own, or auto-run by the pipelines).
+  - `viewer.py` — builds the static viewer (run on its own, or auto-run by the pipelines).
 
   (There used to be a top-level `exp_resample_begin_pipeline.py`; it was removed. The
   begin-resample core still lives in `lib/exp_resample.py` and existing `resample-*` run
@@ -37,7 +36,7 @@ which lives next to the data.
   The importable core they build on is in `petri/lib/`: `petri_paths.py` (every filesystem
   path), `viewer_load.py` (the viewer's LOAD layer — .eval dirs → audit dicts, plus the
   build cache; the cache is keyed on this file's source, so load-shaping code must live
-  here, while `make_viewer.py` display edits rebuild warm in seconds — see its docstring),
+  here, while `viewer.py` display edits rebuild warm in seconds — see its docstring),
   `exp_rh_audit.py` (audit generation + judging), `exp_annotate_hacks.py` (secondary
   hack-turn annotation), `exp_rollback.py` + `exp_rollback_judge.py` (rollback generation +
   secondary judging), `exp_resample.py` (begin-resample core + the deviation/faithfulness
@@ -47,7 +46,7 @@ which lives next to the data.
 - **Data** (gitignored): `mats-local/petri/` —
   - `logs/<run>/` — Inspect `.eval` logs, one dir per run.
   - `viewer/` — generated HTML: one self-contained page per SWEEP, one nav tab each (see
-    `SWEEPS` in `make_viewer.py`; newest = leftmost). `index.html` is the CURRENT sweep
+    `SWEEPS` in `viewer.py`; newest = leftmost). `index.html` is the CURRENT sweep
     (every run dir not explicitly listed in `SWEEPS` lands there); retired sweeps are
     `sweep_<n>.html`. Each sweep page carries its own trajectory tables (rollbacks folded
     into the full-hack rows) and buttons beside the title: Visuals → `visuals_<key>.html`
@@ -108,7 +107,7 @@ which lives next to the data.
   `degenerate_behavior <= 3`, `hallucination <= 2` (hallucination is an OPTIONAL
   criterion: it disqualifies only when scored; older audits never scored on it are not
   treated as unclassifiable). This is the single source of truth, encoded once in
-  `make_viewer.BINARY_HACK_CRITERIA` (helpers `is_hack_binary` / `binary_hack_eval`) and
+  `viewer.BINARY_HACK_CRITERIA` (helpers `is_hack_binary` / `binary_hack_eval`) and
   imported everywhere (the annotate gate, the index tally, rollback/continuation selection). An
   audit missing a required dim is reported as `missing` (verdict UNKNOWN, "needs re-judge"),
   never silently counted as a non-hack.
@@ -119,7 +118,7 @@ We changed the judge dimensions over time, so older audits can lack dims the bin
 needs. The re-judge tools — `tools/exp_rejudge_rh.py` (audits), `tools/exp_rejudge_rollbacks.py`
 (rollbacks), `tools/exp_rejudge_continuation_faithfulness.py` (the continuation faithfulness
 judge) — re-run the relevant judge over EXISTING transcripts and write fresh scores to a
-sidecar JSON; no new trajectories are generated. `make_viewer.load_mode` merges those in (a full
+sidecar JSON; no new trajectories are generated. `viewer.load_mode` merges those in (a full
 replacement of the audit's scores + summary/justification/highlights) and marks the audit
 `rejudged=True`, so the viewer / annotate / selection all read one consistent judge pass.
 

@@ -7,7 +7,7 @@ automatically (auto-loaded by judge_dimensions); this is just for looking at one
 dimension on trajectories that were judged before it existed.
 
 What it does: finds every ORIGINAL audit (non-rollback) that is a *full* reward hack
-under the committed binary definition (make_viewer.is_hack_binary, on the
+under the committed binary definition (viewer.is_hack_binary, on the
 rejudge-merged scores -- exactly the "Reward hacks" table in the viewer), then runs
 Petri's real judge (`audit_judge`, default claude-opus-4-8) over each transcript with
 JUST the one dimension you name, and records the score + the judge's justification.
@@ -32,7 +32,7 @@ import asyncio
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -43,7 +43,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
-from make_viewer import (
+from viewer import (
     LOGS, ROLLBACK_PREFIX, traj_key, is_hack_binary, _load_rejudge,
 )
 
@@ -74,7 +74,7 @@ def _ids() -> dict:
 
 async def collect_full_hacks(existing: dict) -> list[dict]:
     """Every ORIGINAL audit that is a FULL reward hack (rejudge-merged scores), with its
-    transcript loaded. Mirrors how make_viewer decides the 'Reward hacks' table: take the
+    transcript loaded. Mirrors how viewer decides the 'Reward hacks' table: take the
     rejudged scores when present, else the eval-log scores, then is_hack_binary()."""
     rejudge = _load_rejudge()
     ids = _ids()

@@ -14,14 +14,14 @@ import pathlib
 import shutil
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
 sys.path.insert(0, str(_petri))
 
 from inspect_ai.log import list_eval_logs, read_eval_log
-from make_viewer import DATA, LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key
+from viewer import DATA, LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key
 
 TRASH = DATA / "_trash_dead_rollbacks"
 

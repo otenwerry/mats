@@ -5,12 +5,12 @@ import json
 import sys
 from pathlib import Path
 
-# tools/ lives one level under petri/; put petri/ (for make_viewer) and petri/lib (for
+# tools/ lives one level under petri/; put petri/ (for viewer) and petri/lib (for
 # petri_paths) on the path so this runs from anywhere via `uv run tools/explore_select_continuation.py`.
 _petri = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
 sys.path.insert(0, str(_petri))
-import make_viewer as mv
+import viewer as mv
 from petri_paths import DATA, LOGS
 
 DIMS = ["reward_hacking", "auditor_nudging", "auditor_mistakes",

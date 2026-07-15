@@ -14,7 +14,7 @@ Petri's real judge (`audit_judge`, default claude-opus-4-8) over each transcript
 the `incompleteness` dimension, and records the score + the judge's justification.
 
 Output: mats-local/petri/dim_scores/incompleteness.json, keyed by traj_key. This is an
-add-only sidecar: make_viewer merges it in for any audit that doesn't already have an inline
+add-only sidecar: viewer merges it in for any audit that doesn't already have an inline
 incompleteness score (inline/rejudge scores always win), so it shows up as the new column
 without re-judging or touching any other dimension, and it does NOT feed the binary hack
 definition -- it cannot change any trajectory's category.
@@ -28,7 +28,7 @@ Usage:
   uv run tools/exp_grade_incompleteness.py --concurrency=50 # parallel judges (default 50)
   uv run tools/exp_grade_incompleteness.py --force         # re-grade ones already in the file
   uv run tools/exp_grade_incompleteness.py --model=anthropic/claude-opus-4-8
-Then regenerate the viewer (free): uv run make_viewer.py
+Then regenerate the viewer (free): uv run viewer.py
 
 Costs money (Anthropic API: the judge model).
 """
@@ -37,7 +37,7 @@ import asyncio
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -48,7 +48,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
-from make_viewer import (
+from viewer import (
     LOGS, ROLLBACK_PREFIX, traj_key, is_old_trajectory,
 )
 
@@ -118,7 +118,7 @@ async def collect_candidates(existing: dict) -> tuple[list[dict], int]:
                 })
     if skipped_unregistered:
         print(f"  NOTE: skipped {skipped_unregistered} trajectory(ies) with no id in "
-              f"{_REG_FILE.name} -- run `uv run make_viewer.py` first to register them, then retry.")
+              f"{_REG_FILE.name} -- run `uv run viewer.py` first to register them, then retry.")
     return cands, skipped_dead
 
 
@@ -217,7 +217,7 @@ async def main() -> None:
                   f"{e['seed']} e{e['epoch']} ({e['mode']})")
     if failed:
         print(f"\n  NOTE: {failed} failed to grade -- re-run to retry (incremental).")
-    print(f"\nRegenerate the viewer (free) to see the new column: uv run make_viewer.py")
+    print(f"\nRegenerate the viewer (free) to see the new column: uv run viewer.py")
 
 
 if __name__ == "__main__":

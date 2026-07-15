@@ -17,14 +17,14 @@ import pathlib
 import shutil
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
 sys.path.insert(0, str(_petri))
 
 from inspect_ai.log import read_eval_log
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, binary_hack_eval, _orig_id_from_task,
 )
 
@@ -81,7 +81,7 @@ def main() -> None:
           f"to {TRASH}")
     for dname, removed, kept in pruned:
         print(f"  pruned {removed} entr(y/ies) from {dname}/rollback_results.json (kept {kept}; .bak saved)")
-    print("\nRegenerate the viewer to confirm only the binary hacks remain: uv run make_viewer.py")
+    print("\nRegenerate the viewer to confirm only the binary hacks remain: uv run viewer.py")
     print(f"Reverse with: mv {TRASH}/<run-dir>/*.eval back into logs/<run-dir>/ (and restore .bak)")
 
 

@@ -72,7 +72,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# make_viewer + exp_rh_audit + exp_resample live one level up / alongside; ensure both
+# viewer + exp_rh_audit + exp_resample live one level up / alongside; ensure both
 # the petri root and lib/ are importable whether this is imported by the top-level pipeline
 # or run from lib/.
 _PETRI = pathlib.Path(__file__).resolve().parent.parent
@@ -130,8 +130,8 @@ from inspect_scout import (
 )
 from inspect_ai.scorer import mean, stderr
 
-import make_viewer
-from make_viewer import (
+import viewer
+from viewer import (
     CONTINUATION_PIVOT_NEEDLE,
     CONTINUATION_PREFIX,
     load_mode,
@@ -156,7 +156,7 @@ load_dotenv(ENV_FILE)
 
 # Continuation run dirs are logs/continuation-<N>x-<timestamp>/. The viewer treats them
 # like rollback/resample dirs: excluded from the originals/index scan, rendered as their
-# own continuation pages. CONTINUATION_PREFIX is imported from make_viewer above (the
+# own continuation pages. CONTINUATION_PREFIX is imported from viewer above (the
 # single definition, since the viewer keys its dir-scan exclusion on it).
 DEVIATION_RESULTS_FILENAME = "continuation_deviation_results.json"
 
@@ -214,7 +214,7 @@ def pivot_preamble(task_description: str | None = None) -> str:
 
 
 PREAMBLE = pivot_preamble()
-# The judge-slice (make_viewer._continuation_cut_m) finds the pivot by the FIRST transcript
+# The judge-slice (viewer._continuation_cut_m) finds the pivot by the FIRST transcript
 # message containing CONTINUATION_PIVOT_NEEDLE -- which must be this injected PREAMBLE turn. If
 # the needle ever leaves PREAMBLE, the slice can never locate the pivot (it would silently judge
 # the WHOLE transcript, prefix A included). Fail at import rather than leak.
@@ -290,7 +290,7 @@ def _message_text_blob(m) -> str:
 def _assert_pivot_needle_absent_from_prefix(prefix_msgs: list, label: str, traj_id: int) -> None:
     """PRE-FLIGHT (no tokens spent): the judge-slice that hides prefix A keys on the FIRST
     transcript message containing CONTINUATION_PIVOT_NEEDLE, expecting it to be the injected pivot
-    turn. If prefix A already contains that phrase, make_viewer._continuation_cut_m fires EARLY and
+    turn. If prefix A already contains that phrase, viewer._continuation_cut_m fires EARLY and
     _slice_judge_transcript keeps part of the hack prefix -- leaking it into the judge silently.
     Run this on every pre-loaded prefix while building the plan (before eval_set / under --dry-run)
     so a colliding prefix aborts the run for free instead of contaminating scores."""
@@ -604,7 +604,7 @@ def _slice_judge_transcript(messages_str: str) -> str | None:
     a one-line 'prior task omitted' placeholder + everything from the pivot turn onward. Original
     [M#] numbers are preserved (we cut the numbered string; no renumbering). Returns None when
     there is no pivot (no_prefix / not a continuation) -- i.e. nothing to slice."""
-    pivot = make_viewer._continuation_cut_m(messages_str)
+    pivot = viewer._continuation_cut_m(messages_str)
     if pivot is None or pivot <= 2:
         return None
     m2 = re.search(r"(?m)^\[M2\] ", messages_str)
@@ -616,7 +616,7 @@ def _slice_judge_transcript(messages_str: str) -> str | None:
 
 
 # NOTE: name="audit_judge" is LOAD-BEARING -- it sets the SCORE KEY in every sample's scores.
-# make_viewer.load_mode keys on exactly "audit_judge" (and skips any sample that lacks it), so a
+# viewer.load_mode keys on exactly "audit_judge" (and skips any sample that lacks it), so a
 # different name here makes the viewer/faithfulness/annotation silently see ZERO continuations.
 # This judge produces the identical answer schema, so sharing the key is correct, not a hack.
 # Do NOT rename the score key without also updating load_mode. (A pipeline guard + a viewer
@@ -965,7 +965,7 @@ async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, Origin
                 "prefix_traj_id": aid,
                 "continuation_traj_id": bid,
                 "continuation_reward_hacking": (a.get("scores") or {}).get("reward_hacking"),
-                # raw token counts for this faithfulness call, stored so make_viewer can price it
+                # raw token counts for this faithfulness call, stored so viewer can price it
                 # at DISPLAY time (like the hack-turn annotation judge — see model_prices.py and
                 # annotation_cost_data). Same key names as the annotation usage block; the
                 # Anthropic SDK's input_tokens already EXCLUDES the cache tokens. No total_cost
@@ -1024,7 +1024,7 @@ async def run_continuation_annotation(run_dir, model: str = JUDGE.split("/")[-1]
     """Localize + annotate the reward-hack turns of every FULL-hack continuation in run_dir,
     exactly the way the original audit pipeline does (exp_annotate_hacks.run_annotation): the
     SAME binary-hack gate, the SAME judge-findings-driven annotator, and the SAME annotations.json
-    output keyed by page name -- so make_viewer marks the turns + builds the hack nav identically.
+    output keyed by page name -- so viewer marks the turns + builds the hack nav identically.
 
     The one continuation-specific twist: for a PREFIXED condition we feed the annotator the
     transcript SLICED to the new task (from the pivot onward), so it marks the new-task hack
@@ -1036,7 +1036,7 @@ async def run_continuation_annotation(run_dir, model: str = JUDGE.split("/")[-1]
     scoped: list[dict] = []
     for a in audits:
         b = dict(a)  # shallow copy; only the transcript is scoped (scores/findings unchanged)
-        pivot = make_viewer._continuation_cut_m(a.get("transcript") or "")
+        pivot = viewer._continuation_cut_m(a.get("transcript") or "")
         if pivot is not None:
             b["transcript"] = _transcript_from_m(a["transcript"], pivot)
         scoped.append(b)

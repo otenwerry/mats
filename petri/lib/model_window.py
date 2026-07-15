@@ -10,8 +10,7 @@ model window via get_model_input_tokens(). Two failure modes for our models:
   - KNOWN but STALE: Inspect's context_length is materially below the real window
     (deepseek-chat / deepseek-r1 = 65,536; gemma-3-27b = 65,536; qwen3-32b = 40,960).
 Either way the auditor compacts far too early -- the same 128k default that killed
-the sweep-5 baseline screening with 'Compaction insufficient' (see
-explore_context_budget.py).
+the sweep-5 baseline screening with 'Compaction insufficient'.
 
 Fix: feed lib/model_prices.CONTEXT_WINDOWS (our curated windows -- sourced from
 openrouter.ai/api/v1/models 2026-07-06 + provider tiers, already what the viewer

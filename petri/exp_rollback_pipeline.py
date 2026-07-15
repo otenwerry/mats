@@ -65,14 +65,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 from inspect_ai import eval_set
 from inspect_ai.log import list_eval_logs, read_eval_log
 
-import make_viewer
+import viewer
 import exp_rollback as rb
 from exp_rollback import (
     PROMPTS, build_replay_data, make_resume_spec, build_rollback_task,
     get_rollback_dims, write_rollback_meta,
 )
 from exp_rollback_judge import run_judging, DEFAULT_MODEL as DEFAULT_ANNOTATE_MODEL
-from make_viewer import (
+from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, is_hack_binary, page_name, load_originals_by_id,
     _orig_id_from_task,
 )
@@ -438,7 +438,7 @@ def main() -> None:
         print("STAGE 3 VIEWER (rebuild, free)")
         print("=" * 76)
         try:
-            asyncio.run(make_viewer.main())
+            asyncio.run(viewer.main())
         except Exception as e:
             print(f"  !! VIEWER STAGE FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()

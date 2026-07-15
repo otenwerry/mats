@@ -41,7 +41,7 @@ import pathlib
 import re
 import sys
 
-# make_viewer + exp_rh_audit live one level up / alongside; ensure both are importable
+# viewer + exp_rh_audit live one level up / alongside; ensure both are importable
 # whether this module is imported by the top-level pipeline or run from tools/.
 _PETRI = pathlib.Path(__file__).resolve().parent.parent
 for _p in (str(_PETRI), str(_PETRI / "lib")):
@@ -61,8 +61,8 @@ from inspect_ai.log import list_eval_logs, read_eval_log
 from inspect_ai.model import GenerateConfig, get_model
 from inspect_petri import audit, audit_solver, auditor_agent, auditor_tools
 
-import make_viewer
-from make_viewer import RESAMPLE_PREFIX, load_originals_by_id, load_mode, page_name
+import viewer
+from viewer import RESAMPLE_PREFIX, load_originals_by_id, load_mode, page_name
 from petri_paths import DATA, LOGS, ENV_FILE, DIMENSIONS_DIR
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from exp_rh_audit import (
@@ -75,7 +75,7 @@ load_dotenv(ENV_FILE)
 
 # Resample run dirs are logs/resample-<N>x-<timestamp>/. The viewer treats them like
 # rollback dirs: excluded from the originals/index scan, rendered as continuations.
-# RESAMPLE_PREFIX is imported from make_viewer above (the single definition, since the
+# RESAMPLE_PREFIX is imported from viewer above (the single definition, since the
 # viewer keys its dir-scan exclusion on it).
 DEVIATION_RUBRIC_FILE = DIMENSIONS_DIR / "rollback_only" / "deviations_from_original.md"
 DEVIATION_RESULTS_FILENAME = "resample_deviation_results.json"

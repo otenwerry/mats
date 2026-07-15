@@ -7,14 +7,14 @@ in the viewer. This re-runs Petri's real judge (`audit_judge`, same model claude
 over each such trajectory with ALL current dimensions, so their scores are complete.
 
 Scope: every ORIGINAL audit (non-rollback) that is currently categorized `degenerate` or
-`nudged` (make_viewer.hack_category on the rejudge-merged scores -- exactly those viewer
+`nudged` (viewer.hack_category on the rejudge-merged scores -- exactly those viewer
 sections) AND is missing >= 1 of the current judge dimensions. Trajectories already complete
 are skipped, so this is naturally idempotent: re-running only picks up whatever is still
 incomplete (e.g. anything that failed to judge last time).
 
 Output: merged into mats-local/petri/rejudge_scores.json (same file + format as
 exp_rejudge_rh.py: a full-replacement entry per trajectory with all current scores +
-summary/justification/highlights). make_viewer's load_mode merges it in, so the viewer,
+summary/justification/highlights). viewer's load_mode merges it in, so the viewer,
 exp_annotate_hacks, and rollback selection all see one consistent judge pass. Incremental
 and checkpointed after every trajectory. NOTE: re-judging is a fresh all-dims pass, so a
 trajectory may change category (e.g. a nudged run whose validity dim now passes can become
@@ -26,7 +26,7 @@ Usage:
   uv run tools/exp_rejudge_incomplete_hacks.py --limit=1   # cheap sanity run: judge just 1
   uv run tools/exp_rejudge_incomplete_hacks.py --concurrency=50
   uv run tools/exp_rejudge_incomplete_hacks.py --model=anthropic/claude-opus-4-8
-Then regenerate the viewer (free): uv run make_viewer.py
+Then regenerate the viewer (free): uv run viewer.py
 
 Costs money (Anthropic API: the judge model), except --dry-run.
 """
@@ -35,7 +35,7 @@ import asyncio
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -46,7 +46,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
-from make_viewer import (
+from viewer import (
     LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, hack_category, _load_rejudge,
 )
 
@@ -204,7 +204,7 @@ async def main() -> None:
     if failed:
         print(f"  NOTE: {failed} failed -- they keep their old (incomplete) scores and will "
               "be picked up again on a re-run (incremental).")
-    print("\nRegenerate the viewer (free) to see the merged scores: uv run make_viewer.py")
+    print("\nRegenerate the viewer (free) to see the merged scores: uv run viewer.py")
 
 
 if __name__ == "__main__":

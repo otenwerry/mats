@@ -6,12 +6,12 @@ the dimension rubrics. This re-runs Petri's ACTUAL judge (`audit_judge`, the sam
 model / prompt exp_rh_audit.py uses) over each main-page original's EXISTING transcript and
 scores every current dimension fresh in one pass. No new trajectories are generated -- only
 the judging is redone. The fresh scores REPLACE that trajectory's entry in rejudge_scores.json
-(scores + summary + justification + highlights), which make_viewer merges in (full
+(scores + summary + justification + highlights), which viewer merges in (full
 replacement), so every main-page number reflects the current judging system and there are no
 nulls.
 
 Scope: ORIGINAL audits (non-rollback log dirs) that land on the MAIN page -- i.e.
-make_viewer.is_old_trajectory(a) is False (runs dated >= _MAIN_MIN_DATE). Rollback
+viewer.is_old_trajectory(a) is False (runs dated >= _MAIN_MIN_DATE). Rollback
 continuations are NOT touched (re-judge those with exp_rejudge_rollbacks.py if needed). By
 DEFAULT it re-judges ALL selected trajectories -- that's the point, to refresh stale/null
 scores -- so it re-spends on ones already in the file. Pass --skip-existing to only fill in
@@ -23,7 +23,7 @@ Usage:
   uv run tools/exp_rejudge_main.py --skip-existing  # only judge ones not already in the file
   uv run tools/exp_rejudge_main.py --concurrency=50 # parallel judges (default 50)
   uv run tools/exp_rejudge_main.py --model=anthropic/claude-opus-4-8
-Then regenerate the viewer (free): uv run make_viewer.py
+Then regenerate the viewer (free): uv run viewer.py
 
 Costs money (Anthropic API: the judge model).
 """
@@ -32,7 +32,7 @@ import asyncio
 import pathlib
 import sys
 
-# this tool lives in tools/; put the project root (for make_viewer) and ../lib
+# this tool lives in tools/; put the project root (for viewer) and ../lib
 # (for petri_paths + the core modules) on the import path.
 _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
@@ -44,7 +44,7 @@ from inspect_scout import TranscriptContent, transcripts_from
 
 # single source of truth for paths, dims, the merge key, and the main/old split
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
-from make_viewer import (
+from viewer import (
     LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, binary_hack_eval, is_old_trajectory,
 )
 
@@ -110,7 +110,7 @@ async def collect_candidates(existing: dict) -> list[dict]:
                 })
     if skipped_unregistered:
         print(f"  NOTE: skipped {skipped_unregistered} trajectory(ies) with no id in "
-              f"{_REG_FILE.name} -- run `uv run make_viewer.py` first to register them, then retry.")
+              f"{_REG_FILE.name} -- run `uv run viewer.py` first to register them, then retry.")
     return cands
 
 
@@ -192,7 +192,7 @@ async def main() -> None:
     if failed:
         print(f"  NOTE: {failed} audit(s) failed to re-judge -- they keep their old scores; "
               "re-run to retry (use --skip-existing to avoid re-spending on the ones that worked).")
-    print("\nRegenerate the viewer (free) to see the merged scores: uv run make_viewer.py")
+    print("\nRegenerate the viewer (free) to see the merged scores: uv run viewer.py")
 
 
 if __name__ == "__main__":
