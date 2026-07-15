@@ -279,8 +279,8 @@ def end_cut(traj: Trajectory, parsed: Parsed, alignment: Alignment,
                                raw_cut=first_chunk, snapped=True)
                 plan.notes.append(
                     "trajectory ends on an assistant message with unanswered tool "
-                    "call(s) (run died mid-tool); cut snapped to before it — the "
-                    "resume CLI will inject bridging turns")
+                    "call(s) (run died mid-tool); that final message is cut off — "
+                    "the cut sits just before it")
                 return plan
             plan = CutPlan(turn=last + 1, cut_event=last + 1, raw_cut=last + 1)
             plan.notes.append("cut after the final assistant message (end of trajectory)")

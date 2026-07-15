@@ -5339,6 +5339,7 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     warn_html = "".join(
         f'<div class="emmeta" style="color:#b3261e">&#9888; {esc(d)}</div>'
         for d in warn_details)
+    cut_html = (_cut_off_details(a) if "final_message_cut_off" in flags else "")
     body = f"""
 {page_head(title, *buttons)}
 <div class="emmeta">{esc(" · ".join(bits))}</div>
@@ -5346,6 +5347,7 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
 {note}
 <h2>{"Conversation <span class='meta'>(bare question &mdash; no context)</span>" if s.get("baseline") else "Resumed conversation <span class='meta'>(replayed prefix; the inserted question at the cut mark)</span>"}</h2>
 {tr_html_}
+{cut_html}
 {judge_html}
 """
     # floating jump to the new question (bottom-right, above the totop button, so it
@@ -5479,6 +5481,33 @@ def em_judge_data(blocks: list[dict]) -> dict | None:
             "coherent_min": EM_COHERENT_MIN, "misaligned_below": EM_MISALIGNED_BELOW}
 
 
+def _final_assistant_block(orig: dict | None) -> str | None:
+    """The original transcript's final assistant message — the one an end cut may
+    have cut off — sliced verbatim from the rendered transcript (which has verbatim
+    parity with the eval log). None when there is no transcript/assistant turn."""
+    tr = (orig or {}).get("transcript") or ""
+    heads = [(m.start(), re.sub(r"[^a-z]", "", m.group(2).lower().split()[0]))
+             for m in MSG_HEAD.finditer(tr)]
+    ai = max((i for i, h in enumerate(heads) if h[1].startswith("assistant")),
+             default=None)
+    if ai is None:
+        return None
+    return tr[heads[ai][0]:].strip()
+
+
+def _cut_off_details(orig: dict | None) -> str:
+    """Closed-by-default dropdown holding the message cut off from the end (for
+    blocks flagged final_message_cut_off). Empty string when unavailable."""
+    seg = _final_assistant_block(orig)
+    if not seg:
+        return ""
+    return ('<details style="margin:4px 0 6px"><summary>cut off from the end '
+            '&mdash; the final assistant message, NOT in the resumed context'
+            '</summary><pre style="white-space:pre-wrap;font-size:12px;'
+            'background:#f7f8fa;border:1px solid #e3e5ec;border-radius:6px;'
+            f'padding:8px 10px;margin:4px 0">{esc(seg)}</pre></details>')
+
+
 async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]]:
     """The expand panel for one original trajectory's EM row: per (cut) a compact meta
     line (cut, ask/answer counts, cost, judge rollup), then a list of that cut's resumed
@@ -5505,10 +5534,10 @@ async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]
                 f'cut {esc(str(s.get("cut")))} '
                 f'(turn {s.get("cut_turn")} of {s.get("n_target_turns")})',
                 f'{n_asks} ask(s), {n_asks - n_no} answered']
-        if "end_snapped_dangling_tool_calls" in (s.get("bundle_flags") or []):
-            meta.insert(1, '<b style="color:#b3261e">end snapped</b>: the final '
-                           'assistant message (unanswered tool calls) was dropped '
-                           '&mdash; exactly one message')
+        cut_off = "final_message_cut_off" in (s.get("bundle_flags") or [])
+        if cut_off:
+            meta.insert(1, '<b style="color:#b3261e">1 message cut off from the end'
+                           '</b> (unanswered tool calls; shown in the dropdown below)')
         if isinstance(cost, (int, float)):
             meta.append(f"${cost:.4f}")
         jcls = [em_classify(r.get("judge")) for r in b["asks"]]
@@ -5544,7 +5573,8 @@ async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]
                          else "no answer" if r.get("answer") is None else "")
                 extra_html = f' <span class="meta">{esc(extra)}</span>' if extra else ""
                 items.append(f'<li>{link_html}{" " + jbadge if jbadge else ""}{extra_html}</li>')
-        sections.append(f'<div class="emdrop-meta">{meta_html}</div>'
+        cut_html = _cut_off_details(b.get("orig")) if cut_off else ""
+        sections.append(f'<div class="emdrop-meta">{meta_html}</div>{cut_html}'
                         f'<ul class="emlinks">{"".join(items)}</ul>')
     return f'<div class="emdrop">{"".join(sections)}</div>', ask_pages
 

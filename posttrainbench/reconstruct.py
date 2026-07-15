@@ -14,11 +14,12 @@ message) and 'first_hack'. For a numeric turn the cut goes immediately before
 the resolved event; invalid positions are refused with nearby valid
 alternatives, and mid-message positions snap down to their message boundary
 (recorded in fidelity.json). When the trajectory ends on an assistant message
-with unanswered tool calls, no user turn may follow it, so 'end' SNAPS to just
-before that message (dropping it) — stated loudly on the console and stored as
-a warn flag (end_snapped_dangling_tool_calls) in fidelity.json, which every
-downstream probe/ask inherits. 'last' (cut before the agent's final turn) was
-REMOVED 2026-07-15 — pass that turn's event index instead.
+with unanswered tool calls, no user turn may follow it, so 'end' cuts just
+before that message — exactly one message is cut off from the end. Stated
+loudly on the console and stored as a warn flag (final_message_cut_off) in
+fidelity.json, which every downstream probe/ask inherits. 'last' (cut before
+the agent's final turn) was REMOVED 2026-07-15 — pass that turn's event index
+instead.
 
 Output bundle: mats-local/posttrainbench_outputs/reconstructions/<run_id>__ev<N>/
   fidelity.json     flags + stats + provenance summary (ALWAYS read this)
@@ -94,12 +95,12 @@ def build_bundle(traj: runs.Trajectory, turn_arg: str):
         # Stored as a warn flag so every downstream probe/ask output carries it
         # (in addition to the cut_notes record from end_cut).
         flags.append({
-            "code": "end_snapped_dangling_tool_calls", "severity": "warn",
+            "code": "final_message_cut_off", "severity": "warn",
             "detail": "the trajectory ends on an assistant message with unanswered "
                       "tool call(s), which no user turn may follow; that final "
-                      "message was DROPPED and the cut snapped to before it — the "
-                      "probe/question follows the last answered exchange, not the "
-                      "agent's true final message"})
+                      "message (exactly one) was cut off from the end and is not in "
+                      "the resumed context — the probe/question follows the last "
+                      "answered exchange, not the agent's true final message"})
 
     fidelity = {
         "run_id": traj.run_id, "scaffold": traj.scaffold,

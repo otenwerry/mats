@@ -1004,11 +1004,17 @@ CONTINUATION_HTML = ("""
  <a class="headbtn" href="#probe-cutoff">jump to cutoff &darr;</a>
 </div>
 <div class="contbanner">
- &#9851; Probe resumed from this trajectory's context cut before <b>event {{ p.cut_event }}</b>{% if p.snapped %} (snapped from {{ p.requested_turn }}){% endif %} — the turns below are that context; the probe question &amp; answer follow.{% if p.cost is not none %} · <b>${{ '%.4f'|format(p.cost) }}</b>{% endif %}
+ &#9851; Probe resumed from this trajectory's context cut before <b>event {{ p.cut_event }}</b>{% if p.snapped %} (moved from requested {{ p.requested_turn }} to the nearest valid point){% endif %} — the turns below are that context; the probe question &amp; answer follow.{% if p.cost is not none %} · <b>${{ '%.4f'|format(p.cost) }}</b>{% endif %}
  {% if p.flags %}<div class="flagline">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span>{% endfor %}</div>{% endif %}
 </div>
 """ + _TRAJ_CORE_HTML + """
 <div class="sessdiv" id="probe-cutoff">— cutoff: reconstructed original context ends here (before event {{ p.cut_event }}) —</div>
+{% if tail_body %}
+<details class="legend" style="margin:8px 0">
+ <summary>cut off from the end — {{ n_tail }} event(s) after this point were NOT in the resumed context</summary>
+ {{ tail_body|safe }}
+</details>
+{% endif %}
 {% if p.injected_turns %}
 <div class="sessdiv">— resume boundary: turn(s) below were injected by the resume CLI, not part of the original trajectory —</div>
 {% for t in p.injected_turns %}
@@ -1056,7 +1062,7 @@ CONTINUATIONS_LIST_HTML = """
   <th>probe (cut)</th><th>scaffold</th><th>flags</th><th class="num">cost</th></tr></thead><tbody>
  {% for p in g.probes %}
  <tr>
-  <td><a href="/continuation/{{ p.probe_id }}">ev{{ p.cut_event }}{% if p.snapped %} (snapped){% endif %}</a></td>
+  <td><a href="/continuation/{{ p.probe_id }}">ev{{ p.cut_event }}{% if p.snapped %} (moved from requested){% endif %}</a></td>
   <td>{{ p.scaffold }}</td>
   <td class="flags">{% for f in p.flags %}<span class="flag {{ f.severity }}" title="{{ f.detail }}">{{ f.code }}</span> {% endfor %}</td>
   <td class="num">{% if p.cost is not none %}${{ '%.4f'|format(p.cost) }}{% else %}–{% endif %}</td>
@@ -1577,13 +1583,15 @@ def _reasoning_capture(trace_format, agent_model, events):
     return None
 
 
-def _trajectory_view(run_id: str, cut_at=None):
+def _trajectory_view(run_id: str, cut_at=None, with_tail: bool = False):
     """Every template variable for a trajectory page — shared by /run and the
     continuation page. When `cut_at` is set (continuation), the transcript is
     truncated to events[:cut_at] — the reconstructed context the probe was
-    resumed from, in order, with nothing after the cut. Assumes run_id is in
-    INDEX. Returns a kwargs dict (no prev/next ordering — that is /run-specific
-    and added by the caller)."""
+    resumed from, in order, with nothing after the cut. `with_tail` additionally
+    renders events[cut_at:] (what was cut off from the end) as tail_body/n_tail,
+    with their true absolute event numbers, for the closed cut-off dropdown.
+    Assumes run_id is in INDEX. Returns a kwargs dict (no prev/next ordering —
+    that is /run-specific and added by the caller)."""
     i = INDEX[run_id]
     r = RUNS[i]
     rec = load_record(run_id)
@@ -1621,7 +1629,10 @@ def _trajectory_view(run_id: str, cut_at=None):
     # so trains-before-hack is verifiable by eye in the trace. Once a run has a
     # train_run_audit, failed launches get a ✗ badge and consume no number.
     events = rec.get("events", [])
+    tail_events = []
     if cut_at is not None:
+        if with_tail:
+            tail_events = events[cut_at:]
         events = events[:cut_at]   # continuation: show only the reconstructed prefix, in order
     tr_audit = hl.get("train_run_audit", {}) if hl else {}
     train_turns, k = {}, 0
@@ -1706,13 +1717,26 @@ def _trajectory_view(run_id: str, cut_at=None):
                              quotes, marked_turns, annotations, turn_kinds,
                              train_turns, api_turns,
                              reasoning_mode=(reasoning_capture or {}).get("block_mode"))
+    # the cut-off tail, rendered with true absolute event numbers (so anchors
+    # never collide with the prefix's). _render_blocks_event covers the claude
+    # trace format, which is the only ask-supported scaffold; anything it can't
+    # render falls back to a raw JSON block rather than being dropped.
+    tail_body = ""
+    for k, ev in enumerate(tail_events):
+        try:
+            tail_body += rnd._render_blocks_event(ev, cut_at + k, ())
+        except Exception:
+            import html as _html
+            tail_body += ('<pre class="content tool">'
+                          + _html.escape(json.dumps(ev, indent=1)[:4000]) + "</pre>")
     ws = load_workspace(run_id)
     def _kind(t):
         v = turn_kinds.get(str(t))
         return (v if isinstance(v, str) else (v or {}).get("kind")) or "hack"
     n_hack_true = sum(1 for t in marked_turns if _kind(t) == "hack")
     return dict(
-        r=r, body=body, reasoning_capture=reasoning_capture,
+        r=r, body=body, tail_body=tail_body, n_tail=len(tail_events),
+        reasoning_capture=reasoning_capture,
         flagged=is_flagged(r), hl=hl, oj=oj,
         everdict=HL_META.get(run_id, {}).get("everdict", ""),
         raw_path=str(paths.raw_dir(run_id).relative_to(paths.RAW)),
@@ -3356,11 +3380,12 @@ def _em_block_view(b: dict) -> dict:
         meta.append(f"{s['n_judged']} judged"
                     + (f" (~${jc:.4f} judge)" if isinstance(jc, (int, float)) else ""))
     caveats = []
-    if "end_snapped_dangling_tool_calls" in flags:
-        caveats.append("END SNAPPED: the trajectory's final assistant message had "
-                       "unanswered tool calls and was DROPPED (exactly one message — "
-                       "everything before it is intact); every ask follows the last "
-                       "answered exchange, not the agent's true final message.")
+    if "final_message_cut_off" in flags:
+        caveats.append("1 message cut off from the end: the trajectory ended on "
+                       "unanswered tool calls, so its final assistant message is not "
+                       "in the resumed context (everything before it is intact — the "
+                       "cut-off message is in the dropdown on each ask's full-"
+                       "conversation page).")
     if baseline:
         caveats.append("Model+scaffold baseline: bare questions in a fresh scaffold "
                        "session — the CLI still injects its own system prompt and "
@@ -3481,7 +3506,10 @@ def em_ask(campaign: str, blockdir: str, askdir: str):
         abort(404)
     probe["probe_id"] = f"{campaign}/{blockdir}/{askdir}"
     if probe.get("run_id") and probe["run_id"] in INDEX:
-        view = _trajectory_view(probe["run_id"], cut_at=probe["cut_event"])
+        cut_off = any(f.get("code") == "final_message_cut_off"
+                      for f in probe.get("flags") or [])
+        view = _trajectory_view(probe["run_id"], cut_at=probe["cut_event"],
+                                with_tail=cut_off)
         return render_template_string(
             CONTINUATION_HTML, p=probe, back_href="/continuations/em",
             back_label="EM results", subnav=_subnav("EM results", window="crt"),
