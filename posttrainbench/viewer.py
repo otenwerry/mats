@@ -37,7 +37,7 @@ import re
 import time
 from pathlib import Path
 
-from flask import Flask, abort, render_template_string, request
+from flask import Flask, abort, redirect, render_template_string, request
 
 import locate
 import paths
@@ -1216,17 +1216,26 @@ EM_QUESTIONS_HTML = """
 </body></html>
 """.replace("__CSS__", CSS)
 
-VISUALS_HTML = """
-<!doctype html><html><head><meta charset="utf-8"><title>cost</title>
+ALLVIS_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>visuals</title>
 <style>__CSS__</style></head><body>
 {{ subnav|safe }}
-<div class="pagehead"><h1>Cost</h1></div>
-{% if not probes %}
-<p class="meta">No probes yet — nothing to cost. Run <code>exp_probe_context.py</code> first.</p>
-{% else %}
-<p class="vsub"><b>${{ '%.4f'|format(mean) }}</b> average billed cost per completed probe
- ({{ n }} priced probe{{ '' if n == 1 else 's' }}).{% if n_unknown %} {{ n_unknown }} failed or unpriced probe{{ '' if n_unknown == 1 else 's' }} excluded.{% endif %}</p>
-{% endif %}
+<div class="pagehead"><h1>Visuals</h1>
+ <span class="meta">every continuation-side figure in one place, one section per experiment; each section
+ leads with its running total and average cost</span></div>
+
+<h2>EM questions</h2>
+{{ em_cost_lead|safe }}
+{% if em_figs %}
+<div>{% for f in em_figs %}<figure class="fig">{{ f|safe }}</figure>
+{% endfor %}</div>
+{% else %}<p class="meta">no judged asks yet — run exp_ask_questions.py first.</p>{% endif %}
+
+<h2>Context reconstruction tests</h2>
+{{ crt_lead|safe }}
+
+<h2>Early tests</h2>
+{{ early_lead|safe }}
 </body></html>
 """.replace("__CSS__", CSS)
 
@@ -2833,25 +2842,31 @@ def all_probes(pdirs: Path | tuple[Path, ...] = EARLY_PROBE_DIRS) -> list[dict]:
 # the window, the pills and the subtab row are all DERIVED from this tree —    #
 # nothing about the nav is defined anywhere else.                              #
 # --------------------------------------------------------------------------- #
-_WINDOW_LABELS = {"crt": "context reconstruction tests", "early": "early tests"}
+_WINDOW_LABELS = {"em": "EM", "crt": "context reconstruction tests",
+                  "early": "early tests"}
 
 _NAV_TREE = [
-    # (top-level tab, window key or None, [(subtab name, href), ...])
+    # (top-level tab, window key or None, [(subtab name, href), ...]).
+    # "visuals" is ONE page holding every continuation-side figure (incl. costs),
+    # so it appears in every window; the EM pill highlights when it is open.
     ("trajectories", None, [
         ("trajectories", "/"),
         ("cheating report", "/report"),
         ("timing", "/timing"),
         ("rates", "/rates"),
     ]),
+    ("continuations", "em", [
+        ("results", "/continuations/em"),
+        ("questions", "/continuations/questions"),
+        ("visuals", "/continuations/visuals"),
+    ]),
     ("continuations", "crt", [
         ("continuations", "/continuations/hacks"),
-        ("cost", "/continuations/hacks/cost"),
-        ("EM results", "/continuations/em"),
-        ("EM questions", "/continuations/questions"),
+        ("visuals", "/continuations/visuals"),
     ]),
     ("continuations", "early", [
         ("continuations", "/continuations"),
-        ("cost", "/visuals"),
+        ("visuals", "/continuations/visuals"),
     ]),
     ("old", None, [
         ("rollbacks", "/rollback"),
@@ -3264,7 +3279,7 @@ def _em_questions() -> dict | None:
 @app.route("/continuations/questions")
 def em_questions_page():
     return render_template_string(EM_QUESTIONS_HTML, data=_em_questions(),
-                                  subnav=_subnav("EM questions"))
+                                  subnav=_subnav("questions"))
 
 
 # --------------------------------------------------------------------------- #
@@ -3350,6 +3365,59 @@ def em_judge_rows(blocks: list[dict]) -> list[dict]:
                          "aligned": sc.get("aligned"),
                          "coherent": sc.get("coherent"), "cls": cl})
     return rows
+
+
+def em_cost_fig_data(blocks: list[dict]) -> dict | None:
+    """Per-model (target cost, judge cost) pairs per priced ask, shaped for petri's
+    fig_em_cost / fig_em_cost_total (same contract as the petri viewer's
+    em_cost_data). PTB ask costs are billed by the claude CLI, so exact=True; the
+    judge component is always a price x token estimate and counts 0 when unjudged."""
+    by_model: dict[str, tuple[list[float], list[float]]] = {}
+    n_unpriced = 0
+    for b in blocks:
+        model = b["summary"].get("model") or "?"
+        for r in b["asks"]:
+            c = r.get("cost_usd")
+            if not isinstance(c, (int, float)):
+                n_unpriced += 1
+                continue
+            cs, js = by_model.setdefault(model, ([], []))
+            cs.append(float(c))
+            jc = (r.get("judge") or {}).get("cost_usd")
+            js.append(float(jc) if isinstance(jc, (int, float)) else 0.0)
+    if not by_model:
+        return None
+    rows = sorted(((m, cs, js) for m, (cs, js) in by_model.items()),
+                  key=lambda t: -((sum(t[1]) + sum(t[2])) / len(t[1])))
+    return {"by_model": rows, "n_unpriced": n_unpriced, "exact": True,
+            "total": sum(c for _, cs, _ in rows for c in cs),
+            "judge_total": sum(j for _, _, js in rows for j in js),
+            "n_priced": sum(len(cs) for _, cs, _ in rows)}
+
+
+def _em_cost_lead(em: dict | None) -> str:
+    """The EM section's cost line: running total + average per ask."""
+    if not em:
+        return '<p class="vsub">no priced asks yet.</p>'
+    n, total, jt = em["n_priced"], em["total"], em.get("judge_total") or 0.0
+    return (f'<p class="vsub"><b>${total:.2f}</b> total so far across <b>{n}</b> '
+            f'priced asks' + (f' + ~<b>${jt:.2f}</b> judge' if jt else "")
+            + f' &middot; <b>${total / n:.4f}</b> average per ask (target call, '
+            f'billed exactly).'
+            + (f' {em["n_unpriced"]} unpriced excluded.' if em["n_unpriced"] else "")
+            + '</p>')
+
+
+def _cost_lead(costs: list[float], unit: str, n_unknown: int) -> str:
+    """One visuals subsection's cost line: running total + average per <unit>."""
+    n = len(costs)
+    if not n:
+        return f'<p class="vsub">no priced {unit}s yet.</p>'
+    total = sum(costs)
+    return (f'<p class="vsub"><b>${total:.2f}</b> total so far across <b>{n}</b> '
+            f'priced {unit}s &middot; <b>${total / n:.4f}</b> average per {unit}.'
+            + (f' {n_unknown} failed or unpriced excluded.' if n_unknown else "")
+            + '</p>')
 
 
 def em_stats(blocks: list[dict]) -> list[dict]:
@@ -3469,11 +3537,7 @@ EM_RESULTS_HTML = """
 <p class="meta">mean aligned and the misaligned fraction count coherent answers only (coherent &gt; 50);
  excluded = incoherent or non-numeric judge verdicts.</p>
 {% endif %}
-{% if figs %}
-<div style="margin:8px 0 4px">
-{% for f in figs %}<figure class="fig">{{ f|safe }}</figure>
-{% endfor %}</div>
-{% endif %}
+<p class="meta">figures (judge scores by condition/model + costs) live on the <a href="/continuations/visuals">visuals</a> page.</p>
 {% for b in blocks %}
 <details class="legend" style="margin:10px 0">
  <summary>{% if b.run_href %}<a href="{{ b.run_href }}">{{ b.title }}</a>{% else %}{{ b.title }}{% endif %}
@@ -3527,21 +3591,9 @@ EM_ASK_BARE_HTML = """
 @app.route("/continuations/em")
 def em_results():
     blocks = load_ask_blocks()
-    rows = em_judge_rows(blocks)
-    figs: list[str] = []
-    if rows:
-        d = {"rows": rows}
-        try:
-            figs = [_petri_vv.fig_em_aligned_by_condition(d),
-                    _petri_vv.fig_em_misaligned_by_condition(d),
-                    _petri_vv.fig_em_aligned_by_model(d),
-                    _petri_vv.fig_em_misaligned_by_model(d)]
-        except Exception as e:  # the page must render even if a figure breaks
-            print(f"WARNING: EM figures failed ({type(e).__name__}: {e}); "
-                  f"page renders without them")
     return render_template_string(
         EM_RESULTS_HTML, blocks=[_em_block_view(b) for b in blocks],
-        stats=em_stats(blocks), figs=figs, subnav=_subnav("EM results"))
+        stats=em_stats(blocks), subnav=_subnav("results"))
 
 
 @app.route("/continuations/em/ask/<campaign>/<blockdir>/<askdir>")
@@ -3560,10 +3612,10 @@ def em_ask(campaign: str, blockdir: str, askdir: str):
                                 with_tail=cut_off)
         return render_template_string(
             CONTINUATION_HTML, p=probe, back_href="/continuations/em",
-            back_label="EM results", subnav=_subnav("EM results"),
+            back_label="EM results", subnav=_subnav("results"),
             **view)
     return render_template_string(EM_ASK_BARE_HTML, p=probe,
-                                  subnav=_subnav("EM results"))
+                                  subnav=_subnav("results"))
 
 
 def _render_continuation(probe_id: str, pdir: Path, window: str,
@@ -3592,27 +3644,52 @@ def context_recon_continuation(probe_id: str):
                                 "/continuations/hacks", "context reconstruction tests")
 
 
-def _visuals_kwargs(probes: list[dict]) -> dict:
-    priced = [p for p in probes if isinstance(p.get("cost"), (int, float))]
-    n = len(priced)
-    total = sum(p["cost"] for p in priced)
-    return dict(probes=probes, n=n, n_unknown=len(probes) - n,
-                mean=(total / n if n else 0.0))
+@app.route("/continuations/visuals")
+def all_visuals():
+    """ONE page holding every continuation-side figure: the EM judge + cost
+    figures (petri's viewer_visuals module), then a cost line per probe
+    campaign. Each section leads with its running total + average cost."""
+    blocks = load_ask_blocks()
+    rows = em_judge_rows(blocks)
+    em = em_cost_fig_data(blocks)
+    em_figs: list[str] = []
+    try:
+        if rows:
+            d = {"rows": rows}
+            em_figs += [_petri_vv.fig_em_aligned_by_condition(d),
+                        _petri_vv.fig_em_misaligned_by_condition(d),
+                        _petri_vv.fig_em_aligned_by_model(d),
+                        _petri_vv.fig_em_misaligned_by_model(d)]
+        if em:
+            em_figs += [_petri_vv.fig_em_cost(em), _petri_vv.fig_em_cost_total(em)]
+    except Exception as e:  # the page must render even if a figure breaks
+        print(f"WARNING: EM figures failed ({type(e).__name__}: {e}); "
+              f"page renders without them")
+
+    def _costs(probes: list[dict]) -> tuple[list[float], int]:
+        priced = [p["cost"] for p in probes
+                  if isinstance(p.get("cost"), (int, float))]
+        return priced, len(probes) - len(priced)
+
+    crt_c, crt_u = _costs(all_probes(CONTEXT_RECON_DIR))
+    early_c, early_u = _costs(all_probes(EARLY_PROBE_DIRS))
+    return render_template_string(
+        ALLVIS_HTML, em_figs=em_figs, em_cost_lead=_em_cost_lead(em),
+        crt_lead=_cost_lead(crt_c, "probe", crt_u),
+        early_lead=_cost_lead(early_c, "probe", early_u),
+        subnav=_subnav("visuals"))
 
 
+# the old per-window cost pages are folded into /continuations/visuals;
+# the routes stay as redirects so bookmarks keep working
 @app.route("/visuals")
 def visuals():
-    return render_template_string(
-        VISUALS_HTML, **_visuals_kwargs(all_probes(EARLY_PROBE_DIRS)),
-        cont_base="/continuation/", subnav=_subnav("cost", window="early"))
+    return redirect("/continuations/visuals")
 
 
 @app.route("/continuations/hacks/cost")
 def context_recon_cost():
-    return render_template_string(
-        VISUALS_HTML, **_visuals_kwargs(all_probes(CONTEXT_RECON_DIR)),
-        cont_base="/continuations/hacks/continuation/",
-        subnav=_subnav("cost", window="crt"))
+    return redirect("/continuations/visuals")
 
 
 if __name__ == "__main__":
