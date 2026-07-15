@@ -1,8 +1,9 @@
 # Reconstruction issues tracker
 
-> **Covers:** the PostTrainBench context-reconstruction issue tracker — per-run fidelity tags (nudge restarts, background restarts, edits lost, reasoning lost, effort, task-prompt rebuild, resume turns) and the universal caveats. Ties to `lib/recon_claude.py`, `exp_probe_context.py`, `lib/prompts.py`, and the viewer's issues column on `/continuations/hacks`.
+> **Covers:** the PostTrainBench context-reconstruction issue tracker — per-run fidelity tags (nudge restarts, background restarts, edits lost, reasoning lost, effort, task-prompt rebuild, resume turns) and the universal caveats. Ties to `lib/recon_claude.py`, `exp_ask_questions.py`, `lib/prompts.py`, and the viewer's issues column on `/continuations/hacks`.
 > **Read when:** doing PTB context-reconstruction / probe work, or reading a run's reconstruction-fidelity flags.
-> **Last updated:** 2026-07-13
+> **Last updated:** 2026-07-15
+> **NB (2026-07-15):** `exp_probe_context.py` and `exp_run_context_recon.py` are RETIRED — the probe now runs as `exp_ask_questions.py --questions=context` (DEFAULT_PROBE + resolve_cli moved there verbatim). Mentions of the old files below are historical; the fixes they describe live on in the shared recon/ask code paths.
 > **Original path:** posttrainbench/ISSUES.md
 > **Note:** the file's own rule — when an issue changes, update this file AND the viewer tags/legend in the same change.
 

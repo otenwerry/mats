@@ -1,6 +1,6 @@
 """Reconstruct agent context at a chosen turn of a PTB reward-hack trajectory.
 
-Free (no API calls). The paid probe lives in exp_probe_context.py.
+Free (no API calls). The paid asks/probes live in exp_ask_questions.py.
 
 Usage:
   python reconstruct.py --list

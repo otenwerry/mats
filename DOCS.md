@@ -57,19 +57,6 @@ uv run reconstruct.py
     --trajectory=<run_id> 
     [--turn=end (or event_id, 'first_hack')]
 
-## Probe context (paid — resumes the agent and asks what it remembers)
-uv run exp_probe_context.py
-    --trajectory=<run_id>
-    [--turn=end (or event_id, 'first_hack')]
-    [--probe="..."]  # default asks task / progress / earliest-visible / last-action / files
-
-## Batch context-reconstruction probes (one end-cut probe per trajectory, idempotent)
-uv run exp_run_context_recon.py
-    [--scaffold=all (or claude/opencode)]
-    [--rerun]   # re-probe already-probed trajectories (latest cut supersedes)
-    [--workers=4]
-    [--dry-run]
-
 ## Ask questions to resumed agents (em = auto-judged; context = the reconstruction probe)
 uv run exp_ask_questions.py
     --trajectory=<run_id,run_id or 'claude'>

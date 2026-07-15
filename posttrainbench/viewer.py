@@ -1064,7 +1064,7 @@ CONTINUATIONS_LIST_HTML = """
 {{ subnav|safe }}
 <div class="pagehead"><h1>Continuations</h1></div>
 {% if not groups %}<p class="meta">No probes yet. Run
- <code>exp_probe_context.py --trajectory &lt;run_id&gt; --turn &lt;ev|first_hack&gt;</code> to add one;
+ <code>exp_ask_questions.py --trajectory &lt;run_id&gt; --questions context --turn &lt;ev|first_hack&gt;</code> to add one;
  it appears here automatically.</p>{% endif %}
 {% for g in groups %}
 <details class="legend" open style="margin-bottom:.7rem">
@@ -2650,7 +2650,7 @@ def workspace(run_id: str):
 # Continuations (context-reconstruction probes) + Visuals (probe cost)         #
 #                                                                              #
 # A probe run lives at OUT_ROOT/probes/<run_id>__ev<N>/ (produced by           #
-# exp_probe_context.py): fidelity.json (cut/flags/stats + cost/Q&A on newer    #
+# exp_ask_questions.py): fidelity.json (cut/flags/stats + cost/Q&A on newer   #
 # runs), probe_out.jsonl (raw stream), probe_result.md. The loader falls back  #
 # to the raw stream / result md for probes that predate cost/Q&A recording, so #
 # every probe renders regardless of when it was produced.                      #
@@ -2664,7 +2664,7 @@ CONTEXT_RECON_DIR = runs.OUT_ROOT / runs.CONTEXT_RECON_CAMPAIGN
 
 
 def _probe_support(scaffold: str, agent: str) -> tuple[bool, str]:
-    """Can exp_probe_context.py resume this scaffold on this machine? Returns
+    """Can the ask/probe pipeline resume this scaffold on this machine? Returns
     (supported, reason-if-not). Drives the 'can't reconstruct' caveat shown on
     the context-reconstruction page so an un-runnable row never looks like a
     merely-not-yet-run one."""
@@ -3122,7 +3122,7 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                       "reasoning items lived in the rollout file, which was destroyed "
                       "with the run's temp dir")})
     if t.agent.startswith("claude_non_api"):
-        # exp_probe_context replicates the original effort setting and stamps an
+        # the ask pipeline replicates the original effort setting and stamps an
         # effort_replicated flag; only pre-fix probes keep this tag.
         if (probe is not None and probe.get("completed")
                 and "effort_replicated" not in probe_flags):
@@ -3161,7 +3161,7 @@ _CONTEXT_ASK_CAMPAIGN = "questions_context"
 
 def context_recon_records() -> list[dict]:
     """Every context-reconstruction record, in BOTH formats: the legacy probe dirs
-    (exp_probe_context.py, campaign dir directly) and the folded ask dirs
+    (the retired exp_probe_context.py, campaign dir directly) and the ask dirs
     (exp_ask_questions.py --questions=context, one level deeper). Each record
     carries the href of its conversation page."""
     recs: list[dict] = []
