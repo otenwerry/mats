@@ -3180,14 +3180,17 @@ def context_recon_records() -> list[dict]:
 
 def _context_recon_probes() -> dict[str, dict]:
     """{run_id: record} for the context-reconstruction grid — at most one per
-    trajectory; if several exist, keep the latest cut (so ask-format re-probes
-    supersede legacy probes and vice versa)."""
+    trajectory. Latest cut wins; on a tie, a completed record beats a failed
+    one, and later-listed (ask-format) records beat legacy probes — so a
+    successful re-probe at the same cut always supersedes a failed original."""
+    def rank(p):
+        return ((p["cut_event"] or 0), bool(p.get("completed")))
     out: dict[str, dict] = {}
     for p in context_recon_records():
         if not p.get("run_id"):
             continue
         prev = out.get(p["run_id"])
-        if prev is None or (p["cut_event"] or 0) > (prev["cut_event"] or 0):
+        if prev is None or rank(p) >= rank(prev):
             out[p["run_id"]] = p
     return out
 
