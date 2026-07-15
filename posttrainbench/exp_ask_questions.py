@@ -489,10 +489,23 @@ def prep_claude(p: dict, args) -> None:
 
     effort_args: list[str] = []
     if agent == "claude_non_api":
-        effort_args = ["--effort", "high"]
-        fidelity["flags"].append({
-            "code": "effort_replicated", "severity": "info",
-            "detail": "asks pass --effort high, matching claude_non_api solve.sh"})
+        # only run-era CLIs that KNOW --effort can have been launched with it
+        # (2.1.34 rejects the flag outright, so those originals ran at the
+        # default effort — sending the flag both crashes the ask and would
+        # misreplicate the run). Checked against the resolved CLI's --help.
+        help_txt = subprocess.run([*cli_cmd, "--help"], capture_output=True,
+                                  text=True).stdout
+        if "--effort" in help_txt:
+            effort_args = ["--effort", "high"]
+            fidelity["flags"].append({
+                "code": "effort_replicated", "severity": "info",
+                "detail": "asks pass --effort high, matching claude_non_api solve.sh"})
+        else:
+            fidelity["flags"].append({
+                "code": "effort_flag_predates_cli", "severity": "info",
+                "detail": f"this run's era CLI ({cli_version}) has no --effort "
+                          f"option, so the original run cannot have passed one; "
+                          f"asks run at the default effort, matching the original"})
     elif agent == "claude_non_api_max":
         env_overrides["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
         fidelity["flags"].append({
