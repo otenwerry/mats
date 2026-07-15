@@ -11,6 +11,10 @@ Hand-maintained menu of the notes in this folder. Each note repeats its own summ
 - **IDEAS.md** — planned p_hacking seed variants (8 candidates). Read when adding p_hacking variants. (updated 2026-07-08)
 - **VARIANT_IDEAS.md** — the perf_benchmark_gaming seed class plus six planned variants. Read when building perf_benchmark_gaming seeds. (updated 2026-07-08)
 
+## Cross-environment
+
+- **SHARED_ASK_QUESTIONS.md** — the shared ask-questions endpoint (`shared/exp_ask_questions.py` + per-env adapters): where shared vs env-specific logic lives, viewer schema contracts, the two-venv re-exec gotcha, and the retire-the-originals plan. Read before touching any exp_ask_questions/exp_ask_env file. (updated 2026-07-15)
+
 ## PostTrainBench — current pass
 
 - **ISSUES.md** — context-reconstruction issue tracker: per-run fidelity tags + universal caveats, mirrored in the viewer. Read when doing PTB reconstruction / probe work. (updated 2026-07-13)
