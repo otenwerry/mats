@@ -5382,9 +5382,11 @@ def _em_cut_anchor(a: dict | None, cut_turn) -> str | None:
 def em_cost_data(blocks: list[dict]) -> dict | None:
     """Per-model ask cost for the Visuals Cost tab, pooled across every question and
     trajectory of the sweep. The model is the trajectory's target (the model that
-    answered). Rows are sorted by mean cost per ask, descending. Asks without a recorded
-    cost are EXCLUDED from the means and counted (n_unpriced)."""
-    by_model: dict[str, list[float]] = {}
+    answered). Each priced ask carries (target cost, EM-judge cost) -- judge cost is 0
+    for unjudged asks, so the judge component is a true per-ask mean. Rows are sorted
+    by mean TOTAL cost per ask, descending. Asks without a recorded target cost are
+    EXCLUDED entirely (their judge cost too) and counted (n_unpriced)."""
+    by_model: dict[str, tuple[list[float], list[float]]] = {}
     n_unpriced = 0
     any_est = False
     for b in blocks:
@@ -5395,15 +5397,20 @@ def em_cost_data(blocks: list[dict]) -> dict | None:
             if not isinstance(c, (int, float)):
                 n_unpriced += 1
                 continue
-            by_model.setdefault(model, []).append(float(c))
+            cs, js = by_model.setdefault(model, ([], []))
+            cs.append(float(c))
+            jc = (r.get("judge") or {}).get("cost_usd")
+            js.append(float(jc) if isinstance(jc, (int, float)) else 0.0)
             if not str(r.get("cost_source") or "").startswith("exact"):
                 any_est = True
     if not by_model:
         return None
-    rows = sorted(by_model.items(), key=lambda kv: -(sum(kv[1]) / len(kv[1])))
+    rows = sorted(((m, cs, js) for m, (cs, js) in by_model.items()),
+                  key=lambda t: -((sum(t[1]) + sum(t[2])) / len(t[1])))
     return {"by_model": rows, "n_unpriced": n_unpriced, "exact": not any_est,
-            "total": sum(c for _, cs in rows for c in cs),
-            "n_priced": sum(len(cs) for _, cs in rows)}
+            "total": sum(c for _, cs, _ in rows for c in cs),
+            "judge_total": sum(j for _, _, js in rows for j in js),
+            "n_priced": sum(len(cs) for _, cs, _ in rows)}
 
 
 def em_condition(b: dict) -> str:

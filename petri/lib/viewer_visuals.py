@@ -1932,31 +1932,43 @@ def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str
 
 
 # EM question asks (exp_ask_questions.py) — mean ask cost per model, on the Cost tab.
-# One suite-blue bar per model; model identity is carried by the x-tick labels.
+# Stacked bar per model: suite blue = the target call, suite orange = the EM judge
+# (a validated colorblind-safe pair; identity is also carried by the legend, never
+# color alone). Model identity is carried by the x-tick labels.
 EM_ANSWERED_C = "#4C72B0"
+EM_JUDGE_C = "#DD8452"
 
 
 def fig_em_cost(em: dict) -> str:
-    """Mean cost of one ask per model, pooled over every question and trajectory with ask
-    data on this sweep. One bar per model; n = priced asks for that model."""
+    """Mean cost of one ask per model, split into the target call (blue, bottom) and
+    the EM judge (orange, top; counts 0 for unjudged asks), pooled over every question
+    and trajectory with ask data on this sweep. n = priced asks for that model; the
+    annotation is the mean TOTAL (target + judge)."""
     rows = em["by_model"]
     if not rows:
         return _empty_fig("no priced asks", (4.6, 4.0))
     tilde = "" if em["exact"] else "~"
-    labels = [m for m, _ in rows]
-    means = [float(np.mean(cs)) for _, cs in rows]
-    ns = [len(cs) for _, cs in rows]
+    labels = [m for m, _, _ in rows]
+    means = [float(np.mean(cs)) for _, cs, _ in rows]
+    jmeans = [float(np.mean(js)) for _, _, js in rows]
+    ns = [len(cs) for _, cs, _ in rows]
+    tops = [m + j for m, j in zip(means, jmeans)]
     fig, ax = plt.subplots(figsize=(max(4.8, 1.35 * len(rows) + 1.5), 4.2))
     xs = np.arange(len(rows))
-    ax.bar(xs, means, width=0.6, color=EM_ANSWERED_C, edgecolor="white", lw=0.4)
-    for x, m in zip(xs, means):
-        ax.annotate(f"{tilde}{_usd(m)}", (x, m), textcoords="offset points",
+    ax.bar(xs, means, width=0.6, color=EM_ANSWERED_C, edgecolor="white", lw=0.4,
+           label="target ask")
+    ax.bar(xs, jmeans, width=0.6, bottom=means, color=EM_JUDGE_C, edgecolor="white",
+           lw=0.4, label="EM judge")
+    for x, t in zip(xs, tops):
+        ax.annotate(f"{tilde}{_usd(t)}", (x, t), textcoords="offset points",
                     xytext=(0, 4), ha="center", fontsize=10, color="#333",
                     fontweight="bold")
     ax.set_xticks(xs, [f"{lbl}\n(n={n})" for lbl, n in zip(labels, ns)], fontsize=9)
     ax.set_ylabel("Mean cost per ask ($)")
-    ax.set_ylim(0, max(means) * 1.20)
+    ax.set_ylim(0, max(tops) * 1.20)
     ax.set_title("EM ask cost by model")
+    if any(j > 0 for j in jmeans):
+        ax.legend(fontsize=8.5, framealpha=0.9)
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
@@ -1974,9 +1986,14 @@ def _em_cost_section(em: dict | None) -> str:
     exact_note = ("" if em["exact"] else
                   " <b>~</b> marks a price&times;token estimate; asks bill exactly once "
                   "routed through OpenRouter.")
-    lead = (f'{tilde}<b>{_usd(total)}</b> across <b>{n}</b> priced asks over '
-            f'<b>{n_models}</b> model(s), pooled over every question and trajectory. '
-            f'Each bar is the mean cost of one ask for that model.{exact_note}{unpriced}')
+    jt = em.get("judge_total") or 0.0
+    judge_bit = (f' + ~<b>{_usd(jt)}</b> judge' if jt else "")
+    judge_note = (' The judge segment (orange) is always a price&times;token estimate; '
+                  'unjudged asks count 0 toward it.' if jt else "")
+    lead = (f'{tilde}<b>{_usd(total)}</b> target{judge_bit} across <b>{n}</b> priced '
+            f'asks over <b>{n_models}</b> model(s), pooled over every question and '
+            f'trajectory. Each bar is the mean cost of one ask for that '
+            f'model.{exact_note}{judge_note}{unpriced}')
     return ('<h2 style="margin-top:34px;">EM question asks</h2>'
             f'<p class="vsub">{lead}</p>'
             + _stack(fig_em_cost(em)))
