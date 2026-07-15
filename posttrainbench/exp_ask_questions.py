@@ -259,9 +259,10 @@ def main():
     ap.add_argument("--n", type=int, default=1,
                     help="samples per question (default 1); every sample is an "
                          "independent resume of the same context")
-    ap.add_argument("--turn", default="last",
-                    help="viewer event index, 'last' (default), 'end', or 'first_hack' "
-                         "— same semantics as exp_probe_context.py")
+    ap.add_argument("--turn", default="end",
+                    help="'end' (default: keep the whole trajectory; snaps loudly past "
+                         "a dangling-tool-call final message), a viewer event index, "
+                         "or 'first_hack' — same semantics as exp_probe_context.py")
     ap.add_argument("--only", default=None,
                     help="comma-separated question ids to ask (subset of the set); "
                          "useful for a cheap test run")
@@ -300,7 +301,8 @@ def main():
     print(f"[{traj.run_id}] cut at ev{plan.cut_event}"
           + (f" (snapped from {plan.turn})" if plan.snapped else ""))
     for fl in fidelity["flags"]:
-        print(f"  [{fl['severity']:5}] {fl['code']}")
+        print(f"  [{fl['severity']:5}] {fl['code']}"
+              + (f" — {fl['detail']}" if fl["severity"] == "warn" else ""))
 
     out_dir = runs.OUT_ROOT / campaign / f"{traj.run_id}__ev{plan.cut_event}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -431,7 +433,12 @@ def main():
           f"{n_no_answer} without an answer"
           + (f"; total ${sum(costs):.4f} ({len(costs)}/{n_asks} asks priced)"
              if costs else ""),
-          f'- every question was sent with the transition prefix: "{TRANSITION}"', ""]
+          f'- every question was sent with the transition prefix: "{TRANSITION}"']
+    if any(f["code"] == "end_snapped_dangling_tool_calls" for f in fidelity["flags"]):
+        md.append("- **END SNAPPED:** the trajectory's final assistant message had "
+                  "unanswered tool calls and was DROPPED; every ask here follows the "
+                  "last answered exchange, not the agent's true final message")
+    md.append("")
     for q in questions:
         md += [f"## {q['id']}", "", "> " + q["text"].replace("\n", "\n> "), ""]
         for r in records:

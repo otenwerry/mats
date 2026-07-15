@@ -37,7 +37,7 @@ uv run exp_rollback_pipeline.py
 uv run exp_ask_questions.py
 	--trajectory=<id,id or 'hacks'> --questions=em
 	[--n=1]
-	[--turn=last (or A-turn number, 'end', 'first_hack')]
+	[--turn=end (or A-turn number, 'first_hack')]
 	[--only=<qid,qid>]
 	[--concurrency=50]
 	[--timeout=600]
@@ -54,12 +54,12 @@ uv run viewer.py
 ## Reconstruct context (free)
 uv run reconstruct.py
     --trajectory=<run_id> 
-    [--turn=last (or event_id)]
+    [--turn=end (or event_id, 'first_hack')]
 
 ## Probe context (paid — resumes the agent and asks what it remembers)
 uv run exp_probe_context.py
     --trajectory=<run_id>
-    [--turn=last (or event_id)]
+    [--turn=end (or event_id, 'first_hack')]
     [--probe="..."]  # default asks task / progress / earliest-visible / last-action / files
 
 ## Ask propensity questions to resumed agents
@@ -67,7 +67,7 @@ uv run exp_ask_questions.py
     --trajectory=<run_id>
     --questions=em          
     [--n=1] 
-    [--turn=last (or event_id, 'end', 'first_hack')] 
+    [--turn=end (or event_id, 'first_hack')] 
     [--only=<qid,qid>]    
     [--concurrency=50]     
     [--timeout=600]           

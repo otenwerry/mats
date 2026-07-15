@@ -5,15 +5,20 @@ Free (no API calls). The paid probe lives in exp_probe_context.py.
 Usage:
   python reconstruct.py --list
   python reconstruct.py --report                 # parse+align+cut-check all 30
-  python reconstruct.py --trajectory <run_id> [--turn <viewer event idx|last|first_hack>]
+  python reconstruct.py --trajectory <run_id> [--turn <viewer event idx|first_hack>]
 
 --turn is a VIEWER EVENT INDEX (same numbering as the viewer and as
-first_hack_event/marked_turns in highlights), or one of two keywords: 'last'
-(the default — the latest cuttable point, i.e. the context going into the
-agent's final turn) and 'first_hack'. The cut goes immediately before the
-resolved event; invalid positions are refused with nearby valid alternatives,
-and mid-message positions snap down to their message boundary (recorded in
-fidelity.json).
+first_hack_event/marked_turns in highlights), or one of two keywords: 'end'
+(the DEFAULT — keep the entire trajectory, ending on the agent's closing
+message) and 'first_hack'. For a numeric turn the cut goes immediately before
+the resolved event; invalid positions are refused with nearby valid
+alternatives, and mid-message positions snap down to their message boundary
+(recorded in fidelity.json). When the trajectory ends on an assistant message
+with unanswered tool calls, no user turn may follow it, so 'end' SNAPS to just
+before that message (dropping it) — stated loudly on the console and stored as
+a warn flag (end_snapped_dangling_tool_calls) in fidelity.json, which every
+downstream probe/ask inherits. 'last' (cut before the agent's final turn) was
+REMOVED 2026-07-15 — pass that turn's event index instead.
 
 Output bundle: mats-local/posttrainbench_outputs/reconstructions/<run_id>__ev<N>/
   fidelity.json     flags + stats + provenance summary (ALWAYS read this)
@@ -63,10 +68,14 @@ def build_bundle(traj: runs.Trajectory, turn_arg: str):
             if traj.first_hack_event is None:
                 raise stream.CutError("no first_hack_event recorded for this trajectory")
             turn = traj.first_hack_event
-        elif turn_arg == "last":
-            turn = stream.last_valid_turn(traj, parsed, alignment, events)
         else:
-            turn = int(turn_arg)
+            try:
+                turn = int(turn_arg)
+            except ValueError:
+                raise stream.CutError(
+                    f"unknown --turn value {turn_arg!r} ('last' was removed; the "
+                    f"default 'end' keeps the whole trajectory, or pass a viewer "
+                    f"event index to cut earlier)")
         plan = stream.resolve_cut(traj, parsed, alignment, events, turn)
 
     if traj.scaffold in ("claude", "qwen3max"):
@@ -78,6 +87,19 @@ def build_bundle(traj: runs.Trajectory, turn_arg: str):
     else:
         bundle = recon_codex.build(traj, parsed, plan)
         flags, stats = bundle.flags, bundle.stats
+
+    if turn_arg == "end" and plan.snapped:
+        # keeping the entire trajectory was impossible: it ends on an assistant
+        # message with unanswered tool calls, which no user turn may follow.
+        # Stored as a warn flag so every downstream probe/ask output carries it
+        # (in addition to the cut_notes record from end_cut).
+        flags.append({
+            "code": "end_snapped_dangling_tool_calls", "severity": "warn",
+            "detail": "the trajectory ends on an assistant message with unanswered "
+                      "tool call(s), which no user turn may follow; that final "
+                      "message was DROPPED and the cut snapped to before it — the "
+                      "probe/question follows the last answered exchange, not the "
+                      "agent's true final message"})
 
     fidelity = {
         "run_id": traj.run_id, "scaffold": traj.scaffold,
@@ -186,8 +208,10 @@ def main():
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--trajectory")
-    ap.add_argument("--turn", default="last",
-                    help="viewer event index, 'last' (default), or 'first_hack'")
+    ap.add_argument("--turn", default="end",
+                    help="'end' (default: keep the whole trajectory; snaps loudly "
+                         "past a dangling-tool-call final message), a viewer event "
+                         "index, or 'first_hack'")
     args = ap.parse_args()
     if args.list:
         cmd_list(args)

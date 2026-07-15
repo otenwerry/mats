@@ -2,11 +2,14 @@
 
 PAID: launches the scaffold CLI (claude / opencode), which calls model APIs.
 
-  python exp_probe_context.py --trajectory <run_id> [--turn <idx|last|first_hack>]
+  python exp_probe_context.py --trajectory <run_id> [--turn <idx|first_hack>]
   python exp_probe_context.py --trajectory <run_id> --turn 311 --probe "..."
 
---turn defaults to 'last' (the latest cuttable point — the context going into
-the agent's final turn); pass a viewer event index or 'first_hack' instead.
+--turn defaults to 'end' (keep the whole trajectory — the probe follows the
+agent's closing message; when that message ends on unanswered tool calls the
+cut SNAPS loudly to before it, flagged end_snapped_dangling_tool_calls); pass
+a viewer event index or 'first_hack' to cut earlier. 'last' was removed
+2026-07-15 — pass the final turn's event index instead.
 --probe defaults to the task/progress/earliest-visible/last-action/files
 question below.
 
@@ -383,11 +386,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--trajectory", required=True)
-    ap.add_argument("--turn", default="last",
-                    help="viewer event index, 'last' (default: context going into "
-                         "the final turn), 'end' (full completed trajectory incl. "
-                         "the final assistant message — no resume bridging turns), "
-                         "or 'first_hack'")
+    ap.add_argument("--turn", default="end",
+                    help="'end' (default: keep the whole trajectory; snaps loudly "
+                         "past a dangling-tool-call final message), a viewer event "
+                         "index, or 'first_hack'")
     ap.add_argument("--probe", default=DEFAULT_PROBE)
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--user-config", action="store_true",
@@ -419,7 +421,8 @@ def main():
     print(f"[{traj.run_id}] cut at ev{plan.cut_event}"
           + (f" (snapped from {plan.turn})" if plan.snapped else ""))
     for fl in fidelity["flags"]:
-        print(f"  [{fl['severity']:5}] {fl['code']}")
+        print(f"  [{fl['severity']:5}] {fl['code']}"
+              + (f" — {fl['detail']}" if fl["severity"] == "warn" else ""))
 
     if traj.scaffold == "claude":
         sys.exit(probe_claude(traj, parsed, plan, bundle, fidelity,

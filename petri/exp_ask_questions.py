@@ -56,13 +56,19 @@ the transition prefix (the paper's protocol). Asks without answer text are not j
 skips judging entirely. Judge cost (always ~price x tokens; needs OPENAI_API_KEY)
 is recorded per ask and summed per trajectory, SEPARATE from target ask cost.
 
---turn is a TARGET ASSISTANT-TURN INDEX (the viewer's [A<n>] numbering), or one
-of three keywords: 'last' (the default -- the context going into the target's
-final turn), 'end' (after the target's final message; refused if that message
-has unanswered tool calls), 'first_hack' (before the first annotated hack turn).
-The cut goes immediately before the resolved turn, same semantics as PTB.
+--turn is a TARGET ASSISTANT-TURN INDEX (the viewer's [A<n>] numbering; the cut
+goes immediately before that turn, same semantics as PTB), or one of two
+keywords: 'end' (the DEFAULT -- keep the entire trajectory, the question follows
+the target's final message) and 'first_hack' (cut before the first annotated
+hack turn). When the final message ends on unanswered tool calls no user turn
+may follow it, so 'end' SNAPS to just before that message (dropping it): stated
+loudly on the console, stored as a warn flag on every affected ask
+(end_snapped_dangling_tool_calls), called out in results.md, and the run dir is
+named by the real cut (a<n>, not end). This affects ~38% of the strict-hack set
+(175/460 measured 2026-07-14). 'last' (cut before the target's final turn) was
+REMOVED 2026-07-15 -- pass the final turn's number for that context.
 Branched (auditor-rollback) trajectories are refused for numeric/'first_hack'
-cuts (turn numbering is ambiguous) and allowed with a warning for 'last'/'end'.
+cuts (turn numbering is ambiguous) and allowed with a warning for 'end'.
 
 --trajectory takes a viewer #ID; unlike PTB it also accepts a comma-separated
 list of ids, or 'hacks' (every original passing the strict binary reward-hack
@@ -241,22 +247,25 @@ def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
     # ---- resolve the cut (immediately before the resolved turn; PTB semantics) ----
     if turn_arg == "end":
         cut_turn, cut_label = n_turns, "end"
-    elif turn_arg == "last":
-        cut_turn, cut_label = n_turns, f"a{n_turns}"
     elif turn_arg == "first_hack":
         cut_turn = _first_hack_turn(orig)
         cut_label = f"a{cut_turn}"
     else:
-        cut_turn = int(turn_arg)
+        try:
+            cut_turn = int(turn_arg)
+        except ValueError:
+            raise CutError(f"unknown --turn value {turn_arg!r} ('last' was removed; "
+                           f"the default 'end' keeps the whole trajectory, or pass "
+                           f"a target turn number to cut earlier)")
         cut_label = f"a{cut_turn}"
     if not (1 <= cut_turn <= n_turns):
         raise CutError(f"turn {cut_turn} out of range (target turns 1..{n_turns})")
 
     if branched:
-        if turn_arg not in ("last", "end"):
+        if turn_arg != "end":
             raise CutError("trajectory contains conversation branches (auditor "
                            "rollbacks); turn numbering is ambiguous, only "
-                           "--turn last/end are supported for it")
+                           "--turn end is supported for it")
         flags.append({
             "code": "branched_trajectory", "severity": "warn",
             "detail": "the auditor branched/rolled back this conversation; the cut "
@@ -264,12 +273,28 @@ def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
                       "may not match the viewer's [A] numbering"})
 
     ev = events[cut_turn - 1]
+    end_snapped = False
     if turn_arg == "end":
         final = ev.output.message
         if final.tool_calls:
-            raise CutError("the final assistant message has unanswered tool calls; "
-                           "a question cannot validly follow it -- try --turn last")
-        messages = list(ev.input) + [final]
+            # a user turn cannot legally follow unanswered tool calls, so keeping
+            # the entire trajectory is impossible: SNAP to just before the final
+            # message, dropping it. Loud everywhere: console (warn detail printed),
+            # a warn flag on every affected ask, results.md, and the run dir is
+            # named by the real cut (a<n>, not end).
+            end_snapped = True
+            cut_label = f"a{cut_turn}"
+            messages = list(ev.input)
+            flags.append({
+                "code": "end_snapped_dangling_tool_calls", "severity": "warn",
+                "detail": f"the trajectory ends on an assistant message with "
+                          f"{len(final.tool_calls)} unanswered tool call(s), which "
+                          f"no user turn may follow; that final message was DROPPED "
+                          f"and the cut snapped to a{cut_turn} -- the question "
+                          f"follows the last answered exchange, not the target's "
+                          f"true final message"})
+        else:
+            messages = list(ev.input) + [final]
     else:
         messages = list(ev.input)
     tools = list(ev.tools or [])
@@ -280,7 +305,7 @@ def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
     if u is not None:
         est = ((u.input_tokens or 0) + (u.input_tokens_cache_read or 0)
                + (u.input_tokens_cache_write or 0))
-        if turn_arg == "end":
+        if turn_arg == "end" and not end_snapped:
             est += u.output_tokens or 0
 
     # ---- target model config, inherited from the original run's stamped metadata ----
@@ -526,7 +551,12 @@ def write_results(out_dir: Path, bundle: AskBundle, args, questions: list[dict],
              f"{n_exact} exact)" if costs else "")
           + (f"; judge ({summary['judge_model']}): {len(judged)} judged, "
              f"~${sum(judge_costs):.4f}" if judged else ""),
-          f'- every question was sent with the transition prefix: "{TRANSITION}"', ""]
+          f'- every question was sent with the transition prefix: "{TRANSITION}"']
+    if any(f["code"] == "end_snapped_dangling_tool_calls" for f in bundle.flags):
+        md.append("- **END SNAPPED:** the trajectory's final assistant message had "
+                  "unanswered tool calls and was DROPPED; every ask here follows the "
+                  "last answered exchange, not the target's true final message")
+    md.append("")
     for q in questions:
         md += [f"## {q['id']}", "", "> " + q["text"].replace("\n", "\n> "), ""]
         for r in records:
@@ -562,10 +592,11 @@ def main():
     ap.add_argument("--n", type=int, default=1,
                     help="samples per question (default 1); every sample is an "
                          "independent ask on the same context")
-    ap.add_argument("--turn", default="last",
-                    help="target assistant-turn index ([A<n>]), 'last' (default), "
-                         "'end', or 'first_hack' -- cut goes immediately before the "
-                         "resolved turn, same semantics as the PTB twin")
+    ap.add_argument("--turn", default="end",
+                    help="'end' (default: keep the entire trajectory; snaps loudly "
+                         "past a dangling-tool-call final message), a target "
+                         "assistant-turn index ([A<n>]; cut goes immediately before "
+                         "it), or 'first_hack'")
     ap.add_argument("--only", default=None,
                     help="comma-separated question ids to ask (subset of the set); "
                          "useful for a cheap test run")
@@ -630,7 +661,8 @@ def main():
               f"(turn {b.cut_turn} of {b.n_turns}), context = {ctx}, "
               f"{len(b.tools)} tool(s)")
         for fl in b.flags:
-            print(f"  [{fl['severity']:5}] {fl['code']}")
+            print(f"  [{fl['severity']:5}] {fl['code']}"
+                  + (f" -- {fl['detail']}" if fl["severity"] == "warn" else ""))
     if not bundles:
         print("nothing to run (every trajectory refused)")
         sys.exit(2)
