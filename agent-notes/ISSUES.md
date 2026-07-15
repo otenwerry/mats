@@ -286,6 +286,15 @@ later Opus-1M runs used CLI 2.1.76 and did pass `--effort high`.
   because the initial implementation incorrectly passed the unsupported
   `--effort high` flag to 2.1.34. The campaign runner now treats a fidelity file
   without a model answer as incomplete, so the same command retries those two.
+- **ACTUALLY FIXED (2026-07-15, commit c583f98):** the 2026-07-13 era-matching
+  never keyed on the CLI version — it still passed `--effort high` to every
+  `claude_non_api` run, which is what killed the two Sonnet probes again in the
+  2026-07-15 batch. `exp_ask_questions.py` (where the pipeline now lives) asks
+  the RESOLVED CLI's `--help`: flag known → `--effort high` + the
+  `effort_replicated` flag; flag absent → default effort + a new
+  `effort_flag_predates_cli` info flag (the faithful choice — those originals
+  cannot have used the flag). The viewer's "effort not replicated" tag now
+  clears on EITHER flag (it previously misfired on the new one).
 - The other Opus-1M run is individually deferred for its permanently missing
   helper-agent report; its old probe remains in **early tests**.
 

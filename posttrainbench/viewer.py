@@ -3122,10 +3122,13 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
                       "reasoning items lived in the rollout file, which was destroyed "
                       "with the run's temp dir")})
     if t.agent.startswith("claude_non_api"):
-        # the ask pipeline replicates the original effort setting and stamps an
-        # effort_replicated flag; only pre-fix probes keep this tag.
+        # the ask pipeline replicates the original effort setting and stamps
+        # effort_replicated (flag passed) OR effort_flag_predates_cli (run-era
+        # CLI has no --effort, so default effort IS the faithful replication);
+        # only probes predating both keep this tag.
         if (probe is not None and probe.get("completed")
-                and "effort_replicated" not in probe_flags):
+                and "effort_replicated" not in probe_flags
+                and "effort_flag_predates_cli" not in probe_flags):
             issues.append({
                 "tag": "effort not replicated", "cls": "fixed",
                 "title": ("this run's completed probe predates the fix that "
