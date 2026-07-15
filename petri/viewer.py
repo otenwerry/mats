@@ -186,7 +186,10 @@ def is_flagged(dim: str, v) -> bool:
 
 CSS = """
 body { font-family: -apple-system, Segoe UI, sans-serif; margin: 0; background: #f6f7f9; color: #1a1a2e; }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+/* Left-anchored, never centered: centering would put the nav at an x-position that
+   depends on each page's content width (pages differ: 1200px cap, fit-content tables,
+   1100px visuals), making the header jump when switching pages. */
+.wrap { max-width: 1200px; margin: 0; padding: 24px; }
 .wrap.fit { max-width: none; width: fit-content; }
 h1 { font-size: 22px; } h2 { font-size: 17px; margin-top: 28px; }
 h3 { font-size: 14px; color: #3a3a52; }
@@ -1703,6 +1706,17 @@ def page_head(title_html: str, *buttons: str) -> str:
     return f'<div class="pagehead"><h1>{title_html}</h1>{"".join(buttons)}</div>'
 
 
+def html_page(title_html: str, body: str, *, fit: bool = False, tail: str = "") -> str:
+    """The one page shell. Every page written by this file goes through here so the
+    chrome above the content (nav rows, heading) sits at the same position everywhere.
+    `fit` lifts the 1200px content cap for wide-table pages; `tail` is the page's
+    trailing fixed chrome (sort JS, jump buttons, back-to-top)."""
+    cls = "wrap fit" if fit else "wrap"
+    return (f"<!doctype html><html><head><meta charset='utf-8'><title>{title_html}</title>"
+            f"<style>{CSS}</style></head><body><div class='{cls}'>{body}</div>"
+            f"{tail}</body></html>")
+
+
 # Re-judged scores (exp_rejudge_rh.py / exp_rejudge_rollbacks.py) live here, keyed by
 # traj_key. When present for an audit, they REPLACE that audit's eval-log scores +
 # summary/justification/highlights (the "all 5 fresh" re-judge), so every consumer -- the
@@ -2178,9 +2192,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
   }};
 }})();
 </script>"""
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(doc_title)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>"
-            f"{nav}{cut_btn}{TOTOP_HTML}</body></html>")
+    page = html_page(esc(doc_title), body, tail=f"{nav}{cut_btn}{TOTOP_HTML}")
     (OUT / "pages" / name).write_text(page)
     return unmatched
 
@@ -3359,9 +3371,8 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
 {skipped_run_banner()}{dead_run_banner(audits)}
 {tables}
 """
-        page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-                f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
-                f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
+        page = html_page(esc(heading), body, fit=True,
+                         tail=f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}")
         (OUT / out_file).write_text(page)
         return
 
@@ -3437,9 +3448,8 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
 {skipped_run_banner()}{dead_run_banner(audits)}
 {tables}
 """
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
-            f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
+    page = html_page(esc(heading), body, fit=True,
+                     tail=f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}")
     (OUT / out_file).write_text(page)
 
 
@@ -4800,9 +4810,7 @@ def write_continuations_page(key: str, merged: list[tuple], originals_by_id: dic
              f"task from this sweep)</span>")
     head = page_head(title)
     body = f"{topnav(key)}\n{subnav('continuations', key)}\n{head}\n{''.join(sections)}"
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>"
-            f"{SORT_JS}{TOTOP_HTML}</body></html>")
+    page = html_page(esc(heading), body, tail=f"{SORT_JS}{TOTOP_HTML}")
     out_file = sweep_continuations_file(key)
     (OUT / out_file).write_text(page)
     return out_file
@@ -5339,11 +5347,9 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     # baseline dirs are already named baseline__<model>; trajectory dirs id<N>__<cut>
     stem = b["dir"].name if s.get("baseline") else f'id{b["tid"]}__{s.get("cut")}'
     name = f'em__{b["campaign"]}__{stem}__{r["dir"]}.html'
-    page = (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>{'baseline' if s.get('baseline') else '#' + str(b['tid'])} "
-            f"ask {esc(str(r.get('question_id') or ''))} "
-            f"s{r.get('sample_index')}</title><style>{CSS}</style></head>"
-            f"<body><div class='wrap'>{body}</div>{toq}{TOTOP_HTML}</body></html>")
+    doc_title = (f"{'baseline' if s.get('baseline') else '#' + str(b['tid'])} "
+                 f"ask {esc(str(r.get('question_id') or ''))} s{r.get('sample_index')}")
+    page = html_page(doc_title, body, tail=f"{toq}{TOTOP_HTML}")
     (OUT / "pages" / name).write_text(page)
     return name
 
@@ -5613,9 +5619,8 @@ async def write_em_page(key: str, blocks: list[dict],
 {judge_lead}
 {''.join(parts)}
 """
-    page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
-            f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
+    page = html_page(esc(heading), body, fit=True,
+                     tail=f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}")
     out_file = sweep_em_file(key)
     (OUT / out_file).write_text(page)
     return out_file, ask_pages
@@ -5654,7 +5659,7 @@ def subnav(active: str, key: str) -> str:
     return f'<div class="subnav">{links}</div>'
 
 
-def visuals_fallback_page(propensity_html: str, css: str, topnav_html: str, *,
+def visuals_fallback_page(propensity_html: str, topnav_html: str, *,
                           heading: str = "Petri reward-hacking visuals",
                           subnav_html: str = "") -> str:
     """Propensity-only visuals page, used when the matplotlib figures can't be built
@@ -5663,8 +5668,7 @@ def visuals_fallback_page(propensity_html: str, css: str, topnav_html: str, *,
     propensity view is always available, which it had back when it lived on the index.
     `subnav_html` is the shared subpage nav row (trajectories / continuations / visuals)."""
     body = f'{topnav_html}{subnav_html}{page_head(esc(heading))}{propensity_html}'
-    return (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{css}</style></head><body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
+    return html_page(esc(heading), body, tail=TOTOP_HTML)
 
 
 def collect_rehack_analysis(all_merged: list[tuple], originals_by_id: dict,
@@ -5930,7 +5934,7 @@ async def main() -> None:
         except Exception as e:
             print(f"  WARNING: viewer_visuals failed; wrote propensity-only {vis_file} "
                   f"({type(e).__name__}: {e})")
-            page = visuals_fallback_page(prop_html, CSS, topnav(key),
+            page = visuals_fallback_page(prop_html, topnav(key),
                                          heading=f"Visuals — {set_label}", subnav_html=sub_html)
         (OUT / vis_file).write_text(page)
     # files from the pre-sweeps layouts; delete so no stale copies linger

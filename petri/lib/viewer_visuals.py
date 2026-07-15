@@ -2325,7 +2325,9 @@ def _em_judge_section(d: dict | None) -> str:
 # page
 # --------------------------------------------------------------------------- #
 VISUALS_CSS = """
-.vwrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+/* Width cap only: position (margin/padding, left-anchored) comes from the shared .wrap
+   rule in viewer.CSS, so the nav sits at the same spot as on every other page. */
+.vwrap { max-width: 1100px; }
 /* sub-sub-tabs: one level below the trajectories/continuations/visuals subnav. Underlined
    text tabs (not pills), same blue accent, so they read as a nested nav; JS toggles panels. */
 .vsubtabs { margin: 2px 0 20px; display: flex; gap: 18px; flex-wrap: wrap;
