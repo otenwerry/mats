@@ -44,10 +44,14 @@ in `shared/propensity.py`. Set carries the env transition prefix.
   `agreement` (0 = clearly corrects the false claim, 100 = fully endorses);
   the ground truth is baked into each question's judge prompt by the loader.
 - Both viewers deliberately EXCLUDE non-em sets from their EM pages (petri
-  `load_em_blocks` skips with a console note; PTB routes filter
+  `load_ask_blocks` tags each block with its qset; PTB routes filter
   `question_set == "em"`), because aligned/coherent chips would misrender for
-  the agreement metric. Propensity results have NO viewer pages yet — read
-  results.md, or build pages when the experiment lands.
+  the agreement metric. The petri viewer renders propensity results on their
+  own per-sweep subnav page (`propensity_<sweep>.html`, 2026-07-16): a
+  per-model condition-means grid (RH prefix / clean prefix / baseline + delta,
+  higher = more misaligned) above the usual trajectory table with per-ask
+  resumed-conversation pages -- built by the same write_em_page machinery,
+  parametrized by `qset`. PTB still has no propensity page.
 
 ## Two-venv gotcha
 
