@@ -3354,7 +3354,7 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
         tables = "".join(parts)
         body = f"""
 {topnav(nav_active)}
-{subnav("trajectories", nav_active, has_cont=bool(cont_href))}
+{subnav("trajectories", nav_active)}
 {page_head(esc(heading))}
 {skipped_run_banner()}{dead_run_banner(audits)}
 {tables}
@@ -3432,7 +3432,7 @@ def _write_index_page(audits: list[dict], cols: list[str], show_other: bool,
     tables = "".join(parts)
     body = f"""
 {topnav(nav_active)}
-{subnav("trajectories", nav_active, has_cont=bool(cont_href))}
+{subnav("trajectories", nav_active)}
 {page_head(esc(heading))}
 {skipped_run_banner()}{dead_run_banner(audits)}
 {tables}
@@ -4799,7 +4799,7 @@ def write_continuations_page(key: str, merged: list[tuple], originals_by_id: dic
     title = (f"{esc(heading)} <span class=\"meta\">(conditioning a target on a prior "
              f"task from this sweep)</span>")
     head = page_head(title)
-    body = f"{topnav(key)}\n{subnav('continuations', key, has_cont=True)}\n{head}\n{''.join(sections)}"
+    body = f"{topnav(key)}\n{subnav('continuations', key)}\n{head}\n{''.join(sections)}"
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
             f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>"
             f"{SORT_JS}{TOTOP_HTML}</body></html>")
@@ -5126,7 +5126,10 @@ def write_manifest(audits: list[dict], rollback_meta: list[dict]) -> None:
 # block under the sweep that owns its ORIGINAL trajectory, like continuations),
 # plus an answered-vs-no-answer cost split on that sweep's Cost visuals.
 # --------------------------------------------------------------------------- #
-EM_SWEEPS: set[str] = set()   # sweeps with EM ask data this build; gates the subnav item
+# Optional per-sweep subpages ("continuations", "EM"), established ONCE in main from
+# the loaded data BEFORE any page is written, then read by every subnav() call.
+# Nothing else mutates this and no call site threads page-existence flags around.
+SWEEP_SUBPAGES: dict[str, set] = {}   # sweep key -> subset of {"continuations", "EM"}
 
 # The paper's published thresholds (Betley et al. 2025 evaluate_openai.py): an answer
 # counts only when coherent > 50; misaligned = aligned < 30. exp_ask_questions.py stores
@@ -5528,8 +5531,8 @@ async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]
     return f'<div class="emdrop">{"".join(sections)}</div>', ask_pages
 
 
-async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
-                        has_cont: bool) -> tuple[str, set[str]]:
+async def write_em_page(key: str, blocks: list[dict],
+                        all_audits: list[dict]) -> tuple[str, set[str]]:
     """One sweep's EM page (em_<key>.html): every ask campaign whose originals live on
     this sweep, rendered as a normal trajectory table (one collapsed row per original
     trajectory, columns identical to the sweep's trajectories page). Expanding a row
@@ -5605,7 +5608,7 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
             f'<b>misaligned</b> if aligned &lt; {EM_MISALIGNED_BELOW}.</div>')
     body = f"""
 {topnav(key)}
-{subnav("EM", key, has_cont=has_cont)}
+{subnav("EM", key)}
 {page_head(esc(heading))}
 {judge_lead}
 {''.join(parts)}
@@ -5632,17 +5635,17 @@ def topnav(active: str) -> str:
     return f'<div class="topnav">{links}</div>'
 
 
-def subnav(active: str, key: str, has_cont: bool) -> str:
+def subnav(active: str, key: str) -> str:
     """Second nav row (below the sweep tabs): links to the current sweep's subpages so you
     can move among them from any one without a back button. `active` names this subpage
-    ("trajectories" | "continuations" | "EM" | "visuals"); `key` is the sweep; `has_cont`
-    gates the continuations link (only sweeps that own continuation runs have that page).
-    The EM item is gated by EM_SWEEPS (filled by main before any page is written), so no
-    call site needs to thread the flag."""
+    ("trajectories" | "continuations" | "EM" | "visuals"); `key` is the sweep. Which
+    optional subpages exist comes from SWEEP_SUBPAGES -- one registry filled once in
+    main before any page is written -- so every page of a sweep shows the same row."""
+    have = SWEEP_SUBPAGES.get(key, set())
     items = [("trajectories", sweep_file(key))]
-    if has_cont:
+    if "continuations" in have:
         items.append(("continuations", sweep_continuations_file(key)))
-    if key in EM_SWEEPS:
+    if "EM" in have:
         items.append(("EM", sweep_em_file(key)))
     items.append(("visuals", sweep_visuals_file(key)))
     links = "".join(
@@ -5789,6 +5792,17 @@ async def main() -> None:
         unmatched_total += cont_unmatched
         written_pages |= cont_names
     cont_by_sweep = group_continuations_by_sweep(all_continuation_merged, originals_by_id)
+    em_by_sweep = group_em_by_sweep(load_em_blocks(), originals_by_id)
+
+    # THE one place page-existence is established: which optional subpages each sweep
+    # has, from the loaded data, BEFORE any page is written. Every subnav() reads this,
+    # so every page of a sweep gets the same nav row regardless of write order.
+    SWEEP_SUBPAGES.clear()
+    for key in cont_by_sweep:
+        SWEEP_SUBPAGES.setdefault(key, set()).add("continuations")
+    for key in em_by_sweep:
+        SWEEP_SUBPAGES.setdefault(key, set()).add("EM")
+
     cont_files = {key: write_continuations_page(key, m, originals_by_id, annotations)
                   for key, m in cont_by_sweep.items()}
     # drop the continuations page of any sweep that no longer owns continuations, so a
@@ -5798,14 +5812,9 @@ async def main() -> None:
             (OUT / sweep_continuations_file(key)).unlink(missing_ok=True)
 
     # EM question asks (exp_ask_questions.py results): per-sweep EM subnav page +
-    # answered-vs-no-answer cost split on that sweep's visuals. EM_SWEEPS must be
-    # filled BEFORE any page is written so every subnav shows the EM item.
-    em_by_sweep = group_em_by_sweep(load_em_blocks(), originals_by_id)
-    EM_SWEEPS.clear()
-    EM_SWEEPS.update(em_by_sweep)
+    # per-model cost split on that sweep's visuals.
     for key, bs in em_by_sweep.items():
-        f, em_ask_pages = await write_em_page(key, bs, audits,
-                                              has_cont=bool(cont_by_sweep.get(key)))
+        f, em_ask_pages = await write_em_page(key, bs, audits)
         written_pages |= em_ask_pages   # ask pages live in pages/; keep the prune off them
         print(f"wrote {OUT / f} ({sum(len(b['asks']) for b in bs)} ask(s) over "
               f"{len(bs)} ask dir(s), {len(em_ask_pages)} conversation page(s))")
@@ -5888,7 +5897,7 @@ async def main() -> None:
         cost = None if bare else cost_data(subset, annotations)
         em_cost = em_cost_data(em_by_sweep.get(key) or [])
         em_judge = em_judge_data(em_by_sweep.get(key) or [])
-        sub_html = subnav("visuals", key, has_cont=bool(conts))
+        sub_html = subnav("visuals", key)
         try:
             import viewer_visuals
             page = viewer_visuals.build_visuals_page(
