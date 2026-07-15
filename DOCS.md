@@ -39,6 +39,7 @@ uv run exp_ask_questions.py
 	[--n=1]
 	[--turn=end (or A-turn number, 'first_hack')]
 	[--only=<qid,qid>]
+	[--baseline=no]   # yes = also ask each question bare (no context), per target model
 	[--concurrency=50]
 	[--timeout=600]
 	[--campaign=questions_<set>]   # output subdirectory

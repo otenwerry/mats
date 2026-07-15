@@ -44,6 +44,15 @@ in the ask's "question" field, and the judge scores the BARE question only.
 Asks recorded before 2026-07-14 predate the transition (no question_sent key;
 they sent the bare question).
 
+--baseline=yes ADDITIONALLY asks every question BARE, with no context at all --
+no trajectory, no system prompt, no tools, and no transition prefix (the EM
+paper's own protocol) -- once per distinct target-model config among the
+selected trajectories (reasoning settings matched), n samples per question,
+judged like any other ask. One extra output dir per model
+(baseline__<model>), same results layout, summary flagged "baseline": true.
+Default no. The baseline anchors each model's no-context answer distribution
+next to its with-trajectory asks.
+
 Judging: every answered ask is scored AUTOMATICALLY by the paper's own judge
 (lib/exp_em_judge.py): the question YAML's judge model (gpt-4o-2024-08-06) rates
 the (question, answer) pair 0-100 per metric (aligned, coherent) via the paper's
@@ -176,7 +185,7 @@ TRANSITION = ("Thanks. Now we’re done with this task and I just want to ask yo
 
 @dataclass
 class AskBundle:
-    tid: int
+    tid: int | None           # viewer trajectory id; None for baseline bundles
     page: str                 # viewer page key (mode__task__seed__eN.html)
     target_slug: str          # routed target model slug
     reasoning_on: bool
@@ -188,6 +197,21 @@ class AskBundle:
     n_turns: int              # total target turns in the original
     est_context_tokens: int | None   # original billed input size at the cut turn
     flags: list = field(default_factory=list)
+    is_baseline: bool = False        # bare no-context asks (--baseline=yes)
+
+
+def bundle_dirname(b: AskBundle) -> str:
+    """Output dir name for one bundle's asks (uniqued against collisions in main)."""
+    if b.is_baseline:
+        return "baseline__" + re.sub(r"[^A-Za-z0-9._-]", "-",
+                                     b.target_slug.split("/")[-1])
+    return f"id{b.tid}__{b.cut_label}"
+
+
+def bundle_label(b: AskBundle) -> str:
+    """Console label: 'id 1561' or 'baseline <model>'."""
+    return (f"baseline {b.target_slug.split('/')[-1]}" if b.is_baseline
+            else f"id {b.tid}")
 
 
 def _find_sample(mode: str, task: str, seed: str, epoch: int):
@@ -407,7 +431,10 @@ async def one_ask(model, bundle: AskBundle, fidelity: dict, q: dict, i: int,
     (when the response had text and the set carries judge prompts) score it with
     the EM judge. Returns the ask record for results.json; writes the per-ask dir."""
     ask_dir.mkdir(parents=True, exist_ok=True)
-    sent = TRANSITION + q["text"]
+    # baseline asks send the BARE question: with no task in context, the
+    # "we're done with this task" transition would be nonsense (and the paper's
+    # protocol is the bare question anyway)
+    sent = q["text"] if bundle.is_baseline else TRANSITION + q["text"]
     messages, folded = with_question(bundle.messages, sent)
     if folded:
         fidelity["flags"].append({
@@ -489,7 +516,7 @@ async def one_ask(model, bundle: AskBundle, fidelity: dict, q: dict, i: int,
         judge_md = f"- judge ({judge_compact['model']}): {jbits}"
     else:
         judge_md = "- judge: not run" + ("" if judge_on else " (--no-judge)")
-    md = [f"# Question ask: id{bundle.tid} @ {bundle.cut_label} -- {ask_dir.name}",
+    md = [f"# Question ask: {bundle_label(bundle)} @ {bundle.cut_label} -- {ask_dir.name}",
           f"- target: {bundle.target_slug}   original: {bundle.page}",
           f"- flags: " + ", ".join(f["code"] for f in fidelity["flags"]),
           judge_md,
@@ -523,11 +550,12 @@ def write_results(out_dir: Path, bundle: AskBundle, args, questions: list[dict],
                    if isinstance(j.get("cost_usd"), (int, float))]
     summary = {
         "trajectory_id": bundle.tid, "page": bundle.page,
+        "baseline": bundle.is_baseline,
         "target_model": bundle.target_slug,
         "cut": bundle.cut_label, "cut_turn": bundle.cut_turn,
         "n_target_turns": bundle.n_turns, "requested_turn": args.turn,
         "question_set": args.questions, "n_per_question": args.n,
-        "transition": TRANSITION,
+        "transition": None if bundle.is_baseline else TRANSITION,
         "n_asks": n_asks, "n_no_answer": n_no_answer, "n_errored": n_failed,
         "total_cost_usd": round(sum(costs), 4) if costs else None,
         "cost_known_for": len(costs), "cost_exact_for": n_exact,
@@ -544,14 +572,18 @@ def write_results(out_dir: Path, bundle: AskBundle, args, questions: list[dict],
     (out_dir / "results.json").write_text(json.dumps(
         {"summary": summary, "asks": records}, indent=2))
 
-    md = [f"# {args.questions} questions on id{bundle.tid} ({bundle.page}) @ {bundle.cut_label}",
+    who = (f"BASELINE (no context) -- {bundle.target_slug}" if bundle.is_baseline
+           else f"id{bundle.tid} ({bundle.page}) @ {bundle.cut_label}")
+    md = [f"# {args.questions} questions on {who}",
           f"- {len(questions)} question(s) x {args.n} sample(s); "
           f"{n_no_answer} without an answer"
           + (f"; total ${sum(costs):.4f} ({len(costs)}/{n_asks} asks priced, "
              f"{n_exact} exact)" if costs else "")
           + (f"; judge ({summary['judge_model']}): {len(judged)} judged, "
              f"~${sum(judge_costs):.4f}" if judged else ""),
-          f'- every question was sent with the transition prefix: "{TRANSITION}"']
+          ("- BASELINE: bare questions -- no trajectory context, no system prompt, "
+           "no tools, no transition prefix" if bundle.is_baseline else
+           f'- every question was sent with the transition prefix: "{TRANSITION}"')]
     if any(f["code"] == "end_snapped_dangling_tool_calls" for f in bundle.flags):
         md.append("- **END SNAPPED:** the trajectory's final assistant message had "
                   "unanswered tool calls and was DROPPED; every ask here follows the "
@@ -605,6 +637,11 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="seconds per ask")
     ap.add_argument("--campaign", default=None,
                     help="output subdir under mats-local/petri (default questions_<set>)")
+    ap.add_argument("--baseline", default="no", choices=("yes", "no"),
+                    help="yes = ADDITIONALLY ask every question bare (no context, no "
+                         "system prompt, no tools, no transition prefix) once per "
+                         "distinct target-model config among the selected "
+                         "trajectories, n samples per question, judged normally")
     ap.add_argument("--no-judge", action="store_true",
                     help="skip the automatic EM judge (answers are judged by default "
                          "whenever the question set carries judge prompts)")
@@ -667,23 +704,49 @@ def main():
         print("nothing to run (every trajectory refused)")
         sys.exit(2)
 
+    if args.baseline == "yes":
+        # one bare-question baseline per distinct target-model config among the
+        # selected trajectories: no context, no system prompt, no tools, and no
+        # transition prefix (the paper's own protocol). Judged like any other ask.
+        seen: dict[tuple, AskBundle] = {}
+        for b in bundles:
+            seen.setdefault((b.target_slug, b.reasoning_on, b.reasoning_effort), b)
+        for (slug, r_on, r_eff) in seen:
+            bundles.append(AskBundle(
+                tid=None, page="(baseline -- no context)", target_slug=slug,
+                reasoning_on=r_on, reasoning_effort=r_eff, messages=[], tools=[],
+                cut_label="baseline", cut_turn=0, n_turns=0, est_context_tokens=0,
+                flags=[{
+                    "code": "baseline_no_context", "severity": "info",
+                    "detail": "baseline ask: the bare question only -- no trajectory "
+                              "context, no system prompt, no tools, and NO transition "
+                              "prefix (the EM paper's protocol); the target is rebuilt "
+                              "with the same reasoning settings as the trajectory asks "
+                              "it anchors"}],
+                is_baseline=True))
+            print(f"[baseline] {slug}  bare questions, no context")
+
     n_per_traj = len(questions) * args.n
     n_total = n_per_traj * len(bundles)
+    n_base = sum(1 for b in bundles if b.is_baseline)
     print(f"\nquestion set '{args.questions}': {len(questions)} question(s) x "
-          f"{args.n} sample(s) x {len(bundles)} trajectory(ies) = {n_total} asks")
+          f"{args.n} sample(s) x {len(bundles)} context(s)"
+          + (f" ({n_base} baseline)" if n_base else "")
+          + f" = {n_total} asks")
 
     if args.dry_run:
         print("\n[dry-run] estimated INPUT cost per ask (output tokens not included):")
         grand = 0.0
         unpriced = 0
         for b in bundles:
+            tag = "baseline" if b.is_baseline else f"id{b.tid}"
             est = _est_input_cost(b)
             if est is None:
                 unpriced += 1
-                print(f"  id{b.tid:>4} {b.target_slug:<40} context ? -> no price entry")
+                print(f"  {tag:>8} {b.target_slug:<40} context ? -> no price entry")
                 continue
             grand += est * n_per_traj
-            print(f"  id{b.tid:>4} {b.target_slug:<40} "
+            print(f"  {tag:>8} {b.target_slug:<40} "
                   f"{b.est_context_tokens or 0:>9,} tok -> ~${est:.4f}/ask, "
                   f"~${est * n_per_traj:.2f} for {n_per_traj} asks")
         print(f"\n[dry-run] total estimated input cost: ~${grand:.2f} for {n_total} asks"
@@ -710,28 +773,35 @@ def main():
                                          effort=b.reasoning_effort)
             models[key] = get_model(m) if isinstance(m, str) else m
 
-    # write the shared context bundle once per trajectory
+    # write the shared context bundle once per bundle (trajectory or baseline);
+    # out_dirs is keyed by id(bundle) since baseline bundles all have tid=None
     out_dirs: dict[int, Path] = {}
+    used_names: set[str] = set()
     for b in bundles:
-        out_dir = out_root / f"id{b.tid}__{b.cut_label}"
+        name = bundle_dirname(b)
+        while name in used_names:  # two baseline models sharing a short name
+            name += "-2"
+        used_names.add(name)
+        out_dir = out_root / name
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_dirs[b.tid] = out_dir
+        out_dirs[id(b)] = out_dir
         with open(out_dir / "context.jsonl", "w") as f:
             for m in b.messages:
                 f.write(json.dumps({"role": m.role,
                                     "message": m.model_dump(exclude_none=True)}) + "\n")
         (out_dir / "tools.json").write_text(json.dumps(
             [t.model_dump(exclude_none=True) for t in b.tools], indent=2))
-        print(f"[id {b.tid}] -> {out_dir}")
+        print(f"[{bundle_label(b)}] -> {out_dir}")
 
     # ---- fan out: every (trajectory, question, sample) is one independent ask ----
     sem = asyncio.Semaphore(args.concurrency)
     done = {"n": 0}
 
     async def run_one(b: AskBundle, q: dict, i: int) -> tuple[int, dict]:
-        ask_dir = out_dirs[b.tid] / f"{q['id']}__s{i}"
+        ask_dir = out_dirs[id(b)] / f"{q['id']}__s{i}"
         fid = {"trajectory_id": b.tid, "page": b.page, "cut": b.cut_label,
-               "cut_turn": b.cut_turn, "question_set": args.questions,
+               "cut_turn": b.cut_turn, "baseline": b.is_baseline,
+               "question_set": args.questions,
                "question_id": q["id"], "sample_index": i,
                "flags": copy.deepcopy(b.flags)}
         model = models[(b.target_slug, b.reasoning_on, b.reasoning_effort)]
@@ -745,7 +815,8 @@ def main():
                        "stop_reason": None, "judge": None,
                        "error": f"{type(e).__name__}: {e}"}
         rec = {"question_id": q["id"], "sample_index": i, "question": q["text"],
-               "question_sent": TRANSITION + q["text"], **rec}
+               "question_sent": (q["text"] if b.is_baseline
+                                 else TRANSITION + q["text"]), **rec}
         done["n"] += 1
         cost = rec.get("cost_usd")
         j = rec.get("judge")
@@ -754,7 +825,7 @@ def main():
             jnote = ", " + "/".join(
                 f"{m} " + (f"{sc:.0f}" if isinstance(sc, (int, float)) else "null")
                 for m, sc in j["scores"].items())
-        print(f"[{done['n']}/{n_total}] id{b.tid} {q['id']} s{i}: "
+        print(f"[{done['n']}/{n_total}] {bundle_label(b)} {q['id']} s{i}: "
               + ("ERROR " + rec["error"] if rec.get("error") else
                  ("no answer" if rec["answer"] is None else "ok"))
               + (f", {rec['n_tool_uses']} tool call(s)" if rec.get("n_tool_uses") else "")
@@ -762,7 +833,7 @@ def main():
               + jnote
               + (f", {rec['duration_s']:.0f}s" if rec.get("duration_s") else ""),
               flush=True)
-        return b.tid, rec
+        return id(b), rec
 
     async def run_all():
         jobs = [(b, q, i) for b in bundles for q in questions for i in range(args.n)]
@@ -770,15 +841,15 @@ def main():
 
     results = asyncio.run(run_all())
 
-    # ---- aggregate per trajectory + grand total ----
-    by_tid: dict[int, list[dict]] = {b.tid: [] for b in bundles}
-    for tid, rec in results:
-        by_tid[tid].append(rec)
+    # ---- aggregate per bundle (trajectory or baseline) + grand total ----
+    by_key: dict[int, list[dict]] = {id(b): [] for b in bundles}
+    for k, rec in results:
+        by_key[k].append(rec)
 
     grand_cost, grand_priced, grand_no_answer = 0.0, 0, 0
     grand_judge_cost, grand_judged = 0.0, 0
     for b in bundles:
-        summary = write_results(out_dirs[b.tid], b, args, questions, by_tid[b.tid])
+        summary = write_results(out_dirs[id(b)], b, args, questions, by_key[id(b)])
         grand_no_answer += summary["n_no_answer"]
         if summary["total_cost_usd"] is not None:
             grand_cost += summary["total_cost_usd"]
@@ -786,7 +857,7 @@ def main():
         grand_judged += summary["n_judged"]
         if summary["judge_cost_usd"] is not None:
             grand_judge_cost += summary["judge_cost_usd"]
-        print(f"[id {b.tid}] {summary['n_asks'] - summary['n_no_answer']}"
+        print(f"[{bundle_label(b)}] {summary['n_asks'] - summary['n_no_answer']}"
               f"/{summary['n_asks']} answered"
               + (f", ${summary['total_cost_usd']:.4f}"
                  f" ({summary['cost_exact_for']}/{summary['cost_known_for']} exact)"
@@ -795,7 +866,7 @@ def main():
                  + (f" (~${summary['judge_cost_usd']:.4f} judge)"
                     if summary["judge_cost_usd"] is not None else "")
                  if judge_on else "")
-              + f" -> {out_dirs[b.tid] / 'results.md'}")
+              + f" -> {out_dirs[id(b)] / 'results.md'}")
 
     print(f"\ndone: {n_total - grand_no_answer}/{n_total} asks answered, "
           f"target total ${grand_cost:.4f} ({grand_priced}/{n_total} asks priced)"
