@@ -5198,8 +5198,12 @@ def load_em_blocks() -> list[dict]:
     """One block per ask-run dir: <campaign>/id<N>__<cut>/results.json (trajectory
     asks) and <campaign>/baseline__<model>/results.json (bare no-context asks,
     tid=None). Unreadable files are skipped LOUDLY (console) so a half-written run
-    can't silently vanish."""
+    can't silently vanish. Only the em question set renders here: other sets
+    (e.g. propensity) have no aligned/coherent judge scores, so their asks would
+    misrender as UNSCORED chips -- they are skipped with a console note until
+    they get pages of their own."""
     blocks: list[dict] = []
+    skipped: dict[tuple, int] = {}
     for rj in sorted(DATA.glob("*/id*__*/results.json")) + sorted(
             DATA.glob("*/baseline__*/results.json")):
         try:
@@ -5210,8 +5214,16 @@ def load_em_blocks() -> list[dict]:
         except Exception as e:
             print(f"  WARNING: unreadable ask results {rj} ({type(e).__name__}: {e}); skipped")
             continue
+        qset = summary.get("question_set", "em")
+        if qset != "em":
+            key = (rj.parent.parent.name, qset)
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
         blocks.append({"campaign": rj.parent.parent.name, "tid": tid, "dir": rj.parent,
                        "summary": summary, "asks": asks})
+    for (camp, qset), n in sorted(skipped.items()):
+        print(f"  [em] skipped {n} ask dir(s) from campaign '{camp}' (question set "
+              f"'{qset}'): only em asks render on the EM pages")
     return blocks
 
 

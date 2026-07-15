@@ -3620,10 +3620,11 @@ EM_ASK_BARE_HTML = """
 
 @app.route("/continuations/em")
 def em_results():
-    # the context question set belongs to the context-reconstruction window,
-    # not the EM one; everything else shows here
+    # only the em set renders here: context belongs to the context-
+    # reconstruction window, and other sets (e.g. propensity) have no EM-style
+    # judge scores, so their asks would misrender as UNSCORED chips
     blocks = [b for b in load_ask_blocks()
-              if b["summary"].get("question_set") != "context"]
+              if b["summary"].get("question_set") == "em"]
     return render_template_string(
         EM_RESULTS_HTML, blocks=[_em_block_view(b) for b in blocks],
         stats=em_stats(blocks), subnav=_subnav("results"))
@@ -3683,7 +3684,7 @@ def all_visuals():
     figures (petri's viewer_visuals module), then a cost line per probe
     campaign. Each section leads with its running total + average cost."""
     blocks = [b for b in load_ask_blocks()
-              if b["summary"].get("question_set") != "context"]
+              if b["summary"].get("question_set") == "em"]
     rows = em_judge_rows(blocks)
     em = em_cost_fig_data(blocks)
     em_figs: list[str] = []
