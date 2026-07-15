@@ -63,9 +63,9 @@ uv run exp_probe_context.py
     [--turn=end (or event_id, 'first_hack')]
     [--probe="..."]  # default asks task / progress / earliest-visible / last-action / files
 
-## Ask propensity questions to resumed agents
+## Ask propensity questions to resumed agents (auto-judged by the EM judge)
 uv run exp_ask_questions.py
-    --trajectory=<run_id>
+    --trajectory=<run_id,run_id or 'claude'>
     --questions=em          
     [--n=1] 
     [--turn=end (or event_id, 'first_hack')] 
@@ -73,4 +73,5 @@ uv run exp_ask_questions.py
     [--concurrency=50]     
     [--timeout=600]           
     [--campaign=questions_<set>]   # output subdirectory
+    [--no-judge, --dry-run]
     [--user-config] # personal ~/.claude instead of a clean config dir
