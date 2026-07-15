@@ -3358,8 +3358,9 @@ def _em_block_view(b: dict) -> dict:
     caveats = []
     if "end_snapped_dangling_tool_calls" in flags:
         caveats.append("END SNAPPED: the trajectory's final assistant message had "
-                       "unanswered tool calls and was DROPPED — every ask follows "
-                       "the last answered exchange, not the agent's true final message.")
+                       "unanswered tool calls and was DROPPED (exactly one message — "
+                       "everything before it is intact); every ask follows the last "
+                       "answered exchange, not the agent's true final message.")
     if baseline:
         caveats.append("Model+scaffold baseline: bare questions in a fresh scaffold "
                        "session — the CLI still injects its own system prompt and "

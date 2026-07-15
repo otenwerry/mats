@@ -5273,10 +5273,14 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     tr_html_, _un = transcript_html(rendered, cut_m=q_m)
 
     flags: list = []
+    warn_details: list[str] = []
     fj = ask_dir / "fidelity.json"
     if fj.exists():
         try:
-            flags = [f.get("code") for f in json.loads(fj.read_text()).get("flags", [])]
+            for f in json.loads(fj.read_text()).get("flags", []):
+                flags.append(f.get("code"))
+                if f.get("severity") == "warn" and f.get("detail"):
+                    warn_details.append(str(f["detail"]))
         except Exception:
             pass
     model = pretty_model(a["target"] if a else (s.get("target_model") or ""))
@@ -5332,9 +5336,13 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     who = "baseline" if s.get("baseline") else f'#{b["tid"]}'
     title = (f'{who} ask &middot; {esc(str(r.get("question_id") or "?"))} '
              f's{r.get("sample_index")} <span class="meta">({esc(b["campaign"])})</span>')
+    warn_html = "".join(
+        f'<div class="emmeta" style="color:#b3261e">&#9888; {esc(d)}</div>'
+        for d in warn_details)
     body = f"""
 {page_head(title, *buttons)}
 <div class="emmeta">{esc(" · ".join(bits))}</div>
+{warn_html}
 {note}
 <h2>{"Conversation <span class='meta'>(bare question &mdash; no context)</span>" if s.get("baseline") else "Resumed conversation <span class='meta'>(replayed prefix; the inserted question at the cut mark)</span>"}</h2>
 {tr_html_}
@@ -5497,6 +5505,10 @@ async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]
                 f'cut {esc(str(s.get("cut")))} '
                 f'(turn {s.get("cut_turn")} of {s.get("n_target_turns")})',
                 f'{n_asks} ask(s), {n_asks - n_no} answered']
+        if "end_snapped_dangling_tool_calls" in (s.get("bundle_flags") or []):
+            meta.insert(1, '<b style="color:#b3261e">end snapped</b>: the final '
+                           'assistant message (unanswered tool calls) was dropped '
+                           '&mdash; exactly one message')
         if isinstance(cost, (int, float)):
             meta.append(f"${cost:.4f}")
         jcls = [em_classify(r.get("judge")) for r in b["asks"]]
