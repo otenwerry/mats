@@ -49,9 +49,11 @@ no trajectory, no system prompt, no tools, and no transition prefix (the EM
 paper's own protocol) -- once per distinct target-model config among the
 selected trajectories (reasoning settings matched), n samples per question,
 judged like any other ask. One extra output dir per model
-(baseline__<model>), same results layout, summary flagged "baseline": true.
-Default no. The baseline anchors each model's no-context answer distribution
-next to its with-trajectory asks.
+(baseline__<model>), same results layout; the summary is stamped
+"baseline": true, "condition": "baseline", and "baseline_for": [the anchor
+trajectory ids], which is how the viewer places the baseline on the right
+sweep and condition axis. Default no. The baseline anchors each model's
+no-context answer distribution next to its with-trajectory asks.
 
 Judging: every answered ask is scored AUTOMATICALLY by the paper's own judge
 (lib/exp_em_judge.py): the question YAML's judge model (gpt-4o-2024-08-06) rates
@@ -198,6 +200,7 @@ class AskBundle:
     est_context_tokens: int | None   # original billed input size at the cut turn
     flags: list = field(default_factory=list)
     is_baseline: bool = False        # bare no-context asks (--baseline=yes)
+    baseline_for: list = field(default_factory=list)  # anchor trajectory ids (baseline only)
 
 
 def bundle_dirname(b: AskBundle) -> str:
@@ -551,6 +554,12 @@ def write_results(out_dir: Path, bundle: AskBundle, args, questions: list[dict],
     summary = {
         "trajectory_id": bundle.tid, "page": bundle.page,
         "baseline": bundle.is_baseline,
+        # baselines self-tag their condition + the trajectory ids they anchor, so the
+        # viewer can place them on the right sweep and condition axis; trajectory asks
+        # carry NO condition here -- the viewer derives RH/clean from the (re-judgeable)
+        # hack label at display time.
+        **({"condition": "baseline", "baseline_for": bundle.baseline_for}
+           if bundle.is_baseline else {}),
         "target_model": bundle.target_slug,
         "cut": bundle.cut_label, "cut_turn": bundle.cut_turn,
         "n_target_turns": bundle.n_turns, "requested_turn": args.turn,
@@ -708,14 +717,16 @@ def main():
         # one bare-question baseline per distinct target-model config among the
         # selected trajectories: no context, no system prompt, no tools, and no
         # transition prefix (the paper's own protocol). Judged like any other ask.
-        seen: dict[tuple, AskBundle] = {}
+        seen: dict[tuple, list[int]] = {}
         for b in bundles:
-            seen.setdefault((b.target_slug, b.reasoning_on, b.reasoning_effort), b)
-        for (slug, r_on, r_eff) in seen:
+            seen.setdefault((b.target_slug, b.reasoning_on, b.reasoning_effort),
+                            []).append(b.tid)
+        for (slug, r_on, r_eff), anchor_tids in seen.items():
             bundles.append(AskBundle(
                 tid=None, page="(baseline -- no context)", target_slug=slug,
                 reasoning_on=r_on, reasoning_effort=r_eff, messages=[], tools=[],
                 cut_label="baseline", cut_turn=0, n_turns=0, est_context_tokens=0,
+                baseline_for=sorted(anchor_tids),
                 flags=[{
                     "code": "baseline_no_context", "severity": "info",
                     "detail": "baseline ask: the bare question only -- no trajectory "

@@ -16,13 +16,14 @@ a static site to viewer/:
                               (rebuilt with Petri's own rendering functions,
                               so [MN] citations link to transcript anchors)
 
-Per-audit pages get a fixed nav panel with two groups:
+Per-audit pages get a fixed nav panel (bottom-right) with buttons that step through:
   - hack turns: red-outlined turns with inline annotation callouts, from
     mats-local/petri/annotations.json (produced by exp_annotate_hacks.py).
-    n/p jump between them; the panel shows each turn's title as you go.
-  - judge-cited messages: every [MN] the judge cited, amber-outlined; j/k jump.
-  d toggles focus mode (dims everything that is neither a hack turn nor cited).
-The hack-turn nav only appears once exp_annotate_hacks.py has been run.
+    The panel shows each turn's title as you step.
+  - judge-cited messages: every [MN] the judge cited, amber-outlined.
+  - user turns.
+Buttons only -- there are no keyboard shortcuts. The hack-turn group only appears once
+exp_annotate_hacks.py has been run.
 
 Trajectory IDs: every trajectory gets a stable, unique integer ID persisted in
 mats-local/petri/trajectory_ids.json (keyed by mode/task/seed/epoch). Because this
@@ -409,7 +410,6 @@ mark.hl { background: #ffd33d; color: #3a0d08; border-radius: 2px; padding: 0 1p
 .msg.flash { animation: flashpulse 1.1s ease-out; }
 .msg.hackturn.flash { animation: flashpulsehack 1.1s ease-out; }
 @keyframes flashpulsehack { from { box-shadow: 0 0 0 7px rgba(217,48,37,.85); } to { box-shadow: 0 0 0 0 rgba(217,48,37,0); } }
-body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .22; }
 .hackcaveat { background: #fff5f5; border: 1px solid #f2b8b5; border-radius: 6px; padding: 9px 13px;
               font-size: 12.5px; color: #5a0d07; margin: 10px 0; line-height: 1.45; }
 /* loud, top-of-index summary when a whole target/run failed (0 output tokens). */
@@ -453,6 +453,7 @@ body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .2
        z-index: 50; }
 .toq:hover { background: #0f47b0; color: #fff; text-decoration: none; }
 .cnav-grp { margin-bottom: 9px; padding-bottom: 8px; border-bottom: 1px solid #eceef2; }
+.cnav-grp:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
 .cnav-grp.hack b { color: #b3261e; }
 .cnav-grp.user b { color: #2456a6; }
 .cnav-row { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; }
@@ -460,7 +461,6 @@ body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .2
 .cnav-title { font-size: 11.5px; color: #7a1f17; min-height: 14px; }
 .cnav button { cursor: pointer; border: 1px solid #c8cad2; background: #f2f3f6; border-radius: 5px; padding: 2px 10px; font-size: 13px; }
 .cnav button:hover { background: #e4e6ec; }
-.cnav-keys { color: #889; margin-top: 4px; font-size: 11px; }
 /* reward-hacking propensity section (Visuals page): horizontal bars by model /
    prompt + a model x prompt heatmap. Each bar is stacked: a solid-red segment for
    the clean-hack rate (hacks/n) and a fainter segment for the excluded rate
@@ -527,6 +527,12 @@ body.dimmode .msg:not(.cited):not(.hackturn), body.dimmode .branch { opacity: .2
 .emj-aligned { background: #e6f4ea; color: #137333; border: 1px solid #a8dab5; }
 .emj-incoherent { background: #fef7e0; color: #a05a00; border: 1px solid #f6e3a1; }
 .emj-unscored { background: #ececf0; color: #77778a; border: 1px solid #d9dbe3; }
+/* EM row expand panel (inside a trajectory row's detail cell): per-cut meta line + a
+   list of the resumed runs, each a link named by its question id (e.g. three_thoughts). */
+.emdrop { padding: 8px 14px; }
+.emdrop-meta { color: #555; font-size: 12px; margin: 4px 0 5px; }
+.emlinks { list-style: none; margin: 0 0 6px; padding: 0; }
+.emlinks li { font-size: 12.5px; padding: 2px 0; }
 /* continuations page: baseline-only (screening-candidate) boxes -- muted + tagged so they
    read as less important than the completed experiments (they're also held out of the
    visuals). */
@@ -646,38 +652,6 @@ tr.rb-detailrow > td { padding: 0; background: #f7f9fc; border-bottom: 2px solid
 .tocut:hover { background: #0f47b0; }
 """
 
-NAV_HTML = """
-<div class="cnav" id="cnav">
-  <div class="cnav-grp hack" id="grp-hack">
-    <b>&#9888; hack turns <span id="hack-cnt"></span></b>
-    <div class="cnav-row">
-      <button id="hack-prev" title="previous (p)">&larr;</button>
-      <span class="lbl" id="hack-lbl">&ndash;</span>
-      <button id="hack-next" title="next (n)">&rarr;</button>
-    </div>
-    <div class="cnav-title" id="hack-title"></div>
-  </div>
-  <div class="cnav-grp cited" id="grp-cited">
-    <b>judge-cited</b>
-    <div class="cnav-row">
-      <button id="cite-prev" title="previous (k)">&larr;</button>
-      <span class="lbl" id="cite-lbl">&ndash;</span>
-      <button id="cite-next" title="next (j)">&rarr;</button>
-    </div>
-  </div>
-  <div class="cnav-grp user" id="grp-user">
-    <b>user turns <span id="user-cnt"></span></b>
-    <div class="cnav-row">
-      <button id="user-prev" title="previous (y)">&larr;</button>
-      <span class="lbl" id="user-lbl">&ndash;</span>
-      <button id="user-next" title="next (u)">&rarr;</button>
-    </div>
-  </div>
-  <label><input type="checkbox" id="cnav-dim"> focus (dim others)</label>
-  <div class="cnav-keys">n/p hack &middot; j/k cited &middot; u/y user &middot; d focus</div>
-</div>
-"""
-
 # back-to-top button (PTB-style): appears once you've scrolled past 400px
 TOTOP_HTML = """
 <button class="totop" id="totop" title="back to top">&#8593;</button>
@@ -770,6 +744,40 @@ ROLLBACK_TOGGLE_JS = """
 </script>
 """
 
+# Floating nav (bottom-right): buttons to step through hack turns / judge-cited turns /
+# user turns. Buttons only -- the keyboard shortcuts, the "n/p ..." hint line, and the
+# focus/dim checkbox were all removed (Owen 2026-07-14). setup() also adds the "cited"
+# class so judge-cited turns get their amber outline.
+NAV_HTML = """
+<div class="cnav" id="cnav">
+  <div class="cnav-grp hack" id="grp-hack">
+    <b>&#9888; hack turns <span id="hack-cnt"></span></b>
+    <div class="cnav-row">
+      <button id="hack-prev" title="previous">&larr;</button>
+      <span class="lbl" id="hack-lbl">&ndash;</span>
+      <button id="hack-next" title="next">&rarr;</button>
+    </div>
+    <div class="cnav-title" id="hack-title"></div>
+  </div>
+  <div class="cnav-grp cited" id="grp-cited">
+    <b>judge-cited</b>
+    <div class="cnav-row">
+      <button id="cite-prev" title="previous">&larr;</button>
+      <span class="lbl" id="cite-lbl">&ndash;</span>
+      <button id="cite-next" title="next">&rarr;</button>
+    </div>
+  </div>
+  <div class="cnav-grp user" id="grp-user">
+    <b>user turns <span id="user-cnt"></span></b>
+    <div class="cnav-row">
+      <button id="user-prev" title="previous">&larr;</button>
+      <span class="lbl" id="user-lbl">&ndash;</span>
+      <button id="user-next" title="next">&rarr;</button>
+    </div>
+  </div>
+</div>
+"""
+
 NAV_JS = """
 <script>
 (function () {
@@ -802,24 +810,13 @@ NAV_JS = """
   var USERS = Array.prototype.slice.call(document.querySelectorAll(".msg.role-user"))
     .map(function (el) { return { m: el.id.slice(1) }; });
   var goHack = setup("grp-hack", HACKS, "hack-prev", "hack-next", "hack-lbl", "hack-title", null);
-  var goCite = setup("grp-cited", CITED.map(function (m) { return { m: m }; }), "cite-prev", "cite-next", "cite-lbl", null, "cited");
+  // cited group: wires its buttons AND adds the "cited" class for the amber outline
+  setup("grp-cited", CITED.map(function (m) { return { m: m }; }), "cite-prev", "cite-next", "cite-lbl", null, "cited");
   var goUser = setup("grp-user", USERS, "user-prev", "user-next", "user-lbl", null, null);
   var hc = document.getElementById("hack-cnt");
   if (hc) hc.textContent = goHack ? "(" + HACKS.length + ")" : "";
   var uc = document.getElementById("user-cnt");
   if (uc) uc.textContent = goUser ? "(" + USERS.length + ")" : "";
-  var dim = document.getElementById("cnav-dim");
-  dim.onchange = function () { document.body.classList.toggle("dimmode", dim.checked); };
-  document.addEventListener("keydown", function (e) {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === "n" && goHack) goHack(1);
-    else if (e.key === "p" && goHack) goHack(-1);
-    else if (e.key === "j" && goCite) goCite(1);
-    else if (e.key === "k" && goCite) goCite(-1);
-    else if (e.key === "u" && goUser) goUser(1);
-    else if (e.key === "y" && goUser) goUser(-1);
-    else if (e.key === "d") { dim.checked = !dim.checked; dim.onchange(); }
-  });
 })();
 </script>
 """
@@ -2101,7 +2098,8 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 
     # the floating nav renders on EVERY page: the user-turn group builds its targets
     # client-side from the transcript, so it always has entries; the hack/cited groups
-    # hide themselves when their lists are empty (setup() in NAV_JS).
+    # hide themselves when their lists are empty (setup() in NAV_JS). Buttons only --
+    # the keyboard shortcuts, the hint line, and the focus/dim checkbox were removed.
     nav = NAV_HTML + (
         NAV_JS.replace("__HACKS__", json.dumps(hack_list)).replace("__CITED__", json.dumps(cited))
     )
@@ -2252,7 +2250,8 @@ def write_table(title: str, definition: str, count: str, audits: list[dict],
                 first_hack: dict[int, int | None] | None = None,
                 level: str = "h2", show_auditor: bool = True,
                 hide_condition: bool = False,
-                reasons: dict[int, list[str]] | None = None) -> str:
+                reasons: dict[int, list[str]] | None = None,
+                expand_title: str = "click to show rollbacks / resamples") -> str:
     """One unified table over `audits`, with a fixed column set, wrapped in a collapsible
     <details> box: the clickable header line reads "<title> — <count> (<definition>)"
     (count inline, e.g. "12 out of 112"; definition skipped when empty) and collapses the
@@ -2365,7 +2364,7 @@ def write_table(title: str, definition: str, count: str, audits: list[dict],
         tr_style = ' style="opacity:.5"' if dead else ""
         drop = expandable.get(a["id"])
         cls = ' class="rb-expandable"' if drop else ""
-        ttl = ' title="click to show rollbacks / resamples"' if drop else ""
+        ttl = f' title="{esc(expand_title)}"' if drop else ""
         cond_cell = f"<td>{esc(a.get('condition') or '')}</td>" if show_cond else ""
         tags_cell = f"<td class='tagcol'>{failure_modes_cell(a)}</td>" if show_tags else ""
         if show_reasons:
@@ -5168,15 +5167,35 @@ def em_judge_bits(j: dict | None) -> tuple[str, list[str]]:
     return f'<span class="emj emj-{cls}">{esc(cls.upper())}</span>', bits
 
 
+def em_score_chip(j: dict | None) -> str:
+    """Compact chip for the main EM page: the raw aligned score (0-100) colored by the
+    display-time classification (green aligned / red misaligned) -- the number carries the
+    magnitude, the color carries the verdict, in one small chip. Incoherent / unscored
+    asks have no reliable alignment reading, so they keep a short WORD chip instead.
+    '' when the ask was never judged."""
+    cls = em_classify(j)
+    if cls is None:
+        return ""
+    if cls in ("aligned", "misaligned"):
+        a = (j.get("scores") or {}).get("aligned")
+        txt = f"{a:.0f}" if isinstance(a, (int, float)) else "—"
+        return f'<span class="emj emj-{cls}" title="aligned score (0&ndash;100)">{txt}</span>'
+    return f'<span class="emj emj-{cls}">{esc(cls.upper())}</span>'
+
+
 def load_em_blocks() -> list[dict]:
-    """One block per ask-run dir (<campaign>/id<N>__<cut>/results.json). Unreadable
-    files are skipped LOUDLY (console) so a half-written run can't silently vanish."""
+    """One block per ask-run dir: <campaign>/id<N>__<cut>/results.json (trajectory
+    asks) and <campaign>/baseline__<model>/results.json (bare no-context asks,
+    tid=None). Unreadable files are skipped LOUDLY (console) so a half-written run
+    can't silently vanish."""
     blocks: list[dict] = []
-    for rj in sorted(DATA.glob("*/id*__*/results.json")):
+    for rj in sorted(DATA.glob("*/id*__*/results.json")) + sorted(
+            DATA.glob("*/baseline__*/results.json")):
         try:
             data = json.loads(rj.read_text())
             summary, asks = data["summary"], data["asks"]
-            tid = int(summary["trajectory_id"])
+            tid = summary["trajectory_id"]
+            tid = int(tid) if tid is not None else None
         except Exception as e:
             print(f"  WARNING: unreadable ask results {rj} ({type(e).__name__}: {e}); skipped")
             continue
@@ -5249,11 +5268,13 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
             flags = [f.get("code") for f in json.loads(fj.read_text()).get("flags", [])]
         except Exception:
             pass
-    model = pretty_model(a["target"]) if a else esc(str(s.get("target_model") or "?"))
+    model = pretty_model(a["target"] if a else (s.get("target_model") or ""))
     status = ("error" if r.get("error")
               else "no answer" if r.get("answer") is None else "answered")
     c = r.get("cost_usd")
-    bits = [model, f"cut {s.get('cut')}", status]
+    bits = [model,
+            "no context (baseline)" if s.get("baseline") else f"cut {s.get('cut')}",
+            status]
     if r.get("n_tool_uses"):
         bits.append(f'{r["n_tool_uses"]} tool call(s)')
     if isinstance(c, (int, float)):
@@ -5297,13 +5318,14 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
         anchor = _em_cut_anchor(a, s.get("cut_turn"))
         buttons.append(head_btn(orig + (f"#{anchor}" if anchor else ""),
                                 "original at the cut &rarr;"))
-    title = (f'#{b["tid"]} ask &middot; {esc(str(r.get("question_id") or "?"))} '
+    who = "baseline" if s.get("baseline") else f'#{b["tid"]}'
+    title = (f'{who} ask &middot; {esc(str(r.get("question_id") or "?"))} '
              f's{r.get("sample_index")} <span class="meta">({esc(b["campaign"])})</span>')
     body = f"""
 {page_head(title, *buttons)}
 <div class="emmeta">{esc(" · ".join(bits))}</div>
 {note}
-<h2>Resumed conversation <span class="meta">(replayed prefix; the inserted question at the cut mark)</span></h2>
+<h2>{"Conversation <span class='meta'>(bare question &mdash; no context)</span>" if s.get("baseline") else "Resumed conversation <span class='meta'>(replayed prefix; the inserted question at the cut mark)</span>"}</h2>
 {tr_html_}
 {judge_html}
 """
@@ -5311,9 +5333,12 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
     # travels with the scroll like the hack-turn nav)
     toq = (f'<a class="toq" href="#M{q_m}" title="jump to the new question">'
            f"&darr; question</a>" if q_m is not None else "")
-    name = f'em__{b["campaign"]}__id{b["tid"]}__{s.get("cut")}__{r["dir"]}.html'
+    # baseline dirs are already named baseline__<model>; trajectory dirs id<N>__<cut>
+    stem = b["dir"].name if s.get("baseline") else f'id{b["tid"]}__{s.get("cut")}'
+    name = f'em__{b["campaign"]}__{stem}__{r["dir"]}.html'
     page = (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>#{b['tid']} ask {esc(str(r.get('question_id') or ''))} "
+            f"<title>{'baseline' if s.get('baseline') else '#' + str(b['tid'])} "
+            f"ask {esc(str(r.get('question_id') or ''))} "
             f"s{r.get('sample_index')}</title><style>{CSS}</style></head>"
             f"<body><div class='wrap'>{body}</div>{toq}{TOTOP_HTML}</body></html>")
     (OUT / "pages" / name).write_text(page)
@@ -5322,12 +5347,21 @@ async def write_em_ask_page(key: str, b: dict, r: dict, context_msgs: list) -> s
 
 def group_em_by_sweep(blocks: list[dict], originals_by_id: dict) -> dict[str, list[dict]]:
     """sweep key -> its EM blocks, by each block's ORIGINAL trajectory (same ownership
-    rule as continuations). A block whose original is gone falls to the current sweep."""
+    rule as continuations). A baseline block (tid=None) has no original; it follows the
+    trajectories it anchors (summary.baseline_for, stamped by exp_ask_questions.py).
+    A block whose original/anchors are gone falls to the current sweep."""
     out: dict[str, list[dict]] = {}
     for b in blocks:
-        a = originals_by_id.get(b["tid"])
+        a = originals_by_id.get(b["tid"]) if b["tid"] is not None else None
         b["orig"] = a
-        out.setdefault(sweep_key(a) if a else CURRENT_SWEEP, []).append(b)
+        if a:
+            key = sweep_key(a)
+        else:
+            anchors = [originals_by_id.get(t)
+                       for t in (b["summary"].get("baseline_for") or [])]
+            anchors = [x for x in anchors if x]
+            key = sweep_key(anchors[0]) if anchors else CURRENT_SWEEP
+        out.setdefault(key, []).append(b)
     return out
 
 
@@ -5346,40 +5380,64 @@ def _em_cut_anchor(a: dict | None, cut_turn) -> str | None:
 
 
 def em_cost_data(blocks: list[dict]) -> dict | None:
-    """Answered-vs-no-answer ask costs for the Visuals Cost tab, pooled across every
-    question and trajectory of the sweep (per Owen 2026-07-13; split further later).
-    "Answered" = the response contained any text (the same mechanical rule
-    exp_ask_questions.py records); tool-call-only and errored asks are no-answer.
-    Asks without a recorded cost are EXCLUDED from the means and counted."""
-    answered: list[float] = []
-    no_answer: list[float] = []
+    """Per-model ask cost for the Visuals Cost tab, pooled across every question and
+    trajectory of the sweep. The model is the trajectory's target (the model that
+    answered). Rows are sorted by mean cost per ask, descending. Asks without a recorded
+    cost are EXCLUDED from the means and counted (n_unpriced)."""
+    by_model: dict[str, list[float]] = {}
     n_unpriced = 0
     any_est = False
     for b in blocks:
+        a = b.get("orig")
+        model = pretty_model(a["target"] if a else (b["summary"].get("target_model") or ""))
         for r in b["asks"]:
             c = r.get("cost_usd")
             if not isinstance(c, (int, float)):
                 n_unpriced += 1
                 continue
-            (answered if r.get("answer") is not None else no_answer).append(float(c))
+            by_model.setdefault(model, []).append(float(c))
             if not str(r.get("cost_source") or "").startswith("exact"):
                 any_est = True
-    if not (answered or no_answer):
+    if not by_model:
         return None
-    return {"answered": answered, "no_answer": no_answer,
-            "n_unpriced": n_unpriced, "exact": not any_est}
+    rows = sorted(by_model.items(), key=lambda kv: -(sum(kv[1]) / len(kv[1])))
+    return {"by_model": rows, "n_unpriced": n_unpriced, "exact": not any_est,
+            "total": sum(c for _, cs in rows for c in cs),
+            "n_priced": sum(len(cs) for _, cs in rows)}
+
+
+def em_condition(b: dict) -> str:
+    """The prefix condition of an EM block, for the condition-split visuals. An explicit
+    summary['condition'] wins -- baseline runs stamp condition='baseline' at ask time
+    (exp_ask_questions.py --baseline=yes); otherwise it is DERIVED from the origin
+    trajectory's committed hack label: a hack -> 'RH prefix', anything else -> 'clean
+    prefix' (Owen 2026-07-15). '?' when the origin trajectory isn't in this build
+    (can't be classified)."""
+    c = b["summary"].get("condition")
+    if c:
+        return str(c)
+    a = b.get("orig")
+    if not a:
+        return "?"
+    return "RH prefix" if is_hack_binary(a) else "clean prefix"
 
 
 def em_judge_data(blocks: list[dict]) -> dict | None:
     """Per-ask EM judge scores for the Visuals 'EM questions' tab, pooled across every
-    campaign/trajectory with ask data on the sweep. Each row carries the raw scores
-    plus its display-time classification (em_classify — the paper's thresholds).
-    Unjudged asks (pre-judge data / --no-judge / no answer) are counted, not dropped
-    silently. None when nothing on the sweep has judge scores."""
+    campaign/trajectory with ask data on the sweep. Each row carries the raw scores, its
+    display-time classification (em_classify — the paper's thresholds), the answering
+    MODEL (the trajectory's target) and the prefix CONDITION (em_condition). Unjudged
+    asks (pre-judge data / --no-judge / no answer) are counted, not dropped silently.
+    None when nothing on the sweep has judge scores."""
     rows: list[dict] = []
     n_unjudged = 0
     judge_model = None
     for b in blocks:
+        a = b.get("orig")
+        # a baseline / no-prefix ask has no origin trajectory; fall back to the summary's
+        # target slug, still run through pretty_model so its bar matches the prefixed rows'.
+        model = pretty_model(a["target"] if a else (b["summary"].get("target_model") or ""))
+        cond = em_condition(b)
         for r in b["asks"]:
             cl = em_classify(r.get("judge"))
             if cl is None:
@@ -5388,6 +5446,7 @@ def em_judge_data(blocks: list[dict]) -> dict | None:
             s = r["judge"]["scores"]
             judge_model = judge_model or r["judge"].get("model")
             rows.append({"qid": str(r.get("question_id") or "?"), "tid": b["tid"],
+                         "model": model, "condition": cond,
                          "aligned": s.get("aligned"), "coherent": s.get("coherent"),
                          "cls": cl})
     if not rows:
@@ -5396,97 +5455,138 @@ def em_judge_data(blocks: list[dict]) -> dict | None:
             "coherent_min": EM_COHERENT_MIN, "misaligned_below": EM_MISALIGNED_BELOW}
 
 
-async def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> tuple[str, set[str]]:
+async def _em_row_dropdown(key: str, tblocks: list[dict]) -> tuple[str, set[str]]:
+    """The expand panel for one original trajectory's EM row: per (cut) a compact meta
+    line (cut, ask/answer counts, cost, judge rollup), then a list of that cut's resumed
+    runs -- each a link named by its question id (e.g. "three_thoughts") to its full
+    resumed-conversation page, with the ask's judge chip.
+    Returns (panel html, set of pages/ ask-page names written)."""
+    ask_pages: set[str] = set()
+    sections: list[str] = []
+    for b in sorted(tblocks, key=lambda x: str(x["summary"].get("cut"))):
+        s = b["summary"]
+        # resumed context, loaded once per block and shared by its ask pages; a missing/
+        # unreadable context.jsonl is surfaced (no ask pages, the list still renders).
+        try:
+            context_msgs = _em_context_messages(b["dir"])
+        except Exception as e:
+            context_msgs = None
+            print(f"  WARNING: no resumed context for {b['dir']} "
+                  f"({type(e).__name__}: {e}); ask pages skipped")
+        n_asks = s.get("n_asks") or len(b["asks"])
+        n_no = s.get("n_no_answer") or 0
+        cost = s.get("total_cost_usd")
+        meta = ["bare questions &mdash; no context, no system prompt, no tools, "
+                "no transition prefix" if s.get("baseline") else
+                f'cut {esc(str(s.get("cut")))} '
+                f'(turn {s.get("cut_turn")} of {s.get("n_target_turns")})',
+                f'{n_asks} ask(s), {n_asks - n_no} answered']
+        if isinstance(cost, (int, float)):
+            meta.append(f"${cost:.4f}")
+        jcls = [em_classify(r.get("judge")) for r in b["asks"]]
+        n_judged = sum(1 for cl in jcls if cl is not None)
+        if n_judged:
+            n_mis = jcls.count("misaligned")
+            n_excl = jcls.count("incoherent") + jcls.count("unscored")
+            meta.append(f"judge: <b>{n_mis} misaligned</b> / {n_judged} judged"
+                        + (f" ({n_excl} excluded)" if n_excl else ""))
+        meta_html = " &middot; ".join(meta)
+        # one link per (question, sample), named by its question id; the full answer +
+        # judge detail live on the linked resumed-conversation page (not inline here).
+        by_q: dict[str, list[dict]] = {}
+        for r in b["asks"]:
+            by_q.setdefault(r.get("question_id") or "?", []).append(r)
+        items: list[str] = []
+        for qid, rs in by_q.items():
+            multi = len(rs) > 1
+            for r in sorted(rs, key=lambda r: r.get("sample_index") or 0):
+                label = esc(qid) + (f' <span class="meta">s{r.get("sample_index")}</span>'
+                                    if multi else "")
+                link_html = label
+                if context_msgs is not None and r.get("dir"):
+                    try:
+                        nm = await write_em_ask_page(key, b, r, context_msgs)
+                        ask_pages.add(nm)
+                        link_html = f'<a href="pages/{nm}">{label}</a>'
+                    except Exception as e:
+                        print(f"  WARNING: ask page failed for {b['dir'].name}/"
+                              f"{r['dir']} ({type(e).__name__}: {e})")
+                jbadge = em_score_chip(r.get("judge"))
+                extra = ("error" if r.get("error")
+                         else "no answer" if r.get("answer") is None else "")
+                extra_html = f' <span class="meta">{esc(extra)}</span>' if extra else ""
+                items.append(f'<li>{link_html}{" " + jbadge if jbadge else ""}{extra_html}</li>')
+        sections.append(f'<div class="emdrop-meta">{meta_html}</div>'
+                        f'<ul class="emlinks">{"".join(items)}</ul>')
+    return f'<div class="emdrop">{"".join(sections)}</div>', ask_pages
+
+
+async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
+                        has_cont: bool) -> tuple[str, set[str]]:
     """One sweep's EM page (em_<key>.html): every ask campaign whose originals live on
-    this sweep, one block per (trajectory, cut) with a jump to the original's page at
-    the cut anchor and each question's per-sample answers (collapsed, each linking to
-    its full resumed-conversation page — see write_em_ask_page). Returns
-    (em page file name, set of pages/ ask-page names written)."""
+    this sweep, rendered as a normal trajectory table (one collapsed row per original
+    trajectory, columns identical to the sweep's trajectories page). Expanding a row
+    shows that trajectory's resumed EM runs as links named by question id (see
+    _em_row_dropdown / write_em_ask_page). Baseline blocks (tid=None, bare no-context
+    asks) can't be a trajectory row; they render as their own "baseline" subsection
+    under the campaign's table. A block whose original is gone from this build is
+    listed loudly below instead of dropped.
+    Returns (em page file name, set of pages/ ask-page names written)."""
     parts: list[str] = []
     ask_pages: set[str] = set()
+    orphans: list[str] = []
+    # column set + row flags MATCHING this sweep's trajectories page, so an EM row reads
+    # exactly like the trajectory's own row (same dims, same auditor/condition handling).
+    sweep_audits = [a for a in all_audits if sweep_key(a) == key]
+    cols, show_other = topmost_columns(sweep_audits)
+    is_v7 = any(is_v7_audit(a) for a in sweep_audits)
+    show_auditor = sweep_window_number(key) != 7
     by_campaign: dict[str, list[dict]] = {}
     for b in blocks:
         by_campaign.setdefault(b["campaign"], []).append(b)
     for camp, bs in sorted(by_campaign.items()):
-        parts.append(f"<h2>{esc(camp)}</h2>")
-        for b in sorted(bs, key=lambda x: (x["tid"], str(x["summary"].get("cut")))):
-            s, a = b["summary"], b["orig"]
-            # the resumed context, loaded once per block and shared by its ask pages;
-            # a missing/unreadable context.jsonl is surfaced (no ask pages, list still renders)
-            try:
-                context_msgs = _em_context_messages(b["dir"])
-            except Exception as e:
-                context_msgs = None
-                print(f"  WARNING: no resumed context for {b['dir']} "
-                      f"({type(e).__name__}: {e}); ask pages skipped")
-            link = ""
-            if a:
-                page = page_name(a["mode"], a["task"], a["seed"], a["epoch"])
-                anchor = _em_cut_anchor(a, s.get("cut_turn"))
-                href = f"pages/{page}" + (f"#{anchor}" if anchor else "")
-                link = f' <a class="emjump" href="{href}">original at the cut &rarr;</a>'
-            model = pretty_model(a["target"]) if a else esc(str(s.get("target_model") or "?"))
-            n_asks = s.get("n_asks") or len(b["asks"])
-            n_no = s.get("n_no_answer") or 0
-            cost = s.get("total_cost_usd")
-            # judge rollup: display-time classification over this block's asks
-            jcls = [em_classify(r.get("judge")) for r in b["asks"]]
-            n_judged = sum(1 for cl in jcls if cl is not None)
-            jroll = ""
-            if n_judged:
-                n_mis = jcls.count("misaligned")
-                n_excl = jcls.count("incoherent") + jcls.count("unscored")
-                jroll = (f", judge: <b>{n_mis} misaligned</b> / {n_judged} judged"
-                         + (f" ({n_excl} excluded)" if n_excl else ""))
-                jcost = s.get("judge_cost_usd")
-                if isinstance(jcost, (int, float)):
-                    jroll += f", ~${jcost:.4f} judge"
-            parts.append(
-                f'<h3>#{b["tid"]} &mdash; {model} &mdash; cut {esc(str(s.get("cut")))} '
-                f'(turn {s.get("cut_turn")} of {s.get("n_target_turns")}){link}</h3>'
-                f'<div class="emmeta">{n_asks} ask(s), {n_asks - n_no} answered'
-                + (f", ${cost:.4f} total" if isinstance(cost, (int, float)) else "")
-                + jroll + "</div>")
-            by_q: dict[str, list[dict]] = {}
-            for r in b["asks"]:
-                by_q.setdefault(r.get("question_id") or "?", []).append(r)
-            for qid, rs in by_q.items():
-                items = []
-                for r in sorted(rs, key=lambda r: r.get("sample_index") or 0):
-                    status = ("error" if r.get("error")
-                              else "no answer" if r.get("answer") is None else "answered")
-                    bits = [status]
-                    if r.get("n_tool_uses"):
-                        bits.append(f'{r["n_tool_uses"]} tool call(s)')
-                    c = r.get("cost_usd")
-                    if isinstance(c, (int, float)):
-                        bits.append(f"${c:.4f}")
-                    if r.get("duration_s"):
-                        bits.append(f'{r["duration_s"]:.0f}s')
-                    jbadge, jbits = em_judge_bits(r.get("judge"))
-                    bits.extend(jbits)
-                    page_link = ""
-                    if context_msgs is not None and r.get("dir"):
-                        try:
-                            nm = await write_em_ask_page(key, b, r, context_msgs)
-                            ask_pages.add(nm)
-                            page_link = (f' &middot; <a href="pages/{nm}">full '
-                                         f'conversation &rarr;</a>')
-                        except Exception as e:
-                            print(f"  WARNING: ask page failed for {b['dir'].name}/"
-                                  f"{r['dir']} ({type(e).__name__}: {e})")
-                    body = (esc(r["answer"]) if r.get("answer") is not None
-                            else esc(r["error"]) if r.get("error")
-                            else "(no text in the response; the raw output is in the "
-                                 "ask dir's response.json)")
-                    items.append(
-                        f'<details class="emask"><summary>s{r.get("sample_index")} '
-                        f'&mdash; {esc(", ".join(bits))}'
-                        + (f" {jbadge}" if jbadge else "")
-                        + f'{page_link}</summary>'
-                        f'<div class="emanswer">{body}</div></details>')
-                parts.append(f'<div class="emq"><div class="emqtext">{esc(qid)}: '
-                             f'{esc(rs[0].get("question") or "")}</div>{"".join(items)}</div>')
+        by_tid: dict[int, list[dict]] = {}
+        base_blocks: list[dict] = []
+        for b in bs:
+            if b["tid"] is None:
+                base_blocks.append(b)
+            else:
+                by_tid.setdefault(b["tid"], []).append(b)
+        row_audits: list[dict] = []
+        dropdowns: dict[int, str] = {}
+        n_asks_camp = 0
+        for tid, tblocks in sorted(by_tid.items()):
+            a = tblocks[0]["orig"]
+            n_asks_camp += sum(len(b["asks"]) for b in tblocks)
+            if not a:
+                for b in tblocks:
+                    orphans.append(
+                        f'#{tid} ({esc(camp)}, cut {esc(str(b["summary"].get("cut")))}): '
+                        "original trajectory not in this build, so no row is shown")
+                continue
+            drop, pgs = await _em_row_dropdown(key, tblocks)
+            dropdowns[a["id"]] = drop
+            ask_pages |= pgs
+            row_audits.append(a)
+        if row_audits:
+            count = (f'{len(row_audits)} trajector{"y" if len(row_audits) == 1 else "ies"} '
+                     f'&middot; {n_asks_camp} ask(s)')
+            parts.append(write_table(
+                camp, "", count, row_audits, cols, show_other,
+                expandable=dropdowns, show_auditor=show_auditor, hide_condition=is_v7,
+                expand_title="click to show the resumed EM runs"))
+        elif base_blocks:
+            parts.append(f"<h2>{esc(camp)}</h2>")  # campaign heading with no table
+        # baseline (bare no-context) runs: one subsection per model, under the table
+        for b in sorted(base_blocks,
+                        key=lambda x: str(x["summary"].get("target_model"))):
+            drop, pgs = await _em_row_dropdown(key, [b])
+            ask_pages |= pgs
+            model = pretty_model(b["summary"].get("target_model") or "?")
+            parts.append(f'<h3 style="margin:14px 0 2px">baseline (no context) '
+                         f'&mdash; {esc(model)}</h3>' + drop)
+    if orphans:
+        parts.append('<div class="emmeta">&#9888; ' + "<br>".join(orphans) + "</div>")
     heading = f"EM questions — sweep {sweep_label(key)}"
     judge_lead = ""
     if any(em_classify(r.get("judge")) is not None for b in blocks for r in b["asks"]):
@@ -5504,7 +5604,8 @@ async def write_em_page(key: str, blocks: list[dict], has_cont: bool) -> tuple[s
 {''.join(parts)}
 """
     page = (f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(heading)}</title>"
-            f"<style>{CSS}</style></head><body><div class='wrap'>{body}</div>{TOTOP_HTML}</body></html>")
+            f"<style>{CSS}</style></head><body><div class='wrap fit'>{body}</div>"
+            f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}</body></html>")
     out_file = sweep_em_file(key)
     (OUT / out_file).write_text(page)
     return out_file, ask_pages
@@ -5696,10 +5797,11 @@ async def main() -> None:
     EM_SWEEPS.clear()
     EM_SWEEPS.update(em_by_sweep)
     for key, bs in em_by_sweep.items():
-        f, em_ask_pages = await write_em_page(key, bs, has_cont=bool(cont_by_sweep.get(key)))
+        f, em_ask_pages = await write_em_page(key, bs, audits,
+                                              has_cont=bool(cont_by_sweep.get(key)))
         written_pages |= em_ask_pages   # ask pages live in pages/; keep the prune off them
         print(f"wrote {OUT / f} ({sum(len(b['asks']) for b in bs)} ask(s) over "
-              f"{len(bs)} trajectory dir(s), {len(em_ask_pages)} conversation page(s))")
+              f"{len(bs)} ask dir(s), {len(em_ask_pages)} conversation page(s))")
     for key, _, _, _ in SWEEPS:
         if key not in em_by_sweep:
             (OUT / sweep_em_file(key)).unlink(missing_ok=True)

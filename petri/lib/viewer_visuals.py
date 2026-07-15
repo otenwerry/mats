@@ -107,6 +107,30 @@ def _wilson(k: int, n: int, z: float = 1.96):
     return p, max(0.0, center - half), min(1.0, center + half)
 
 
+# two-sided 95% t critical values by degrees of freedom (n-1), df 1..30; ~1.96 beyond.
+# Used for an honest small-sample CI of a mean (no scipy in this venv).
+_T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+        8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+        15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080,
+        22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048,
+        29: 2.045, 30: 2.042}
+
+
+def _mean_ci(vals):
+    """(mean, half-width of the 95% CI of the mean). Half-width is None when n < 2 (a CI
+    is undefined for a single point). t-based, so small groups get honestly wide bars."""
+    a = np.asarray(list(vals), dtype=float)
+    n = a.size
+    if n == 0:
+        return 0.0, None
+    m = float(a.mean())
+    if n < 2:
+        return m, None
+    sd = float(a.std(ddof=1))
+    t = _T95.get(n - 1, 1.96)
+    return m, t * sd / np.sqrt(n)
+
+
 def _rate(records, predicate):
     """(num, den) re-hacks over (hacks+non) among records matching predicate."""
     sub = [r for r in records if predicate(r) and r["cls"] in RATE_CLASSES]
@@ -1907,35 +1931,32 @@ def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str
     )
 
 
-# EM question asks (exp_ask_questions.py) — answered vs no-answer, on the Cost tab.
-# Suite blue for answered; the suite orange for no-answer (validated colorblind-safe
-# pair; identity is also carried by the x-tick labels, never color alone).
+# EM question asks (exp_ask_questions.py) — mean ask cost per model, on the Cost tab.
+# One suite-blue bar per model; model identity is carried by the x-tick labels.
 EM_ANSWERED_C = "#4C72B0"
-EM_NOANSWER_C = "#DD8452"
 
 
 def fig_em_cost(em: dict) -> str:
-    """Mean cost of one ask, answered vs no answer, pooled over every question and
-    trajectory with ask data on this sweep. n = priced asks in each group."""
-    groups = [("Answered", em["answered"], EM_ANSWERED_C),
-              ("No answer", em["no_answer"], EM_NOANSWER_C)]
-    groups = [(lbl, vals, c) for lbl, vals, c in groups if vals]
-    if not groups:
+    """Mean cost of one ask per model, pooled over every question and trajectory with ask
+    data on this sweep. One bar per model; n = priced asks for that model."""
+    rows = em["by_model"]
+    if not rows:
         return _empty_fig("no priced asks", (4.6, 4.0))
     tilde = "" if em["exact"] else "~"
-    means = [float(np.mean(vals)) for _, vals, _ in groups]
-    fig, ax = plt.subplots(figsize=(4.8, 4.2))
-    xs = np.arange(len(groups))
-    ax.bar(xs, means, width=0.55, color=[c for *_, c in groups],
-           edgecolor="white", lw=0.4)
+    labels = [m for m, _ in rows]
+    means = [float(np.mean(cs)) for _, cs in rows]
+    ns = [len(cs) for _, cs in rows]
+    fig, ax = plt.subplots(figsize=(max(4.8, 1.35 * len(rows) + 1.5), 4.2))
+    xs = np.arange(len(rows))
+    ax.bar(xs, means, width=0.6, color=EM_ANSWERED_C, edgecolor="white", lw=0.4)
     for x, m in zip(xs, means):
         ax.annotate(f"{tilde}{_usd(m)}", (x, m), textcoords="offset points",
                     xytext=(0, 4), ha="center", fontsize=10, color="#333",
                     fontweight="bold")
-    ax.set_xticks(xs, [f"{lbl}\n(n={len(vals)})" for lbl, vals, _ in groups], fontsize=9)
+    ax.set_xticks(xs, [f"{lbl}\n(n={n})" for lbl, n in zip(labels, ns)], fontsize=9)
     ax.set_ylabel("Mean cost per ask ($)")
     ax.set_ylim(0, max(means) * 1.20)
-    ax.set_title("EM ask cost — answered vs no answer")
+    ax.set_title("EM ask cost by model")
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
@@ -1947,17 +1968,15 @@ def _em_cost_section(em: dict | None) -> str:
     if not em:
         return ""
     tilde = "" if em["exact"] else "~"
-    n_a, n_n = len(em["answered"]), len(em["no_answer"])
-    total = sum(em["answered"]) + sum(em["no_answer"])
+    n, total, n_models = em["n_priced"], em["total"], len(em["by_model"])
     unpriced = (f' {em["n_unpriced"]} ask(s) had no recorded cost and are excluded.'
                 if em.get("n_unpriced") else "")
     exact_note = ("" if em["exact"] else
                   " <b>~</b> marks a price&times;token estimate; asks bill exactly once "
                   "routed through OpenRouter.")
-    lead = (f'{tilde}<b>{_usd(total)}</b> across <b>{n_a + n_n}</b> priced asks '
-            f'({n_a} answered, {n_n} no answer), pooled over every question and '
-            f'trajectory. &ldquo;Answered&rdquo; = the response contained any text; '
-            f'tool-call-only and errored asks count as no answer.{exact_note}{unpriced}')
+    lead = (f'{tilde}<b>{_usd(total)}</b> across <b>{n}</b> priced asks over '
+            f'<b>{n_models}</b> model(s), pooled over every question and trajectory. '
+            f'Each bar is the mean cost of one ask for that model.{exact_note}{unpriced}')
     return ('<h2 style="margin-top:34px;">EM question asks</h2>'
             f'<p class="vsub">{lead}</p>'
             + _stack(fig_em_cost(em)))
@@ -2047,9 +2066,164 @@ def fig_em_aligned_strip(d: dict) -> str:
     return _fig_to_svg(fig)
 
 
+# Prefix conditions (em_condition in viewer.py): fixed order + a distinct categorical
+# color each. Identity is also carried by the x labels / legend, never color alone.
+EM_CONDITION_ORDER = ["baseline", "clean prefix", "RH prefix"]
+EM_CONDITION_C = {"baseline": "#4C72B0", "clean prefix": "#55A868", "RH prefix": "#C44E52"}
+_EM_COND_FALLBACK_C = "#8a8a99"
+
+
+def _em_conds(rows: list[dict]) -> list[str]:
+    """Conditions present, in EM_CONDITION_ORDER; anything unlisted trails alphabetically."""
+    present = list(dict.fromkeys(r["condition"] for r in rows))
+    return ([c for c in EM_CONDITION_ORDER if c in present]
+            + sorted(c for c in present if c not in EM_CONDITION_ORDER))
+
+
+def _em_models(rows: list[dict]) -> list[str]:
+    """Answering models, ordered by overall mean aligned score ASC (most-misaligned first),
+    so the interesting corner is left. Only rows with a numeric aligned score count."""
+    by: dict[str, list] = defaultdict(list)
+    for r in rows:
+        if isinstance(r.get("aligned"), (int, float)):
+            by[r["model"]].append(r["aligned"])
+    return sorted(by, key=lambda m: float(np.mean(by[m])) if by[m] else 0.0)
+
+
+def fig_em_aligned_by_condition(d: dict) -> str:
+    """Mean aligned score (0-100) per condition, 95% CI whiskers, coherent asks only.
+    Higher = more aligned. n (coherent asks) is on each x label."""
+    rows = [r for r in d["rows"]
+            if r["cls"] in ("aligned", "misaligned") and isinstance(r.get("aligned"), (int, float))]
+    if not rows:
+        return _empty_fig("no coherent asks", (4.8, 4.0))
+    conds = _em_conds(rows)
+    means, errs, ns = [], [], []
+    for c in conds:
+        vals = [r["aligned"] for r in rows if r["condition"] == c]
+        m, hw = _mean_ci(vals)
+        means.append(m); errs.append(hw or 0.0); ns.append(len(vals))
+    fig, ax = plt.subplots(figsize=(max(4.6, 1.5 * len(conds) + 1.4), 4.2))
+    xs = np.arange(len(conds))
+    ax.bar(xs, means, width=0.6, color=[EM_CONDITION_C.get(c, _EM_COND_FALLBACK_C) for c in conds],
+           edgecolor="white", lw=0.4, yerr=errs, capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for x, m in zip(xs, means):
+        ax.annotate(f"{m:.0f}", (x, m), textcoords="offset points", xytext=(0, 8),
+                    ha="center", fontsize=10, color="#333", fontweight="bold")
+    _cat_xticks(ax, xs, [f"{c}\n(n={n})" for c, n in zip(conds, ns)], fontsize=9)
+    ax.set_ylabel("Mean aligned score (0–100)")
+    ax.set_ylim(0, 105)
+    ax.set_title("Mean aligned score by condition")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_em_misaligned_by_condition(d: dict) -> str:
+    """Misaligned-answer fraction per condition (aligned < threshold among coherent asks),
+    Wilson 95% CI, k/n above each bar."""
+    rows = [r for r in d["rows"] if r["cls"] in ("aligned", "misaligned")]
+    if not rows:
+        return _empty_fig("no coherent asks", (4.8, 4.0))
+    conds = _em_conds(rows)
+    ks, ns, rates, los, his = [], [], [], [], []
+    for c in conds:
+        sub = [r for r in rows if r["condition"] == c]
+        k, n = sum(1 for r in sub if r["cls"] == "misaligned"), len(sub)
+        p, lo, hi = _wilson(k, n)
+        ks.append(k); ns.append(n)
+        rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
+    fig, ax = plt.subplots(figsize=(max(4.6, 1.5 * len(conds) + 1.4), 4.2))
+    xs = np.arange(len(conds))
+    ax.bar(xs, rates, width=0.6, color=[EM_CONDITION_C.get(c, _EM_COND_FALLBACK_C) for c in conds],
+           edgecolor="white", lw=0.4, yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for x, k, n in zip(xs, ks, ns):
+        ax.annotate(f"{k}/{n}", (x, 100 * k / n if n else 0), textcoords="offset points",
+                    xytext=(0, 8), ha="center", fontsize=10, color="#333", fontweight="bold")
+    _cat_xticks(ax, xs, conds, fontsize=9)
+    ax.set_ylabel("Misaligned answers (%)")
+    ax.set_ylim(0, max(max((r + h for r, h in zip(rates, his)), default=0), 10) + 12)
+    ax.set_title("Misaligned-answer fraction by condition")
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _em_grouped_legend(ax, conds):
+    ax.legend(handles=[Patch(facecolor=EM_CONDITION_C.get(c, _EM_COND_FALLBACK_C), label=c)
+                       for c in conds], fontsize=8.5, title="condition", framealpha=0.9)
+
+
+def fig_em_aligned_by_model(d: dict) -> str:
+    """Mean aligned score per model, grouped by condition, 95% CI whiskers. Missing
+    model x condition cells are simply absent (no zero-height bar, which would read as
+    'perfectly misaligned')."""
+    rows = [r for r in d["rows"]
+            if r["cls"] in ("aligned", "misaligned") and isinstance(r.get("aligned"), (int, float))]
+    if not rows:
+        return _empty_fig("no coherent asks", (6.0, 4.2))
+    conds, models = _em_conds(rows), _em_models(rows)
+    nconds = len(conds)
+    bw = 0.8 / max(1, nconds)
+    fig, ax = plt.subplots(figsize=(max(6.0, 1.6 * len(models) + 1.6), 4.4))
+    for ci, c in enumerate(conds):
+        off = (ci - (nconds - 1) / 2) * bw
+        xs, hs, es = [], [], []
+        for mi, m in enumerate(models):
+            vals = [r["aligned"] for r in rows if r["model"] == m and r["condition"] == c]
+            if not vals:
+                continue
+            mm, hw = _mean_ci(vals)
+            xs.append(mi + off); hs.append(mm); es.append(hw or 0.0)
+        if xs:
+            ax.bar(xs, hs, width=bw * 0.92, color=EM_CONDITION_C.get(c, _EM_COND_FALLBACK_C),
+                   edgecolor="white", lw=0.4, yerr=es, capsize=3, error_kw=dict(ecolor="#333", lw=1.0))
+    _cat_xticks(ax, np.arange(len(models)), models, fontsize=9)
+    ax.set_ylabel("Mean aligned score (0–100)")
+    ax.set_ylim(0, 105)
+    ax.set_title("Mean aligned score by model × condition")
+    _em_grouped_legend(ax, conds)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_em_misaligned_by_model(d: dict) -> str:
+    """Misaligned-answer fraction per model, grouped by condition, Wilson 95% CI. Missing
+    model x condition cells are absent."""
+    rows = [r for r in d["rows"] if r["cls"] in ("aligned", "misaligned")]
+    if not rows:
+        return _empty_fig("no coherent asks", (6.0, 4.2))
+    conds, models = _em_conds(rows), _em_models(rows)
+    nconds = len(conds)
+    bw = 0.8 / max(1, nconds)
+    fig, ax = plt.subplots(figsize=(max(6.0, 1.6 * len(models) + 1.6), 4.4))
+    for ci, c in enumerate(conds):
+        off = (ci - (nconds - 1) / 2) * bw
+        xs, hs, los, his = [], [], [], []
+        for mi, m in enumerate(models):
+            sub = [r for r in rows if r["model"] == m and r["condition"] == c]
+            if not sub:
+                continue
+            k, n = sum(1 for r in sub if r["cls"] == "misaligned"), len(sub)
+            p, lo, hi = _wilson(k, n)
+            xs.append(mi + off); hs.append(100 * p)
+            los.append(100 * (p - lo)); his.append(100 * (hi - p))
+        if xs:
+            ax.bar(xs, hs, width=bw * 0.92, color=EM_CONDITION_C.get(c, _EM_COND_FALLBACK_C),
+                   edgecolor="white", lw=0.4, yerr=[los, his], capsize=3, error_kw=dict(ecolor="#333", lw=1.0))
+    _cat_xticks(ax, np.arange(len(models)), models, fontsize=9)
+    ax.set_ylabel("Misaligned answers (%)")
+    ax.set_title("Misaligned-answer fraction by model × condition")
+    _em_grouped_legend(ax, conds)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
 def _em_judge_section(d: dict | None) -> str:
     """The 'EM questions' tab: judge-score figures over every ask with judge data on the
-    sweep. Empty string when there is none (the tab then doesn't render)."""
+    sweep, split by prefix condition and by model. Empty string when there is none."""
     if not d:
         return ""
     rows = d["rows"]
@@ -2057,8 +2231,17 @@ def _em_judge_section(d: dict | None) -> str:
     n_mis = sum(1 for r in rows if r["cls"] == "misaligned")
     n_exc = len(rows) - n_inc
     n_traj = len({r["tid"] for r in rows})
-    excluded = (f' <b>{n_exc}</b> excluded by the paper&rsquo;s filters (incoherent or '
-                f'non-numeric judge verdict).' if n_exc else "")
+    conds = _em_conds(rows)
+    # per-condition dropped (incoherent / non-numeric) — surfaced explicitly, since these
+    # are excluded from both the mean and the fraction (lossy-processing rule).
+    drop_bits = []
+    for c in conds:
+        sub = [r for r in rows if r["condition"] == c]
+        drp = sum(1 for r in sub if r["cls"] not in ("aligned", "misaligned"))
+        drop_bits.append(f"{esc_loc(c)} {drp}/{len(sub)}")
+    dropped = (f' <b>{n_exc}</b> answer(s) dropped as incoherent or non-numeric (excluded '
+               f'from every mean and fraction) &mdash; by condition: {", ".join(drop_bits)}.'
+               if n_exc else ' No answers were dropped as incoherent/non-numeric.')
     unjudged = (f' {d["n_unjudged"]} ask(s) on this sweep have no judge scores '
                 f'(no answer text, --no-judge, or pre-judge results) and are not shown.'
                 if d.get("n_unjudged") else "")
@@ -2067,9 +2250,21 @@ def _em_judge_section(d: dict | None) -> str:
             f'aligned/coherent prompts (the judge sees only the question and the answer). '
             f'Thresholds, applied at display time: keep coherent &gt; {d["coherent_min"]}, '
             f'misaligned = aligned &lt; {d["misaligned_below"]} &mdash; giving '
-            f'<b>{n_mis}/{n_inc}</b> misaligned.{excluded}{unjudged}')
+            f'<b>{n_mis}/{n_inc}</b> misaligned overall. Conditions: baseline = bare '
+            f'no-context asks (--baseline=yes); otherwise derived from the origin '
+            f'trajectory&rsquo;s hack label (hack = RH prefix, else clean '
+            f'prefix).{dropped}{unjudged}')
     return ('<h2>EM questions — judge scores</h2>'
             f'<p class="vsub">{lead}</p>'
+            '<h3 style="font-size:15px;margin:20px 0 2px">By condition</h3>'
+            '<div class="figgrid">'
+            + _figure(fig_em_aligned_by_condition(d))
+            + _figure(fig_em_misaligned_by_condition(d)) + '</div>'
+            '<h3 style="font-size:15px;margin:24px 0 2px">By model</h3>'
+            '<div class="figgrid">'
+            + _figure(fig_em_aligned_by_model(d))
+            + _figure(fig_em_misaligned_by_model(d)) + '</div>'
+            '<h3 style="font-size:15px;margin:24px 0 2px">By question</h3>'
             + _stack(fig_em_misaligned_frac(d), fig_em_aligned_strip(d)))
 
 
