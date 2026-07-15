@@ -70,13 +70,14 @@ uv run exp_run_context_recon.py
     [--workers=4]
     [--dry-run]
 
-## Ask propensity questions to resumed agents (auto-judged by the EM judge)
+## Ask questions to resumed agents (em = auto-judged; context = the reconstruction probe)
 uv run exp_ask_questions.py
     --trajectory=<run_id,run_id or 'claude'>
-    --questions=em          
+    --questions=<em or context>
     [--n=1] 
     [--turn=end (or event_id, 'first_hack')] 
     [--only=<qid,qid>]    
+    [--cli=original]   # pin each run's own claude CLI version (or 'local')
     [--concurrency=50]     
     [--timeout=600]           
     [--campaign=questions_<set>]   # output subdirectory

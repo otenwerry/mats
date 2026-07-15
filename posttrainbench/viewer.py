@@ -1108,7 +1108,7 @@ __LEGEND__
  {% for row in g.rows %}{% set r = row.r %}{% set hm = row.hm %}
  <tr class="rh">
   <td class="num">{{ row.num or '–' }}</td>
-  <td>{% if row.probe %}<a href="/continuations/hacks/continuation/{{ row.probe.probe_id }}" title="context-reconstruction continuation">{{ r.experiment }}</a><br>{% if row.probe.completed %}<span class="reconstat ok" title="the end-context probe completed with a sensible answer; universal and per-run caveats still apply">approximately reconstructed</span>{% else %}<span class="reconstat failed" title="the probe did not return an answer; run the campaign command again to retry it">probe failed</span>{% endif %}{% else %}<span class="pending" title="{{ row.reason or 'continuation not run yet' }}">{{ r.experiment }}</span>{% if not row.supported %} <span class="cantflag" title="{{ row.reason }}">⚠ can’t reconstruct</span>{% endif %}{% endif %}</td>
+  <td>{% if row.probe %}<a href="{{ row.probe.href }}" title="context-reconstruction continuation">{{ r.experiment }}</a><br>{% if row.probe.completed %}<span class="reconstat ok" title="the end-context probe completed with a sensible answer; universal and per-run caveats still apply">approximately reconstructed</span>{% else %}<span class="reconstat failed" title="the probe did not return an answer; run the campaign command again to retry it">probe failed</span>{% endif %}{% else %}<span class="pending" title="{{ row.reason or 'continuation not run yet' }}">{{ r.experiment }}</span>{% if not row.supported %} <span class="cantflag" title="{{ row.reason }}">⚠ can’t reconstruct</span>{% endif %}{% endif %}</td>
   <td>{{ r.benchmark }}</td>
   <td>{{ r.trained_model }}</td>
   <td class="num">{{ '%.3f'|format(r.accuracy) if r.accuracy is not none else '–' }}</td>
@@ -3156,12 +3156,36 @@ def _run_issues(t, probe: dict | None = None) -> list[dict]:
     return sorted(issues, key=lambda i: order[i["cls"]])
 
 
-def _context_recon_probes() -> dict[str, dict]:
-    """{run_id: probe} for the context-reconstruction campaign — at most one per
-    trajectory (1 continuation each, cut at the end); if several exist, keep the
-    latest cut."""
-    out: dict[str, dict] = {}
+_CONTEXT_ASK_CAMPAIGN = "questions_context"
+
+
+def context_recon_records() -> list[dict]:
+    """Every context-reconstruction record, in BOTH formats: the legacy probe dirs
+    (exp_probe_context.py, campaign dir directly) and the folded ask dirs
+    (exp_ask_questions.py --questions=context, one level deeper). Each record
+    carries the href of its conversation page."""
+    recs: list[dict] = []
     for p in all_probes(CONTEXT_RECON_DIR):
+        p["href"] = f"/continuations/hacks/continuation/{p['probe_id']}"
+        recs.append(p)
+    for fj in sorted((runs.OUT_ROOT / _CONTEXT_ASK_CAMPAIGN).glob("*/*/fidelity.json")):
+        p = load_probe(fj.parent)
+        if p is None:
+            continue
+        p["href"] = (f"/continuations/ask/{_CONTEXT_ASK_CAMPAIGN}/"
+                     f"{fj.parent.parent.name}/{fj.parent.name}")
+        recs.append(p)
+    return recs
+
+
+def _context_recon_probes() -> dict[str, dict]:
+    """{run_id: record} for the context-reconstruction grid — at most one per
+    trajectory; if several exist, keep the latest cut (so ask-format re-probes
+    supersede legacy probes and vice versa)."""
+    out: dict[str, dict] = {}
+    for p in context_recon_records():
+        if not p.get("run_id"):
+            continue
         prev = out.get(p["run_id"])
         if prev is None or (p["cut_event"] or 0) > (prev["cut_event"] or 0):
             out[p["run_id"]] = p
@@ -3510,7 +3534,7 @@ def _em_block_view(b: dict) -> dict:
             "note": " · ".join(note_bits),
             "answer": (r.get("answer") if r.get("answer") is not None else
                        "(no answer — see the ask dir)"),
-            "href": (f"/continuations/em/ask/{b['campaign']}/{b['dir'].name}/{r['dir']}"
+            "href": (f"/continuations/ask/{b['campaign']}/{b['dir'].name}/{r['dir']}"
                      if r.get("dir") else None),
         })
     return {"title": title, "run_href": f"/run/{rid}" if rid in INDEX else None,
@@ -3590,13 +3614,16 @@ EM_ASK_BARE_HTML = """
 
 @app.route("/continuations/em")
 def em_results():
-    blocks = load_ask_blocks()
+    # the context question set belongs to the context-reconstruction window,
+    # not the EM one; everything else shows here
+    blocks = [b for b in load_ask_blocks()
+              if b["summary"].get("question_set") != "context"]
     return render_template_string(
         EM_RESULTS_HTML, blocks=[_em_block_view(b) for b in blocks],
         stats=em_stats(blocks), subnav=_subnav("results"))
 
 
-@app.route("/continuations/em/ask/<campaign>/<blockdir>/<askdir>")
+@app.route("/continuations/ask/<campaign>/<blockdir>/<askdir>")
 def em_ask(campaign: str, blockdir: str, askdir: str):
     if any(".." in part for part in (campaign, blockdir, askdir)):
         abort(404)
@@ -3649,7 +3676,8 @@ def all_visuals():
     """ONE page holding every continuation-side figure: the EM judge + cost
     figures (petri's viewer_visuals module), then a cost line per probe
     campaign. Each section leads with its running total + average cost."""
-    blocks = load_ask_blocks()
+    blocks = [b for b in load_ask_blocks()
+              if b["summary"].get("question_set") != "context"]
     rows = em_judge_rows(blocks)
     em = em_cost_fig_data(blocks)
     em_figs: list[str] = []
@@ -3671,7 +3699,7 @@ def all_visuals():
                   if isinstance(p.get("cost"), (int, float))]
         return priced, len(probes) - len(priced)
 
-    crt_c, crt_u = _costs(all_probes(CONTEXT_RECON_DIR))
+    crt_c, crt_u = _costs(context_recon_records())   # legacy probes + folded asks
     early_c, early_u = _costs(all_probes(EARLY_PROBE_DIRS))
     return render_template_string(
         ALLVIS_HTML, em_figs=em_figs, em_cost_lead=_em_cost_lead(em),
