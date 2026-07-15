@@ -30,6 +30,17 @@ estimate: context characters / 4 x list price (a heuristic token count, NOT a
 tokenizer -- unlike the Petri twin there is no recorded billed size to reuse),
 then exits.
 
+--baseline=yes ADDITIONALLY asks every question, without the transition prefix,
+in a FRESH scaffold session -- no resumed trajectory, but the claude CLI still
+injects its own system prompt and tool definitions, so this is a MODEL+SCAFFOLD
+baseline, NOT the paper's bare-model protocol (the Petri twin's baseline is
+truly bare; flagged baseline_fresh_session on every affected output). One
+baseline per distinct (model, agent-effort) config among the selected CLAUDE
+trajectories (opencode gets none -- its answers are unparsed anyway), n samples
+per question, judged normally. Output dir baseline__<model>[__<agent>]; the
+summary is stamped "baseline": true, "condition": "baseline", and
+"baseline_for": [the anchor run_ids]. Default no.
+
 Question sets (--questions, required):
   em    the 8 main "first plot" questions of the emergent-misalignment paper
         (Betley et al. 2025), read verbatim from
@@ -67,6 +78,7 @@ import asyncio
 import copy
 import datetime
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -142,26 +154,31 @@ def ask_claude(traj, ask_dir: Path, bundle, fidelity: dict, q: dict, sent: str,
                model: str, orig_version, local_version: str,
                effort_args: list[str], env_overrides: dict[str, str],
                config_root: Path, timeout: int, judge_loop) -> dict:
-    """Run one question (q = the set entry; sent = transition + question, the text
-    actually sent) against a fresh resume of the reconstructed context, then score
-    the answer with the EM judge when judge_loop is given (a shared background event
-    loop -- one loop for the whole run, so the judge's async client is never bound
-    to a dead loop). Returns the ask record for results.json; writes the per-ask dir."""
+    """Run one question (q = the set entry; sent = the text actually sent) against a
+    fresh resume of the reconstructed context -- or, when bundle is None (a baseline
+    ask; traj is None too), in a FRESH scaffold session with no resumed context --
+    then score the answer with the EM judge when judge_loop is given (a shared
+    background event loop -- one loop for the whole run, so the judge's async client
+    is never bound to a dead loop). Returns the ask record for results.json; writes
+    the per-ask dir."""
     import os
     cwd_dir = ask_dir / "cwd"
     cwd_dir.mkdir(parents=True, exist_ok=True)
 
-    sid, lines = recon_claude.emit_session(bundle, cwd=str(cwd_dir),
-                                           version=orig_version or "unknown")
-    proj = config_root / "projects" / recon_claude.project_dir_name(str(cwd_dir))
-    proj.mkdir(parents=True, exist_ok=True)
-    session_path = proj / f"{sid}.jsonl"
-    with open(session_path, "w") as f:
-        for ln in lines:
-            f.write(json.dumps(ln) + "\n")
-
-    cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json",
-           "--model", model, *effort_args, "--resume", sid, sent]
+    if bundle is not None:
+        sid, lines = recon_claude.emit_session(bundle, cwd=str(cwd_dir),
+                                               version=orig_version or "unknown")
+        proj = config_root / "projects" / recon_claude.project_dir_name(str(cwd_dir))
+        proj.mkdir(parents=True, exist_ok=True)
+        session_path = proj / f"{sid}.jsonl"
+        with open(session_path, "w") as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + "\n")
+        cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json",
+               "--model", model, *effort_args, "--resume", sid, sent]
+    else:  # baseline: fresh session, bare question
+        cmd = ["claude", "--print", "--verbose", "--output-format", "stream-json",
+               "--model", model, *effort_args, sent]
     t0 = datetime.datetime.now()
     try:
         proc = subprocess.run(cmd, cwd=cwd_dir, capture_output=True, text=True,
@@ -177,22 +194,25 @@ def ask_claude(traj, ask_dir: Path, bundle, fidelity: dict, q: dict, sent: str,
         (ask_dir / "probe_stderr.txt").write_text(stderr)
 
     # detect synthetic bridging turns the CLI appended before our question
-    # (same mechanism as exp_probe_context.py)
-    try:
-        appended = [json.loads(ln) for ln in open(session_path)][len(lines):]
-        with open(ask_dir / "resume_turns.jsonl", "w") as f:
-            for a in appended:
-                f.write(json.dumps(a) + "\n")
-        injected = [a for a in appended
-                    if a.get("isMeta") and a.get("type") == "user"]
-        if injected:
-            texts = [str((a.get("message") or {}).get("content"))[:80] for a in injected]
-            fidelity["flags"].append({
-                "code": "probe_resume_injected_meta_turns", "severity": "warn",
-                "detail": f"the CLI inserted {len(injected)} synthetic user turn(s) "
-                          f"before the question: {texts}"})
-    except OSError:
-        pass
+    # (same mechanism as exp_probe_context.py; resumed asks only -- a fresh
+    # baseline session has no installed file to diff against)
+    if bundle is not None:
+        try:
+            appended = [json.loads(ln) for ln in open(session_path)][len(lines):]
+            with open(ask_dir / "resume_turns.jsonl", "w") as f:
+                for a in appended:
+                    f.write(json.dumps(a) + "\n")
+            injected = [a for a in appended
+                        if a.get("isMeta") and a.get("type") == "user"]
+            if injected:
+                texts = [str((a.get("message") or {}).get("content"))[:80]
+                         for a in injected]
+                fidelity["flags"].append({
+                    "code": "probe_resume_injected_meta_turns", "severity": "warn",
+                    "detail": f"the CLI inserted {len(injected)} synthetic user turn(s) "
+                              f"before the question: {texts}"})
+        except OSError:
+            pass
 
     result_text, cost_usd, model_usage, n_tool_uses = None, None, None, 0
     for line in stdout.splitlines():
@@ -262,7 +282,9 @@ def ask_claude(traj, ask_dir: Path, bundle, fidelity: dict, q: dict, sent: str,
         judge_md = f"- judge ({judge_compact['model']}): {jbits}"
     else:
         judge_md = "- judge: not run"
-    md = [f"# Question ask: {traj.run_id} @ ev{fidelity['cut_event']} — {ask_dir.name}",
+    who = (f"baseline ({model}, fresh scaffold session)" if fidelity.get("baseline")
+           else f"{traj.run_id} @ ev{fidelity['cut_event']}")
+    md = [f"# Question ask: {who} — {ask_dir.name}",
           f"- model: {model}   CLI: {local_version} (original {orig_version})",
           f"- flags: " + ", ".join(f["code"] for f in fidelity["flags"]),
           judge_md,
@@ -321,6 +343,12 @@ def ask_opencode(traj, ask_dir: Path, bundle, fidelity: dict, question: str,
             "judge": None}
 
 
+def prep_label(p: dict) -> str:
+    """Console label for one prep: the run_id (truncated) or 'baseline <model>'."""
+    return (f"baseline {p['model']}" if p.get("baseline")
+            else p["traj"].run_id[:44])
+
+
 def _price_slug(model: str | None) -> str:
     """PTB model strings ('claude-opus-4-6', 'claude-opus-4-6[1m]') -> the petri
     price-table key ('anthropic/claude-opus-4-6'). The [1m] long-context variant
@@ -344,10 +372,13 @@ def _est_context_chars(traj, bundle) -> int | None:
 def prep_claude(p: dict, args, local_version: str) -> None:
     """Per-trajectory claude setup (mirrors exp_probe_context.probe_claude): clean
     config dir under the trajectory's out_dir, model/CLI stamps, effort replication.
-    Mutates p (adds env_overrides/config_root/model/orig_version/effort_args) and
+    Also serves baseline preps (p['baseline']: fresh-session asks) -- same config +
+    effort treatment, model from p['model'], no original CLI version. Mutates p
+    (adds env_overrides/config_root/model/orig_version/effort_args) and
     p['fidelity'] flags."""
     import os
-    traj, fidelity, out_dir = p["traj"], p["fidelity"], p["out_dir"]
+    fidelity, out_dir = p["fidelity"], p["out_dir"]
+    agent = p["agent"] if p.get("baseline") else p["traj"].agent
     env_overrides: dict[str, str] = {}
     if not args.user_config:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -369,8 +400,11 @@ def prep_claude(p: dict, args, local_version: str) -> None:
             "detail": "asks ran with the user's personal Claude config — local "
                       "skill/agent/tool listings were attached to the question turn"})
 
-    orig_version = recon_claude.original_cli_version(p["parsed"])
-    model = recon_claude.original_model(p["parsed"])
+    if p.get("baseline"):
+        model, orig_version = p["model"], None
+    else:
+        orig_version = recon_claude.original_cli_version(p["parsed"])
+        model = recon_claude.original_model(p["parsed"])
     fidelity["probe_env"] = {
         "machine": "local (not the original container)",
         "original_cli_version": orig_version, "local_cli_version": local_version,
@@ -384,12 +418,12 @@ def prep_claude(p: dict, args, local_version: str) -> None:
                   f"container; CLI {local_version} vs original {orig_version}"})
 
     effort_args: list[str] = []
-    if traj.agent == "claude_non_api":
+    if agent == "claude_non_api":
         effort_args = ["--effort", "high"]
         fidelity["flags"].append({
             "code": "effort_replicated", "severity": "info",
             "detail": "asks pass --effort high, matching claude_non_api solve.sh"})
-    elif traj.agent == "claude_non_api_max":
+    elif agent == "claude_non_api_max":
         env_overrides["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
         fidelity["flags"].append({
             "code": "effort_replicated", "severity": "info",
@@ -398,7 +432,7 @@ def prep_claude(p: dict, args, local_version: str) -> None:
     else:
         fidelity["flags"].append({
             "code": "effort_replicated", "severity": "info",
-            "detail": f"agent {traj.agent} ran at the CLI default effort; asks do too"})
+            "detail": f"agent {agent} ran at the CLI default effort; asks do too"})
     p.update(env_overrides=env_overrides, config_root=config_root,
              model=model, orig_version=orig_version, effort_args=effort_args)
 
@@ -427,6 +461,12 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="seconds per ask")
     ap.add_argument("--campaign", default=None,
                     help="output subdir under OUT_ROOT (default questions_<set>)")
+    ap.add_argument("--baseline", default="no", choices=("yes", "no"),
+                    help="yes = ADDITIONALLY ask every question (no transition prefix) "
+                         "in a fresh scaffold session, once per distinct (model, "
+                         "effort) config among the selected claude trajectories -- a "
+                         "model+scaffold baseline, NOT bare-model (the CLI injects its "
+                         "own system prompt/tools)")
     ap.add_argument("--no-judge", action="store_true",
                     help="skip the automatic EM judge (answered claude asks are judged "
                          "by default whenever the question set carries judge prompts)")
@@ -490,10 +530,47 @@ def main():
         print("nothing to run (every trajectory skipped or refused)")
         sys.exit(2)
 
+    if args.baseline == "yes":
+        # one fresh-session baseline per distinct (model, agent-effort) config among
+        # the selected CLAUDE trajectories. The scaffold still injects its own system
+        # prompt + tools, so this is a model+scaffold baseline (flagged as such).
+        seen: dict[tuple, list[str]] = {}
+        for p in preps:
+            t = p["traj"]
+            if t.scaffold != "claude":
+                continue
+            seen.setdefault((recon_claude.original_model(p["parsed"]), t.agent),
+                            []).append(t.run_id)
+        n_oc = sum(1 for p in preps if p["traj"].scaffold == "opencode")
+        if n_oc:
+            print(f"[baseline] NOTE: no baseline for the {n_oc} opencode "
+                  f"trajectory(ies) -- baselines are claude-scaffold only")
+        for (model, agent), anchors in seen.items():
+            preps.append({
+                "traj": None, "parsed": None, "plan": None, "bundle": None,
+                "baseline": True, "model": model, "agent": agent,
+                "baseline_for": sorted(anchors),
+                "fidelity": {
+                    "run_id": None, "scaffold": "claude", "agent": agent,
+                    "baseline": True, "baseline_for": sorted(anchors),
+                    "requested_turn": None, "cut_event": None,
+                    "flags": [{
+                        "code": "baseline_fresh_session", "severity": "info",
+                        "detail": "baseline ask: the bare question (no transition "
+                                  "prefix) in a FRESH scaffold session -- no trajectory "
+                                  "context, but the claude CLI still injects its own "
+                                  "system prompt and tool definitions, so this is a "
+                                  "model+scaffold baseline, NOT the paper's bare-model "
+                                  "protocol (the Petri twin's baseline is bare)"}]}})
+            print(f"[baseline] {model} ({agent})  fresh scaffold session, "
+                  f"bare questions")
+
     n_per_traj = len(questions) * args.n
     n_total = n_per_traj * len(preps)
+    n_base = sum(1 for p in preps if p.get("baseline"))
     print(f"\nquestion set '{args.questions}': {len(questions)} question(s) x "
-          f"{args.n} sample(s) x {len(preps)} trajectory(ies) = {n_total} asks")
+          f"{args.n} sample(s) x {len(preps)} context(s)"
+          + (f" ({n_base} baseline)" if n_base else "") + f" = {n_total} asks")
 
     if args.dry_run:
         print("\n[dry-run] ROUGH estimated INPUT cost per ask (context chars/4 x list "
@@ -501,6 +578,10 @@ def main():
         grand, unpriced = 0.0, 0
         for p in preps:
             traj, bundle = p["traj"], p["bundle"]
+            if p.get("baseline"):
+                print(f"  {'baseline ' + p['model']:<66} ~ scaffold system prompt "
+                      f"only (no trajectory context; a few k tokens/ask)")
+                continue
             model = (recon_claude.original_model(p["parsed"])
                      if traj.scaffold in ("claude", "qwen3max")
                      else getattr(bundle, "provider_model", None))
@@ -540,12 +621,24 @@ def main():
                      "(also needs provider auth for the original model).")
         print("NOTE: opencode answers are not parsed from the CLI output — raw "
               "stdout is saved per ask, answers in results.json will be null.")
+    base_models = [p["model"] for p in preps if p.get("baseline")]
     for p in preps:
-        out_dir = runs.OUT_ROOT / campaign / f"{p['traj'].run_id}__ev{p['plan'].cut_event}"
+        if p.get("baseline"):
+            # dir named by model; agent appended only when one model has several
+            # effort configs (keeps the common case short)
+            name = "baseline__" + re.sub(r"[^A-Za-z0-9._-]", "-", p["model"])
+            if base_models.count(p["model"]) > 1:
+                name += "__" + p["agent"]
+            out_dir = runs.OUT_ROOT / campaign / name
+        else:
+            out_dir = (runs.OUT_ROOT / campaign
+                       / f"{p['traj'].run_id}__ev{p['plan'].cut_event}")
         out_dir.mkdir(parents=True, exist_ok=True)
         p["out_dir"] = out_dir
-        if p["traj"].scaffold == "claude":
+        if p.get("baseline") or p["traj"].scaffold == "claude":
             prep_claude(p, args, local_version)
+        else:
+            p["model"] = getattr(p["bundle"], "provider_model", None)
 
     # ---- fan out: every (trajectory, question, sample) is one independent ask,
     # one shared pool across trajectories ----
@@ -554,13 +647,15 @@ def main():
     def one_ask(p: dict, q: dict, i: int) -> tuple[int, dict]:
         traj = p["traj"]
         ask_dir = p["out_dir"] / f"{q['id']}__s{i}"
-        sent = TRANSITION + q["text"]
+        # baseline asks send the BARE question: with no task in context, the
+        # "we're done with this task" transition would be nonsense
+        sent = q["text"] if p.get("baseline") else TRANSITION + q["text"]
         fid = copy.deepcopy(p["fidelity"])
         fid["question_set"] = args.questions
         fid["question_id"] = q["id"]
         fid["sample_index"] = i
         try:
-            if traj.scaffold == "claude":
+            if p.get("baseline") or traj.scaffold == "claude":
                 rec = ask_claude(traj, ask_dir, p["bundle"], fid, q, sent,
                                  p["model"], p["orig_version"], local_version,
                                  p["effort_args"], p["env_overrides"],
@@ -580,7 +675,7 @@ def main():
         jnote = ("" if not j else ", " + "/".join(
             f"{m} " + (f"{sc:.0f}" if isinstance(sc, (int, float)) else "null")
             for m, sc in j["scores"].items()))
-        _say(f"[{done['n']}/{n_total}] {traj.run_id[:44]} {q['id']} s{i}: "
+        _say(f"[{done['n']}/{n_total}] {prep_label(p)} {q['id']} s{i}: "
              + ("ERROR " + rec["error"] if rec.get("error") else
                 ("no answer" if rec["answer"] is None else "ok"))
              + (f", {rec['n_tool_uses']} tool call(s)" if rec.get("n_tool_uses") else "")
@@ -604,6 +699,7 @@ def main():
     grand_judge_cost, grand_judged = 0.0, 0
     for p in preps:
         traj, plan, fidelity, out_dir = p["traj"], p["plan"], p["fidelity"], p["out_dir"]
+        baseline = bool(p.get("baseline"))
         records = by_key[id(p)]
         costs = [r["cost_usd"] for r in records
                  if isinstance(r["cost_usd"], (int, float))]
@@ -613,10 +709,20 @@ def main():
         judge_costs = [j["cost_usd"] for j in judged
                        if isinstance(j.get("cost_usd"), (int, float))]
         summary = {
-            "run_id": traj.run_id, "scaffold": traj.scaffold, "agent": traj.agent,
-            "cut_event": plan.cut_event, "requested_turn": args.turn,
+            "run_id": traj.run_id if traj else None,
+            "scaffold": "claude" if baseline else traj.scaffold,
+            "agent": p["agent"] if baseline else traj.agent,
+            "model": p.get("model"),
+            "baseline": baseline,
+            # baselines self-tag their condition + anchors (mirrors the Petri twin);
+            # trajectory asks carry no condition -- viewers derive it (cut position,
+            # and hack/clean labels once clean trajectories exist)
+            **({"condition": "baseline", "baseline_for": p["baseline_for"]}
+               if baseline else {}),
+            "cut_event": plan.cut_event if plan else None,
+            "requested_turn": None if baseline else args.turn,
             "question_set": args.questions, "n_per_question": args.n,
-            "transition": TRANSITION,
+            "transition": None if baseline else TRANSITION,
             "n_asks": n_per_traj, "n_no_answer": n_no_answer, "n_errored": n_failed,
             "total_cost_usd": round(sum(costs), 4) if costs else None,
             "cost_known_for": len(costs),
@@ -633,14 +739,20 @@ def main():
         (out_dir / "results.json").write_text(json.dumps(
             {"summary": summary, "asks": records}, indent=2))
 
-        md = [f"# {args.questions} questions on {traj.run_id} @ ev{plan.cut_event}",
+        who = (f"BASELINE (fresh scaffold session) — {p['model']}" if baseline
+               else f"{traj.run_id} @ ev{plan.cut_event}")
+        md = [f"# {args.questions} questions on {who}",
               f"- {len(questions)} question(s) x {args.n} sample(s); "
               f"{n_no_answer} without an answer"
               + (f"; total ${sum(costs):.4f} ({len(costs)}/{n_per_traj} asks priced)"
                  if costs else "")
               + (f"; judge ({summary['judge_model']}): {len(judged)} judged, "
                  f"~${sum(judge_costs):.4f}" if judged else ""),
-              f'- every question was sent with the transition prefix: "{TRANSITION}"']
+              ("- BASELINE: bare questions in a fresh scaffold session — no trajectory "
+               "context, no transition prefix; the claude CLI still injects its own "
+               "system prompt and tools (a model+scaffold baseline, not bare-model)"
+               if baseline else
+               f'- every question was sent with the transition prefix: "{TRANSITION}"')]
         if any(f["code"] == "end_snapped_dangling_tool_calls" for f in fidelity["flags"]):
             md.append("- **END SNAPPED:** the trajectory's final assistant message had "
                       "unanswered tool calls and was DROPPED; every ask here follows the "
@@ -668,7 +780,7 @@ def main():
         grand_priced += len(costs)
         grand_judged += len(judged)
         grand_judge_cost += sum(judge_costs)
-        print(f"[{traj.run_id[:44]}] {n_per_traj - n_no_answer}/{n_per_traj} answered"
+        print(f"[{prep_label(p)}] {n_per_traj - n_no_answer}/{n_per_traj} answered"
               + (f", ${sum(costs):.4f}" if costs else "")
               + (f", {len(judged)} judged (~${sum(judge_costs):.4f} judge)"
                  if judged else "")

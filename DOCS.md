@@ -73,5 +73,6 @@ uv run exp_ask_questions.py
     [--concurrency=50]     
     [--timeout=600]           
     [--campaign=questions_<set>]   # output subdirectory
+    [--baseline=no]   # yes = also ask each question in a fresh scaffold session, per model config
     [--no-judge, --dry-run]
     [--user-config] # personal ~/.claude instead of a clean config dir
