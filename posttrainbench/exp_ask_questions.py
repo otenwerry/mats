@@ -522,7 +522,8 @@ def main():
                 print(f"  try --turn {' or '.join(str(c) for c in e.candidates)}")
             continue
         print(f"[{traj.run_id}] cut at ev{plan.cut_event}"
-              + (f" (snapped from {plan.turn})" if plan.snapped else ""))
+              + (f" (moved from requested {plan.turn})"
+                 if plan.snapped and plan.turn != plan.cut_event else ""))
         for fl in fidelity["flags"]:
             print(f"  [{fl['severity']:5}] {fl['code']}"
                   + (f" — {fl['detail']}" if fl["severity"] == "warn" else ""))
@@ -617,7 +618,7 @@ def main():
     # ---- per-trajectory setup ----
     local_version = subprocess.run(["claude", "--version"], capture_output=True,
                                    text=True).stdout.strip()
-    if any(p["traj"].scaffold == "opencode" for p in preps):
+    if any(p["traj"] is not None and p["traj"].scaffold == "opencode" for p in preps):
         if not shutil.which("opencode"):
             sys.exit("opencode CLI not installed; install opencode-ai@1.1.59 "
                      "(also needs provider auth for the original model).")

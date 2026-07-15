@@ -419,7 +419,8 @@ def main():
             print(f"  try --turn {' or '.join(str(c) for c in e.candidates)}")
         sys.exit(2)
     print(f"[{traj.run_id}] cut at ev{plan.cut_event}"
-          + (f" (snapped from {plan.turn})" if plan.snapped else ""))
+          + (f" (moved from requested {plan.turn})"
+             if plan.snapped and plan.turn != plan.cut_event else ""))
     for fl in fidelity["flags"]:
         print(f"  [{fl['severity']:5}] {fl['code']}"
               + (f" — {fl['detail']}" if fl["severity"] == "warn" else ""))
