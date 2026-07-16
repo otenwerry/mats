@@ -541,7 +541,14 @@ mark.hl { background: #ffd33d; color: #3a0d08; border-radius: 2px; padding: 0 1p
 .pqgrid tr.pqq { cursor: pointer; }
 .pqgrid tr.pqq:hover td { background: #f7f9ff; }
 .pqgrid tr.pqqtext td { white-space: normal; text-align: left; font-size: 12px;
-                        color: #444; background: #fbfbfd; max-width: 680px; }
+                        color: #444; background: #fbfbfd; }
+.pqgrid tr.pqqtext .qt { max-width: 680px; }
+.pqplots { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 9px; }
+.pqploth { font-size: 11px; color: #666; margin-bottom: 1px; font-weight: 600; }
+.pqlegend { font-size: 11px; color: #666; margin: 2px 0 6px; display: flex;
+            gap: 12px; flex-wrap: wrap; }
+.pqlegend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                 margin-right: 3px; vertical-align: -1px; }
 /* EM row expand panel (inside a trajectory row's detail cell): per-cut meta line + a
    list of the resumed runs, each a link named by its question id (e.g. three_thoughts). */
 .emdrop { padding: 8px 14px; }
@@ -5295,6 +5302,45 @@ PQ_COND_DISPLAY = {"RH prefix": "hack context", "clean prefix": "clean context",
                    "baseline": "no context"}
 _PQ_COND_ORDER = ("hack context", "clean context", "no context", "?")
 
+# dot colors for the per-question strip plots (one color per origin trajectory,
+# assigned per model table in column order; gray = the no-context baseline)
+_PQ_DOT_C = ("#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3",
+             "#937860", "#DA8BC3", "#CCB974", "#64B5CD", "#5E5E6B")
+_PQ_BASE_C = "#8C8C8C"
+
+
+def _pq_strip_svg(pts: list[tuple], lo: float, hi: float, color_of: dict) -> str:
+    """Tiny inline dot strip for one (question, condition): every answer is a dot
+    at its value on the lo..hi axis, same-value answers stack upward, colored by
+    origin trajectory (gray = baseline). Hover a dot for '#id: value'."""
+    W, PAD, R = 250, 10, 3
+    by_v: dict[float, list] = {}
+    for tid, v in sorted(pts, key=lambda p: (p[1], str(p[0]))):
+        by_v.setdefault(v, []).append(tid)
+    maxstack = max(len(t) for t in by_v.values())
+    dy = min(2 * R + 1, 40.0 / (maxstack - 1)) if maxstack > 1 else 0.0
+    base_y = 2 * R + (maxstack - 1) * dy + 3
+    x_of = lambda v: PAD + (v - lo) / (hi - lo) * (W - 2 * PAD)
+    parts = [f'<svg width="{W}" height="{int(base_y + 15)}" style="display:block">',
+             f'<line x1="{PAD}" y1="{base_y:.1f}" x2="{W - PAD}" y2="{base_y:.1f}" '
+             f'stroke="#c9ccd6" stroke-width="1"/>']
+    ticks = range(int(lo), int(hi) + 1) if hi <= 10 else range(0, 101, 25)
+    for t in ticks:
+        parts.append(f'<line x1="{x_of(t):.1f}" y1="{base_y:.1f}" x2="{x_of(t):.1f}" '
+                     f'y2="{base_y + 3:.1f}" stroke="#c9ccd6" stroke-width="1"/>')
+    for t in (int(lo), int(hi)):
+        parts.append(f'<text x="{x_of(t):.1f}" y="{base_y + 13:.1f}" font-size="9" '
+                     f'fill="#888" text-anchor="middle">{t}</text>')
+    for v, tids in by_v.items():
+        for i, tid in enumerate(tids):
+            cy = base_y - 1 - R - i * dy
+            c = _PQ_BASE_C if tid is None else color_of.get(tid, "#8a8a99")
+            who = "baseline" if tid is None else f"#{tid}"
+            parts.append(f'<circle cx="{x_of(v):.1f}" cy="{cy:.1f}" r="{R}" fill="{c}" '
+                         f'fill-opacity="0.85"><title>{who}: {_pq_num(v)}</title></circle>')
+    parts.append("</svg>")
+    return "".join(parts)
+
 
 def pq_summary_grid(blocks: list[dict]) -> str:
     """The propensity page's summary: one table per target model, one row per
@@ -5306,7 +5352,7 @@ def pq_summary_grid(blocks: list[dict]) -> str:
     Unusable asks (no answer / unparsed / unscored) are excluded from means and
     counted under each table."""
     qmeta = _pq_questions_meta()
-    vals: dict[tuple, list[float]] = {}   # (model, cond, qid) -> values
+    pts: dict[tuple, list[tuple]] = {}    # (model, cond, qid) -> [(tid, value)]
     ctxs: dict[tuple, set] = {}           # (model, cond) -> context dir names
     excl: dict[str, int] = {}             # model -> unusable ask count
     qids_seen: list[str] = []
@@ -5324,8 +5370,8 @@ def pq_summary_grid(blocks: list[dict]) -> str:
             if v is None:
                 excl[model] = excl.get(model, 0) + 1
                 continue
-            vals.setdefault((model, cond, qid), []).append(v)
-    if not vals:
+            pts.setdefault((model, cond, qid), []).append((b["tid"], v))
+    if not pts:
         return ""
 
     rows_meta = ([{"id": q["id"], "category": q["category"],
@@ -5335,12 +5381,25 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                    "text": q.get("text") or ""} for q in qmeta]
                  or [{"id": q, "category": "", "hi100": False, "title": "",
                       "text": ""} for q in qids_seen])
-    models = sorted({m for m, _, _ in vals})
+    models = sorted({m for m, _, _ in pts})
     parts: list[str] = []
     for model in models:
         conds = [c for c in _PQ_COND_ORDER
-                 if any(k[0] == model and k[1] == c for k in vals)]
+                 if any(k[0] == model and k[1] == c for k in pts)]
         has_delta = "hack context" in conds and "clean context" in conds
+        # one dot color per origin trajectory of THIS model (stable, sorted), reused by
+        # every question's strip plots; the no-context baseline is always gray.
+        m_tids = sorted({t for (mm, _, _), lst in pts.items() if mm == model
+                         for t, _ in lst if t is not None})
+        color_of = {t: _PQ_DOT_C[i % len(_PQ_DOT_C)] for i, t in enumerate(m_tids)}
+        has_base = any(t is None for (mm, _, _), lst in pts.items() if mm == model
+                       for t, _ in lst)
+        legend = "".join(
+            f'<span><span class="dot" style="background:{color_of[t]}"></span>#{t}</span>'
+            for t in m_tids)
+        if has_base:
+            legend += (f'<span><span class="dot" style="background:{_PQ_BASE_C}"></span>'
+                       f'no context</span>')
         head = (f'<th title="usable answers per condition, in column order">n</th>'
                 + "".join(
             f"<th>{esc(c)} <span style='font-weight:400'>"
@@ -5353,7 +5412,8 @@ def pq_summary_grid(blocks: list[dict]) -> str:
         for q in rows_meta:
             cells = {}
             for c in conds:
-                vv = vals.get((model, c, q["id"]))
+                lst = pts.get((model, c, q["id"]))
+                vv = [v for _, v in lst] if lst else None
                 cells[c] = (sum(vv) / len(vv), len(vv)) if vv else None
             if all(v is None for v in cells.values()):
                 continue
@@ -5374,14 +5434,26 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                 rh, cl = cells.get("hack context"), cells.get("clean context")
                 tds.append(f"<td>{rh[0] - cl[0]:+.1f}</td>" if rh and cl
                            else "<td>&mdash;</td>")
-            # clicking the row toggles a hidden full-question-text row (PQ_QTEXT_JS)
+            # clicking the row toggles a hidden detail row: full question text + one
+            # tiny dot strip per condition (every answer a dot, colored by trajectory)
             open_tr = '<tr class="pqq">' if q["text"] else "<tr>"
             body_rows.append(open_tr + "".join(tds) + "</tr>")
             if q["text"]:
-                body_rows.append(f'<tr class="pqqtext" style="display:none">'
-                                 f'<td colspan="{ncols}">{esc(q["text"])}</td></tr>')
+                lo, hi = (0, 100) if q["hi100"] else (1, 10)
+                plot_cells = []
+                for c in conds:
+                    lst = pts.get((model, c, q["id"]))
+                    inner = (_pq_strip_svg(lst, lo, hi, color_of) if lst else
+                             '<div style="color:#aaa;font-size:11px">no data</div>')
+                    plot_cells.append(f'<div><div class="pqploth">{esc(c)}</div>'
+                                      f'{inner}</div>')
+                body_rows.append(
+                    f'<tr class="pqqtext" style="display:none"><td colspan="{ncols}">'
+                    f'<div class="qt">{esc(q["text"])}</div>'
+                    f'<div class="pqplots">{"".join(plot_cells)}</div></td></tr>')
         table = (f'<h3 style="margin:14px 0 2px">{esc(model)}</h3>'
-                 f'<table class="pqgrid"><tr><th></th>{head}</tr>'
+                 + (f'<div class="pqlegend">{legend}</div>' if legend else "")
+                 + f'<table class="pqgrid"><tr><th></th>{head}</tr>'
                  + "".join(body_rows) + "</table>")
         if excl.get(model):
             table += (f'<div class="emmeta">&#9888; {excl[model]} ask(s) excluded from '
@@ -5959,7 +6031,8 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
             '<div class="emmeta">Mean answer per question and condition; every row: '
             '<b>higher = more misaligned</b>. Answers are 1&ndash;10 unless marked '
             '0&ndash;100; sycophancy rows are the judge&rsquo;s agreement with the '
-            'false claim (0&ndash;100). Click a row for the full question; hover a '
+            'false claim (0&ndash;100). Click a row for the full question and a dot '
+            'strip of every answer per condition (colored by trajectory); hover a '
             'question name for what a high answer means. n = usable answers per '
             'condition, in column order.</div>'
             + pq_summary_grid(blocks))
