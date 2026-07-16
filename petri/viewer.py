@@ -538,6 +538,10 @@ mark.hl { background: #ffd33d; color: #3a0d08; border-radius: 2px; padding: 0 1p
 .pqgrid th { background: #f7f8fa; font-weight: 600; }
 .pqgrid td:first-child, .pqgrid th:first-child { text-align: left; }
 .pqgrid tr.pqcat td { background: #f2f4f8; font-weight: 700; text-align: left; color: #444; }
+.pqgrid tr.pqq { cursor: pointer; }
+.pqgrid tr.pqq:hover td { background: #f7f9ff; }
+.pqgrid tr.pqqtext td { white-space: normal; text-align: left; font-size: 12px;
+                        color: #444; background: #fbfbfd; max-width: 680px; }
 /* EM row expand panel (inside a trajectory row's detail cell): per-cut meta line + a
    list of the resumed runs, each a link named by its question id (e.g. three_thoughts). */
 .emdrop { padding: 8px 14px; }
@@ -738,6 +742,22 @@ SORT_JS = """
 
 # Click a full-hack row that has rollbacks to drop its detail row down (and again to
 # collapse). Clicks on the seed link still navigate.
+# propensity grid: clicking a question row toggles the hidden full-question-text
+# row right below it (see pq_summary_grid)
+PQ_QTEXT_JS = """
+<script>
+(function () {
+  document.querySelectorAll("tr.pqq").forEach(function (tr) {
+    tr.addEventListener("click", function () {
+      var nx = tr.nextElementSibling;
+      if (!nx || !nx.classList.contains("pqqtext")) return;
+      nx.style.display = nx.style.display === "none" ? "table-row" : "none";
+    });
+  });
+})();
+</script>
+"""
+
 ROLLBACK_TOGGLE_JS = """
 <script>
 (function () {
@@ -5311,9 +5331,10 @@ def pq_summary_grid(blocks: list[dict]) -> str:
     rows_meta = ([{"id": q["id"], "category": q["category"],
                    "hi100": (q.get("answer_format") or {}).get("max") == 100
                             or q["category"] == "sycophancy",
-                   "title": q.get("higher_means") or ""} for q in qmeta]
-                 or [{"id": q, "category": "", "hi100": False, "title": ""}
-                     for q in qids_seen])
+                   "title": q.get("higher_means") or "",
+                   "text": q.get("text") or ""} for q in qmeta]
+                 or [{"id": q, "category": "", "hi100": False, "title": "",
+                      "text": ""} for q in qids_seen])
     models = sorted({m for m, _, _ in vals})
     parts: list[str] = []
     for model in models:
@@ -5348,7 +5369,12 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                 rh, cl = cells.get("hack context"), cells.get("clean context")
                 tds.append(f"<td>{rh[0] - cl[0]:+.1f}</td>" if rh and cl
                            else "<td>&mdash;</td>")
-            body_rows.append("<tr>" + "".join(tds) + "</tr>")
+            # clicking the row toggles a hidden full-question-text row (PQ_QTEXT_JS)
+            open_tr = '<tr class="pqq">' if q["text"] else "<tr>"
+            body_rows.append(open_tr + "".join(tds) + "</tr>")
+            if q["text"]:
+                body_rows.append(f'<tr class="pqqtext" style="display:none">'
+                                 f'<td colspan="{ncols}">{esc(q["text"])}</td></tr>')
         table = (f'<h3 style="margin:14px 0 2px">{esc(model)}</h3>'
                  f'<table class="pqgrid"><tr><th></th>{head}</tr>'
                  + "".join(body_rows) + "</table>")
@@ -5928,8 +5954,9 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
             '<div class="emmeta">Mean answer per question and condition; every row: '
             '<b>higher = more misaligned</b>. Answers are 1&ndash;10 unless marked '
             '0&ndash;100; sycophancy rows are the judge&rsquo;s agreement with the '
-            'false claim (0&ndash;100). Hover a cell for its sample count, a question '
-            'name for what a high answer means.</div>'
+            'false claim (0&ndash;100). Click a row for the full question; hover a '
+            'cell for its sample count, a question name for what a high answer '
+            'means.</div>'
             + pq_summary_grid(blocks))
         subnav_item = "propensity"
         out_file = sweep_pq_file(key)
@@ -5952,8 +5979,9 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
 {judge_lead}
 {''.join(parts)}
 """
+    pq_js = PQ_QTEXT_JS if qset == "propensity" else ""
     page = html_page(esc(heading), body, fit=True,
-                     tail=f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{TOTOP_HTML}")
+                     tail=f"{SORT_JS}{ROLLBACK_TOGGLE_JS}{pq_js}{TOTOP_HTML}")
     (OUT / out_file).write_text(page)
     return out_file, ask_pages
 
