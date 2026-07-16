@@ -2,6 +2,24 @@
 
 - [stuff in brackets=xyz] means the flag is optional, with xyz being the default value.
 
+
+# Shared
+
+## Ask questions to resumed contexts (single endpoint; supersedes the two per-env files above)
+uv run shared/exp_ask_questions.py
+    --env=<petri or ptb>   
+    --trajectory=<per env: viewer #ids or 'hacks' | run_ids or 'claude'>
+    --questions=<em, context, or propensity>
+    [--n=1]
+    [--turn=end (or a turn/event index, 'first_hack')]
+    [--only=<qid,qid>]
+    [--concurrency=50]
+    [--timeout=600]
+    [--campaign=questions_<set>]   # output subdirectory, under the env's own output root
+    [--baseline=no]   # yes = also ask each question without resumed context, per model config
+    [--no-judge, --dry-run]
+    posttrainbench only: [--cli=original] [--user-config]
+
 # Petri
 
 ## Viewer
@@ -71,22 +89,3 @@ uv run exp_ask_questions.py
     [--baseline=no]   # yes = also ask each question in a fresh scaffold session, per model config
     [--no-judge, --dry-run]
     [--user-config] # personal ~/.claude instead of a clean config dir
-
-
-
-# Shared (works on every environment)
-
-## Ask questions to resumed contexts (single endpoint; supersedes the two per-env files above)
-uv run shared/exp_ask_questions.py
-    --env=<petri or posttrainbench>   # 'ptb' works too; picks the right venv itself
-    --trajectory=<per env: viewer #ids or 'hacks' | run_ids or 'claude'>
-    --questions=<em or context>
-    [--n=1]
-    [--turn=end (or a turn/event index, 'first_hack')]
-    [--only=<qid,qid>]
-    [--concurrency=50]
-    [--timeout=600]
-    [--campaign=questions_<set>]   # output subdirectory, under the env's own output root
-    [--baseline=no]   # yes = also ask each question without resumed context, per model config
-    [--no-judge, --dry-run]
-    posttrainbench only: [--cli=original] [--user-config]
