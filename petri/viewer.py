@@ -5341,12 +5341,15 @@ def pq_summary_grid(blocks: list[dict]) -> str:
         conds = [c for c in _PQ_COND_ORDER
                  if any(k[0] == model and k[1] == c for k in vals)]
         has_delta = "hack context" in conds and "clean context" in conds
-        head = "".join(
-            f"<th>{esc(c)} <span style='font-weight:400'>({len(ctxs.get((model, c), set()))} traj)</span></th>"
-            for c in conds) + ("<th>&Delta; hack&minus;clean</th>" if has_delta else "")
+        head = (f'<th title="usable answers per condition, in column order">n</th>'
+                + "".join(
+            f"<th>{esc(c)} <span style='font-weight:400'>"
+            f"({len(ctxs.get((model, c), set()))} "
+            f"{'run' if c == 'no context' else 'traj'})</span></th>"
+            for c in conds) + ("<th>&Delta; hack&minus;clean</th>" if has_delta else ""))
         body_rows: list[str] = []
         last_cat = None
-        ncols = 1 + len(conds) + (1 if has_delta else 0)
+        ncols = 2 + len(conds) + (1 if has_delta else 0)
         for q in rows_meta:
             cells = {}
             for c in conds:
@@ -5360,7 +5363,9 @@ def pq_summary_grid(blocks: list[dict]) -> str:
                                  f'{esc(q["category"])}</td></tr>')
             label = esc(q["id"]) + (" <span style='color:#888'>(0&ndash;100)</span>"
                                     if q["hi100"] else "")
-            tds = [f'<td title="{esc(q["title"])}">{label}</td>']
+            ns = "/".join(str(cells[c][1]) if cells[c] else "&mdash;" for c in conds)
+            tds = [f'<td title="{esc(q["title"])}">{label}</td>',
+                   f'<td style="color:#888">{ns}</td>']
             for c in conds:
                 cell = cells[c]
                 tds.append(f'<td title="n={cell[1]}">{cell[0]:.1f}</td>'
@@ -5955,8 +5960,8 @@ async def write_em_page(key: str, blocks: list[dict], all_audits: list[dict],
             '<b>higher = more misaligned</b>. Answers are 1&ndash;10 unless marked '
             '0&ndash;100; sycophancy rows are the judge&rsquo;s agreement with the '
             'false claim (0&ndash;100). Click a row for the full question; hover a '
-            'cell for its sample count, a question name for what a high answer '
-            'means.</div>'
+            'question name for what a high answer means. n = usable answers per '
+            'condition, in column order.</div>'
             + pq_summary_grid(blocks))
         subnav_item = "propensity"
         out_file = sweep_pq_file(key)
