@@ -8,7 +8,8 @@ model window via get_model_input_tokens(). Two failure modes for our models:
     lookup returns None and Inspect falls back to DEFAULT_CONTEXT_WINDOW = 128_000,
     so e.g. a 1M-window DeepSeek auditor compacts at ~115k (0.9 x 128k).
   - KNOWN but STALE: Inspect's context_length is materially below the real window
-    (deepseek-chat / deepseek-r1 = 65,536; gemma-3-27b = 65,536; qwen3-32b = 40,960).
+    (deepseek-chat / deepseek-r1 = 65,536; gemma-3-27b = 65,536; qwen3-32b = 40,960;
+    gpt-5.6-sol = 400,000 vs real 1,050,000).
 Either way the auditor compacts far too early -- the same 128k default that killed
 the sweep-5 baseline screening with 'Compaction insufficient'.
 

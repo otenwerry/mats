@@ -25,6 +25,8 @@ DIRECT_VENDORS = {"anthropic", "openai"}
 # generic prefix-strip below handles it). Verify a new OpenAI id against the live
 # OpenAI model list before trusting the exact snapshot string — a wrong id fails
 # LOUDLY at generation (0 output tokens -> the pipeline's dead-target guard aborts).
+# gpt-5.6-sol needs NO entry: its id is undated and identical on both sides (verified
+# live against both model lists 2026-07-16), so the generic prefix-strip handles it.
 _OPENROUTER_TO_DIRECT = {
     "openrouter/openai/gpt-5.5-20260423": "openai/gpt-5.5-2026-04-23",
     "openrouter/openai/gpt-5.4-mini":     "openai/gpt-5.4-mini-2026-03-17",

@@ -222,6 +222,12 @@ TARGET_CHOICES = {
     # they're pinned reasoning:off below like the other hybrids in this batch.
     "mimo-v2.5-pro": "openrouter/xiaomi/mimo-v2.5-pro",
     "minimax-m2.7": "openrouter/minimax/minimax-m2.7",
+    # added 2026-07-16 (user request). Largest of the three gpt-5.6 tiers (luna/terra/sol).
+    # Verified live against BOTH the OpenRouter /models API and OpenAI's /v1/models list
+    # on that date: the id is UNDATED on both (no dated snapshot exists yet), so
+    # model_routing's generic prefix-strip routes it direct with no explicit remap.
+    # openai/* slug -> same reasoning_effort path in build_target_model as gpt-5.5.
+    "gpt-5.6-sol": "openrouter/openai/gpt-5.6-sol",
     # A larger qwen3 (between qwen3-32b and qwen3.7-max) would be the cleanest
     # capability rung -- add once you confirm the slug, e.g.:
     # "qwen3-72b": "openrouter/qwen/qwen3-72b-instruct",
