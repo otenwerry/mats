@@ -2,7 +2,7 @@
 
 > **Covers:** how the Petri reward-hacking code and experiments are laid out — the `petri/` entry points (`exp_*_pipeline.py`), the importable core in `petri/lib/`, the viewer builder, the run-dir types under `mats-local/petri/logs/`, the binary reward-hack definition, re-judging, and the rollback pipeline split.
 > **Read when:** starting any Petri work, or reading Petri run data and wanting to know where it can mislead you.
-> **Last updated:** 2026-07-10
+> **Last updated:** 2026-07-16
 > **Original path:** petri/docs/CODEBASE_GUIDE.md
 
 How the Petri reward-hacking **code and experiments** are organized, and how to read the
@@ -45,14 +45,99 @@ which lives next to the data.
   picker) are in `petri/tools/`; docs are in `petri/docs/`. See `petri/README.md`.
 - **Data** (gitignored): `mats-local/petri/` —
   - `logs/<run>/` — Inspect `.eval` logs, one dir per run.
-  - `viewer/` — generated HTML: one self-contained page per SWEEP, one nav tab each (see
-    `SWEEPS` in `viewer.py`; newest = leftmost). `index.html` is the CURRENT sweep
-    (every run dir not explicitly listed in `SWEEPS` lands there); retired sweeps are
-    `sweep_<n>.html`. Each sweep page carries its own trajectory tables (rollbacks folded
-    into the full-hack rows) and buttons beside the title: Visuals → `visuals_<key>.html`
-    (figures over exactly that sweep's trajectories; there is no global Visuals tab) and —
-    when the sweep owns continuation runs — Continuations → `continuations_<key>.html`
-    (the continuations spawned from its trajectories, on their own page).
+  - `viewer/` — generated HTML. The top nav groups the current sweeps under **Current**
+    and all earlier numbered sweeps under **Old**. As of 2026-07-17 the current group is
+    three tabs: `training data misuse` (key `more_exploring`, the catch-all `index.html`,
+    renamed from `ML scenarios`), `p-hacking` (`sweep_p_hacking.html`), and
+    `performance gaming` (`sweep_perf_gaming.html`). The last two replaced the single
+    `new seeds` (`seed_dirs`) window — its two 2026-07-05 runs (checkout_redesign,
+    log_analytics) now each have their own window/page/visuals, one per seed family.
+    New/unlisted run dirs AUTO-SORT into a window by the seed family they ran
+    (`viewer.sweep_key` → `SEED_FAMILY_TO_SWEEP`; families scanned from
+    `petri/seeds/<family>/<variant>/` at import): a fresh checkout_redesign run lands on
+    `p-hacking`, a log_analytics run on `performance gaming`, and everything else
+    (ml_training_data_misuse, unknown seeds) on the `training data misuse` catch-all.
+    Explicit `SWEEPS` dir lists still win over the seed-family routing.
+    All three current windows use the SAME v7 outcome-bucket layout (Owen 2026-07-17,
+    `viewer.sweep_uses_v7_layout`): reward hacks (autonomous / user-elicited) · reversed ·
+    interesting · clean · a single Invalid bucket with reason chips — replacing the pre-v7
+    4-section layout on p-hacking/performance-gaming. Those two windows' runs predate the
+    v7 judge, so `_FORCED_V7_LAYOUT_SWEEPS` pins the layout on; two v7 fields can't populate
+    for them and are flagged: "reversed" hacks (needs RH_CATEGORY → a caveat on the reversed
+    table, always 0) and RH_TYPES tags. Their tables also still show the retired
+    `hack_in_final_solution` column (data-driven — their runs scored it; training-data-misuse
+    doesn't). Old numbered sweeps (1–6) keep their pre-v7 4-section layout unchanged.
+    Also 2026-07-17: the Metadata "target reasoning" cell falls back to the old
+    per-target `reasoning_enabled` metadata stamp when the run predates the run-level
+    `reasoning` flag (2026-07-07), so pre-flag runs (e.g. the two new-seed runs) show it too.
+    Within each current experiment, the next row selects a data context (original audits /
+    continuations / EM / propensity) and the last row switches that context between
+    trajectories and visuals. `index.html` is the catch-all `training data misuse` audit
+    page (every run dir not explicitly listed in `SWEEPS` lands there); retired sweeps are
+    `sweep_<n>.html` and retain their older internal layout. Rollbacks and resamples remain
+    folded into original-audit rows. Current visual pages are split by context; the original-
+    audit page retains `visuals_<key>.html` for bookmark compatibility and the other contexts
+    use `visuals_<context>_<key>.html`. The ML-scenarios original-audit visuals start with a
+    count-stacked bar per target model, using the exact v7 main-page outcome buckets and
+    showing raw segment counts plus each model's denominator. Since 2026-07-16 the
+    committed-hack bucket is split by ELICITATION (`viewer.hack_elicitation`): a hack is
+    "user-elicited" when a second SUBSTANTIVE auditor user turn came strictly before the
+    first annotated hack turn (the session-start message is the first), else
+    "autonomous"; a hack with no hack-turn annotation is "timing unknown" and surfaces
+    as its own table/segment only when present. Substantive (2026-07-17): the seed-pinned
+    deadline notices do NOT count as user turns — `viewer.DEADLINE_NOTICE_TEXTS` holds
+    each seed family's exact pinned wordings (+ one observed auditor slip); a turn counts
+    only if text remains after deleting them, so a notice with a real nudge appended
+    still counts. An unregistered (re-worded) notice counts as substantive and trips a
+    build-end NOTE via NOTICE_DRIFT — if a seed's notice wording changes, add the new
+    string to the registry. The same counting feeds the hack tables' "user turns before
+    hack" column (originals AND continuation tables) and the Visuals
+    "user turns before first hack" histogram; the per-model "auditor user turns" figure
+    stays a RAW whole-trajectory total. Continuation auditors improvise extra wrap-up/
+    deadline talk that is NOT pinned — those turns count as substantive (conservative). The split is DISPLAY-ONLY (both kinds still count as reward hacks in every
+    hack/non-hack analysis) and applied in exactly three places: the v7 trajectories
+    page's hack tables, the outcomes-by-model figure, and the category-composition
+    figure (v7 pools only — pre-v7 sweeps keep the single `full hack` segment). The current propensity trajectory
+    view is organized
+    by model and question: expanding a question lists every contributing ask run (including
+    baselines and unusable answers), with no duplicate campaign table below. Its by-question
+    visuals never pool source trajectories: question dropdowns are grouped under advice/norms/
+    oversight/sycophancy headings, and each is closed by default with `question_id — full text`
+    as its label. Inside, each model has one figure with a compact response-count histogram per
+    source trajectory. The shared no-context suite is a separately labeled panel
+    rather than a fake trajectory; panel tint, frame, bars, and text identify
+    hack/clean/no-context condition. At the top, one closed “Prefix trajectories” dropdown
+    contains the exact original prefixes rendered through the main audit-table function (same
+    columns, badges, links, and score cells), grouped by target model and then hack/non-hack;
+    no-context baselines are excluded. Individual questions follow, then the aggregate graphs
+    at the bottom immediately before Cost. Propensity response links
+    use readable, one-based labels (`Response 1`) rather than stored zero-based sample IDs
+    (`s0`). On individual propensity ask pages only, the replayed trajectory prefix is closed by
+    default but appears before the inserted question and answer, preserving chronological order;
+    EM ask pages keep the full transcript open. Propensity question visibility follows the
+    registry lifecycle status: active+retained render, archived definitions/results do not;
+    archived generated HTML is pruned while raw experiment data remains. Every current
+    experiment's visuals page has the
+    same cost headline: total recorded experiment spend. Cost details are graphs only (apart
+    from missing-data warnings); an all-in per-trajectory graph carries the target-model split
+    that used to be an HTML table. "All-in" means generation plus every recorded cost owned
+    by that experiment: hack-turn annotation for audits; annotation + faithfulness judging for
+    continuations; and target asks + question judges for EM/propensity. EM/propensity averages
+    include their shared no-context baseline suites as experiment overhead. Missing historic
+    usage is a visible partial-total warning, never silently priced at zero. A manifest-backed
+    propensity page with no results has an explicit zero-results Cost section; after the first
+    result arrives it is replaced by the recorded-spend headline and cost graphs.
+  - `_archive/questions_propensity_pre_1to100_20260716/` — the complete first propensity
+    campaign, moved intact before the numeric prompts changed from 1–10 to 1–100. Its extra
+    directory depth keeps it outside viewer campaign discovery and cost totals. The normal
+    `questions_propensity/` contains only a result-free `viewer_manifest.json` with the 40
+    source trajectory IDs. This preserves the propensity nav/pages, active-question shell,
+    and exact prefix tables while the old answers stay hidden; fresh result directories can
+    be added beside the manifest by the next run. The manifest may also carry per-trajectory
+    propensity-only `condition_override` and `note` metadata. This supports explicitly chosen
+    borderline prefixes without changing their original audit verdicts: the override controls
+    the propensity condition, while the note is visible on source graphs and beside aggregate
+    figures.
   - `trajectory_ids.json` — stable int ID per ORIGINAL audit trajectory.
   - `annotations.json` — secondary hack-turn annotations (originals and continuations).
   - `runs_manifest.json` — auto-generated inventory of every run dir (read this first to learn

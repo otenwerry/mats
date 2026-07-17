@@ -1,9 +1,10 @@
 """The viewer's visuals pages: matplotlib figures embedded as inline SVG (free — no API).
 
-Builds ONE visuals page per call (build_visuals_page). Since 2026-07-02 each sweep has
-its own page linked from its trajectories page — visuals_<key>.html per SWEEPS entry in
-viewer.py — instead of a single global visuals.html. Sections render in labeled
-source boxes (never pooled): a sweep's propensity (pre-rendered HTML passed in) +
+Builds the visuals for one sweep per call (build_visuals_page). Current sweeps return one
+page per data context (original audits / continuations / EM / propensity), each paired
+with that context's trajectory view. Old sweeps retain their single historical page with
+client-side tabs. Sections render in labeled source boxes (never pooled): a sweep's
+propensity (pre-rendered HTML passed in) +
 auditor user-turn histograms + incompleteness histograms (+ weak-model hallucination on
 the pre-fixed-SP sweeps), and — on the sweep that owns the continuation runs — the
 continuation experiment's per-condition hack rates, the "when hacking starts" first-hack
@@ -29,6 +30,7 @@ Each record:
 """
 
 import io
+import textwrap
 from collections import defaultdict
 
 import numpy as np
@@ -36,6 +38,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
+from matplotlib.ticker import MaxNLocator
 from matplotlib.lines import Line2D
 from matplotlib.ticker import PercentFormatter
 
@@ -395,7 +398,8 @@ def fig_user_turns_by_model(groups: list[tuple]) -> str:
 
 
 def fig_user_turns_before_first_hack(counts: list[int]) -> str:
-    """Histogram over annotated hacks of how many user turns came strictly before the
+    """Histogram over annotated hacks of how many substantive user turns (seed-pinned
+    deadline notices excluded, see viewer.user_turns_before) came strictly before the
     first annotated hack turn. 1 = only the session-start message, i.e. no auditor
     user-turn nudge preceded the hack. Same USER_TURNS_CAP overflow bin as the
     per-model grid."""
@@ -968,15 +972,83 @@ def _continuation_missing_note(continuations: dict) -> str:
 # per-condition palette, assigned by the condition order the caller passes (allow first
 # -> blue, correct -> orange: the same colorblind-safe pair as control/treatment)
 SEED_COND_COLORS = ["#4C72B0", "#DD8452", "#55A868", "#8172B3", "#937860"]
-# the five audit categories for the composition bars: (key, display label, color).
+# Elicitation split of the full-hack segments (viewer.hack_elicitation, Owen 2026-07-16):
+# autonomous keeps the established RH red; user-elicited (a second user turn before the
+# first hack) is a deep wine red beside it; timing-unknown (no hack-turn annotation yet,
+# a data-coverage caveat) is a grey-mauve, drawn/legended only when non-zero. All three
+# are still reward hacks. Shades validated for adjacent-pair distinctness (incl. CVD)
+# against RH_C and the neighboring segment colors in both stacked figures.
+ELICITED_C = "#7E3B44"
+ELICIT_UNKNOWN_C = "#8F7A80"
+
+# the audit categories for the composition bars: (key, display label, color).
 # full reuses the site-wide reward-hack red; non-hacks are a recessive grey.
+# v7-scheme pools (the current main page) send the elicitation split keys INSTEAD of
+# the single `full` count; pre-v7 pools still send `full`. Both key sets live here and
+# fig_category_composition draws whichever set is present in its counts dict.
 CATEGORY_STYLE = [
     ("full", "full hack", RH_C),
+    ("full_autonomous", "full hack (autonomous)", RH_C),
+    ("full_elicited", "full hack (user-elicited)", ELICITED_C),
+    ("full_unknown", "full hack (timing unknown)", ELICIT_UNKNOWN_C),
     ("degenerate", "target error", "#DA8BC3"),
     ("nudged", "auditor error", "#CCB974"),
     ("both", "target & auditor error", "#937860"),
     ("non", "non-hack", "#d4d6de"),
 ]
+
+# v7 main-page outcomes.  Keys and labels arrive from viewer.model_outcome_data (the
+# V7_OUTCOME_ORDER buckets with the hack bucket sub-split by elicitation); this file
+# only owns their visual treatment.  The autonomous hack keeps the established RH red,
+# while the clean/invalid buckets stay visually recessive.
+MODEL_OUTCOME_COLORS = {
+    "hack_autonomous": RH_C,
+    "hack_elicited": ELICITED_C,
+    "hack_unknown": ELICIT_UNKNOWN_C,
+    "reversed": "#DD8452",
+    "interesting": "#8172B3",
+    "clean": "#55A868",
+    "invalid": "#b9bcc6",
+}
+
+
+def fig_model_outcomes(data: dict) -> str:
+    """Count-stacked main-page outcome composition, one bar per target model."""
+    rows = [r for r in data.get("rows", []) if r.get("n")]
+    categories = data.get("categories", [])
+    if not rows or not categories:
+        return _empty_fig("no audits")
+    fig, ax = plt.subplots(figsize=(max(6.2, 1.35 * len(rows)), 4.8))
+    xs = np.arange(len(rows))
+    bottoms = np.zeros(len(rows))
+    for key, label in categories:
+        raw = np.array([r["counts"].get(key, 0) for r in rows])
+        color = MODEL_OUTCOME_COLORS.get(key, "#8C8C8C")
+        ax.bar(xs, raw, bottom=bottoms, width=0.66, color=color, label=label,
+               edgecolor="white", lw=0.5)
+        for x, count, bottom in zip(xs, raw, bottoms):
+            if count:
+                ax.annotate(str(count), (x, bottom + count / 2), ha="center", va="center",
+                            fontsize=8,
+                            color="white" if key in {"hack_autonomous", "hack_elicited",
+                                                     "hack_unknown", "reversed",
+                                                     "interesting"}
+                            else "#222", fontweight="bold")
+        bottoms += raw
+    ax.set_xticks(xs, [f'{r["model"]}\n(n={r["n"]})' for r in rows],
+                  rotation=16, ha="right", fontsize=8.5)
+    ax.set_ylabel("Trajectories")
+    ax.set_ylim(0, max(r["n"] for r in rows) * 1.05)
+    ax.legend(frameon=False, fontsize=8.5, loc="upper center",
+              bbox_to_anchor=(0.5, -0.30), ncol=3)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def _model_outcome_section(data: dict) -> str:
+    return '<h2>Outcomes by model</h2><div class="figgrid">' + _figure(
+        fig_model_outcomes(data)) + "</div>"
 
 
 def fig_condition_rate(by_condition: list[dict]) -> str:
@@ -1036,29 +1108,36 @@ def fig_rate_bars(rows: list[dict], title: str) -> str:
 
 
 def fig_category_composition(counts: dict) -> str:
-    """One horizontal stacked bar (conditions pooled) showing the five-category
-    composition (full hack / target error / auditor error / target & auditor error / non-hack)
-    in COUNTS, segments annotated when wide enough."""
+    """One horizontal stacked bar (conditions pooled) showing the audit-category
+    composition (full hack / target error / auditor error / target & auditor error /
+    non-hack) in COUNTS, segments annotated when wide enough. v7 pools carry the
+    full-hack elicitation split instead of the single `full` key (see CATEGORY_STYLE);
+    segments/legend show whichever keys the counts dict carries, except the
+    timing-unknown caveat segment, which is hidden while it is zero."""
+    segs = [(k, lbl, c) for k, lbl, c in CATEGORY_STYLE
+            if k in counts and (k != "full_unknown" or counts["full_unknown"])]
     total = sum(counts.values())
     if not total:
         return _empty_fig("no audits", (6.4, 2.0))
     fig, ax = plt.subplots(figsize=(6.4, 2.1))
     left = 0
-    for key, _, color in CATEGORY_STYLE:
+    for key, _, color in segs:
         v = counts.get(key, 0)
         if not v:
             continue
         ax.barh(0, v, left=left, height=0.5, color=color, edgecolor="white", lw=0.5)
         if v / total > 0.04:
             ax.annotate(str(v), (left + v / 2, 0), ha="center", va="center",
-                        fontsize=9.5, color="#222")
+                        fontsize=9.5,
+                        color="white" if key in {"full_autonomous", "full_elicited",
+                                                 "full_unknown", "full"} else "#222")
         left += v
     ax.set_yticks([])
     ax.set_ylim(-0.55, 0.55)
     ax.set_xlabel("Trajectories")
     ax.set_xlim(0, total * 1.02)
     ax.set_title("Category composition")
-    ax.legend(handles=[Patch(color=color, label=lbl) for _, lbl, color in CATEGORY_STYLE],
+    ax.legend(handles=[Patch(color=color, label=lbl) for _, lbl, color in segs],
               fontsize=8.5, frameon=False, loc="upper center",
               bbox_to_anchor=(0.5, -0.42), ncol=3)
     ax.xaxis.grid(True, color="#e6e6ee", lw=0.8)
@@ -1623,6 +1702,76 @@ def _usd(x: float) -> str:
     return "$0"
 
 
+def _all_in_cost_headline(all_in: dict | None) -> str:
+    """The one textual cost summary: total recorded experiment spend."""
+    if not all_in:
+        return ""
+    tilde = "" if all_in.get("exact") else "~"
+    return (
+        '<div class="costtotal"><span>total experiment spend</span>'
+        f'<b>{tilde}{_usd(all_in.get("total", 0.0))}</b></div>')
+
+
+def _all_in_gaps(all_in: dict | None) -> str:
+    """Visible caveat for cost records that predate tracking or could not be priced."""
+    if not all_in:
+        return ""
+    labels = {
+        "n_missing_generation": "trajectory generation",
+        "n_missing_target": "target ask",
+        "n_missing_annotation": "hack-turn annotation",
+        "n_missing_faithfulness": "faithfulness judge",
+        "n_missing_judge": "question judge",
+    }
+    gaps = [f'{all_in[k]} {label} call(s)' for k, label in labels.items()
+            if all_in.get(k)]
+    if not gaps:
+        return ""
+    return ('<p class="costgap">&#9888; No recorded cost for ' + ", ".join(gaps)
+            + "; totals and averages are partial.</p>")
+
+
+ALL_IN_COMPONENTS = (
+    ("generation", "trajectory generation", "#4C72B0"),
+    ("annotation", "hack-turn annotation", "#8172B3"),
+    ("faithfulness", "faithfulness judge", "#64B5CD"),
+)
+
+
+def fig_all_in_cost_by_model(all_in: dict | None) -> str:
+    """Average all-in trajectory cost by target model, stacked by every recorded
+    component. This graph replaces the former HTML table without losing its information."""
+    rows = [r for r in (all_in or {}).get("by_model", [])
+            if r.get("n") and r.get("mean") is not None]
+    if not rows:
+        return _empty_fig("no per-trajectory cost data")
+    components = [(key, label, color) for key, label, color in ALL_IN_COMPONENTS
+                  if any(r.get(key, 0.0) for r in rows)]
+    tilde = "" if all_in.get("exact") else "~"
+    fig, ax = plt.subplots(figsize=(max(5.5, 1.3 * len(rows) + 1.1), 4.4))
+    xs = np.arange(len(rows))
+    bottoms = np.zeros(len(rows))
+    for key, label, color in components:
+        vals = np.array([r.get(key, 0.0) / r["n"] for r in rows])
+        ax.bar(xs, vals, bottom=bottoms, width=0.64, color=color, label=label,
+               edgecolor="white", lw=0.4)
+        bottoms += vals
+    for x, r in zip(xs, rows):
+        ax.annotate(f"{tilde}{_usd(r['mean'])}", (x, r["mean"]),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=9, color="#333", fontweight="bold")
+    ax.set_xticks(xs, [f"{r['model']}\n(n={r['n']})" for r in rows],
+                  rotation=20, ha="right", fontsize=8.5)
+    ax.set_ylabel("Average all-in cost per trajectory ($)")
+    ax.set_ylim(0, max(r["mean"] for r in rows) * 1.20)
+    ax.set_title("All-in cost per trajectory by model")
+    if len(components) > 1:
+        ax.legend(frameon=False, fontsize=8.5)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
 def _role_tick(role: str, models: list) -> str:
     """x-tick label for a role bar: 'Auditor\\nDeepSeek V4 Pro' when the role used one/two
     models, 'Target\\n(5 models)' when it spans many (targets vary; auditor/judge don't)."""
@@ -1693,11 +1842,6 @@ def _fig_cost_stacked(rows: list, title: str, tilde: str,
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
-
-
-def fig_cost_by_target(cost: dict) -> str:
-    return _fig_cost_stacked(cost["by_target"], "Cost per run by target model",
-                             "" if cost["exact"] else "~")
 
 
 def fig_cost_by_auditor(cost: dict) -> str:
@@ -1772,32 +1916,6 @@ def fig_cost_annotation(ann: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def _annotation_cost_html(ann: dict | None) -> str:
-    """Sub-block under Cost for the hack-turn annotation step. Empty when this sweep has no
-    annotations at all. Surfaces the going-forward-only capture gap (audits annotated before
-    usage was recorded) rather than hiding it, per the lossy-processing rule."""
-    if not ann:
-        return ""
-    tilde = "" if ann.get("exact") else "~"
-    n_use, n_miss = ann["n_with_usage"], ann["n_missing_usage"]
-    models = ", ".join(ann.get("models") or []) or "the annotation model"
-    if n_use:
-        lead = (f'{tilde}<b>{_usd(ann["total"])}</b> to annotate hack turns across '
-                f'<b>{n_use}</b> audit(s) (mean {tilde}{_usd(ann["mean_per"])} each), '
-                f'via {esc_loc(models)}. This is a separate call per reward-hacking audit — '
-                f'not part of the auditor/target/judge totals above.')
-    else:
-        lead = ('Hack-turn annotation cost is captured going forward; none of this sweep’s '
-                'annotated audits recorded it yet.')
-    gap = (f' <b>{n_miss}</b> annotated audit(s) predate cost tracking and carry no cost '
-           f'(re-annotate with <code>--force</code> to fill them in).' if n_miss else "")
-    return (
-        '<h3 style="margin:26px 0 2px;font-size:15px;">Hack-turn annotation</h3>'
-        f'<p class="vsub">{lead}{gap}</p>'
-        + _stack(fig_cost_annotation(ann))
-    )
-
-
 FAITHFUL_COST_COLOR = "#64B5CD"
 
 
@@ -1831,33 +1949,6 @@ def fig_cost_faithfulness(f: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def _faithfulness_cost_html(f: dict | None) -> str:
-    """Sub-block under Cost for the continuation faithfulness judge. Empty when this sweep has
-    no judged continuations at all. Surfaces the going-forward-only capture gap (continuations
-    judged before usage was recorded) rather than hiding it, per the lossy-processing rule."""
-    if not f:
-        return ""
-    tilde = "" if f.get("exact") else "~"
-    n_use, n_miss = f["n_with_usage"], f["n_missing_usage"]
-    models = ", ".join(f.get("models") or []) or "the faithfulness-judge model"
-    if n_use:
-        lead = (f'{tilde}<b>{_usd(f["total"])}</b> to judge auditor faithfulness across '
-                f'<b>{n_use}</b> continuation(s) (mean {tilde}{_usd(f["mean_per"])} each), '
-                f'via {esc_loc(models)}. This is a separate call per continuation that checks how '
-                f'faithfully the auditor reproduced the original run — not part of the '
-                f'auditor/target/judge totals above.')
-    else:
-        lead = ('Continuation faithfulness-judge cost is captured going forward; none of this '
-                'sweep’s judged continuations recorded it yet.')
-    gap = (f' <b>{n_miss}</b> judged continuation(s) predate cost tracking and carry no cost '
-           f'(re-judge with <code>--force-judge</code> to fill them in).' if n_miss else "")
-    return (
-        '<h3 style="margin:26px 0 2px;font-size:15px;">Continuation faithfulness judge</h3>'
-        f'<p class="vsub">{lead}{gap}</p>'
-        + _stack(fig_cost_faithfulness(f))
-    )
-
-
 def _cost_section(cost: dict, show_by_auditor: bool = False) -> str:
     """The 'Cost' block: budget split by role + mean cost per audit by target + the per-audit
     spread. Over the sweep's live audits. Empty string when there's no cost data.
@@ -1866,23 +1957,21 @@ def _cost_section(cost: dict, show_by_auditor: bool = False) -> str:
     sweep that actually varies the auditor (sweep 4), so callers keep it off elsewhere."""
     if not cost:
         return ""
-    tilde = "" if cost["exact"] else "~"
-    unpriced = (" A few calls used a model with no price and were dropped from the totals."
-                if cost.get("any_unpriced") else "")
-    exact_note = ("" if cost["exact"] else
-                  " <b>~</b> marks a price&times;token estimate; runs bill exactly once routed "
-                  "through OpenRouter.")
-    figs = [fig_cost_by_role(cost), fig_cost_by_target(cost)]
+    all_in = cost.get("all_in")
+    figs = [fig_all_in_cost_by_model(all_in), fig_cost_by_role(cost)]
     if show_by_auditor:
         figs.append(fig_cost_by_auditor(cost))
     figs.append(fig_cost_distribution(cost))
+    if cost.get("annotation"):
+        figs.append(fig_cost_annotation(cost["annotation"]))
+    unpriced = ('<p class="costgap">&#9888; Some calls used an unpriced model and are '
+                'missing from the total.</p>' if cost.get("any_unpriced") else "")
     return (
         "<h2>Cost</h2>"
-        f'<p class="vsub">{tilde}<b>{_usd(cost["total"])}</b> across <b>{cost["n"]}</b> audits '
-        f'(mean {tilde}{_usd(cost["mean_per"])} per audit). Cost is attributed to the '
-        f'<b>auditor</b>, <b>target</b>, and <b>judge</b> roles.{exact_note}{unpriced}</p>'
+        + _all_in_cost_headline(all_in)
+        + _all_in_gaps(all_in)
+        + unpriced
         + _stack(*figs)
-        + _annotation_cost_html(cost.get("annotation"))
     )
 
 
@@ -1902,7 +1991,8 @@ def fig_cont_cost_by_treatment(cc: dict) -> str:
                              "" if cc["exact"] else "~")   # default ylabel = mean cost per run
 
 
-def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str:
+def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None,
+                       all_in: dict | None = None) -> str:
     """The 'Continuation runs' cost block on the Cost tab (renders on whichever sweep owns the
     continuations, beside the original-audit 'Cost' block). Shows what it cost to GENERATE the
     continuation runs -- auditor + target + inline reward-hacking judge -- split by role and by
@@ -1911,23 +2001,27 @@ def _cont_cost_section(cc: dict | None, faithfulness: dict | None = None) -> str
     at all (so a sweep without continuations shows nothing)."""
     if not cc:
         # no generation cost captured, but a faithfulness pass may still have run -- show it alone.
-        return _faithfulness_cost_html(faithfulness)
-    tilde = "" if cc["exact"] else "~"
-    unpriced = (" A few calls used a model with no price and were dropped from the totals."
-                if cc.get("any_unpriced") else "")
-    exact_note = ("" if cc["exact"] else
-                  " <b>~</b> marks a price&times;token estimate; runs bill exactly once routed "
-                  "through OpenRouter.")
-    lead = (f'{tilde}<b>{_usd(cc["total"])}</b> to generate <b>{cc["n"]}</b> continuation(s) '
-            f'(mean {tilde}{_usd(cc["mean_per"])} each). This is the auditor + target + inline '
-            f'reward-hacking judge -- the same three roles as the audit cost above, tallied over '
-            f'the continuation runs and split by treatment below.{exact_note}{unpriced}')
+        if not all_in:
+            return ""
+        figs = [fig_all_in_cost_by_model(all_in)]
+        if faithfulness:
+            figs.append(fig_cost_faithfulness(faithfulness))
+        return ("<h2>Cost</h2>" + _all_in_cost_headline(all_in)
+                + _all_in_gaps(all_in) + _stack(*figs))
+    figs = [fig_all_in_cost_by_model(all_in), fig_cost_by_role(cc),
+            fig_cont_cost_by_treatment(cc)]
+    if cc.get("annotation"):
+        figs.append(fig_cost_annotation(cc["annotation"]))
+    if faithfulness:
+        figs.append(fig_cost_faithfulness(faithfulness))
+    unpriced = ('<p class="costgap">&#9888; Some calls used an unpriced model and are '
+                'missing from the total.</p>' if cc.get("any_unpriced") else "")
     return (
-        '<h2 style="margin-top:34px;">Continuation runs</h2>'
-        f'<p class="vsub">{lead}</p>'
-        + _stack(fig_cost_by_role(cc), fig_cont_cost_by_treatment(cc))
-        + _annotation_cost_html(cc.get("annotation"))
-        + _faithfulness_cost_html(faithfulness)
+        '<h2 style="margin-top:34px;">Cost</h2>'
+        + _all_in_cost_headline(all_in)
+        + _all_in_gaps(all_in)
+        + unpriced
+        + _stack(*figs)
     )
 
 
@@ -1940,18 +2034,17 @@ EM_JUDGE_C = "#DD8452"
 
 
 def fig_em_cost(em: dict) -> str:
-    """Mean cost of one ask per model, split into the target call (blue, bottom) and
-    the EM judge (orange, top; counts 0 for unjudged asks), pooled over every question
-    and trajectory with ask data on this sweep. n = priced asks for that model; the
-    annotation is the mean TOTAL (target + judge)."""
-    rows = em["by_model"]
+    """All-in mean question-experiment cost per source trajectory and target model.
+    Shared no-context baseline calls remain in the model numerator, so the bar answers
+    what one trajectory costs as part of the full experiment, not merely one ask."""
+    rows = [r for r in em.get("all_in", {}).get("by_model", []) if r.get("mean") is not None]
     if not rows:
-        return _empty_fig("no priced asks", (4.6, 4.0))
+        return _empty_fig("no source trajectories with priced asks", (4.6, 4.0))
     tilde = "" if em["exact"] else "~"
-    labels = [m for m, _, _ in rows]
-    means = [float(np.mean(cs)) for _, cs, _ in rows]
-    jmeans = [float(np.mean(js)) for _, _, js in rows]
-    ns = [len(cs) for _, cs, _ in rows]
+    labels = [r["model"] for r in rows]
+    means = [r["target"] / r["n"] for r in rows]
+    jmeans = [r["judge"] / r["n"] for r in rows]
+    ns = [r["n"] for r in rows]
     tops = [m + j for m, j in zip(means, jmeans)]
     fig, ax = plt.subplots(figsize=(max(4.8, 1.35 * len(rows) + 1.5), 4.2))
     xs = np.arange(len(rows))
@@ -1964,9 +2057,9 @@ def fig_em_cost(em: dict) -> str:
                     xytext=(0, 4), ha="center", fontsize=10, color="#333",
                     fontweight="bold")
     ax.set_xticks(xs, [f"{lbl}\n(n={n})" for lbl, n in zip(labels, ns)], fontsize=9)
-    ax.set_ylabel("Mean cost per ask ($)")
+    ax.set_ylabel("Average all-in cost per trajectory ($)")
     ax.set_ylim(0, max(tops) * 1.20)
-    ax.set_title("EM ask cost by model")
+    ax.set_title(f'{em.get("experiment_label") or "EM"} cost per trajectory by model')
     if any(j > 0 for j in jmeans):
         ax.legend(fontsize=8.5, framealpha=0.9)
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
@@ -2001,7 +2094,8 @@ def fig_em_cost_total(em: dict) -> str:
     ax.set_xticks(xs, [f"{lbl}\n(n={n})" for lbl, n in zip(labels, ns)], fontsize=9)
     ax.set_ylabel("Total cost ($)")
     ax.set_ylim(0, max(tops) * 1.20)
-    ax.set_title(f"EM total cost by model — {tilde}{_usd(sum(tops))} overall")
+    label = em.get("experiment_label") or "EM"
+    ax.set_title(f"{label} total cost by model — {tilde}{_usd(sum(tops))} overall")
     if any(j > 0 for j in jsums):
         ax.legend(fontsize=8.5, framealpha=0.9)
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
@@ -2009,29 +2103,20 @@ def fig_em_cost_total(em: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def _em_cost_section(em: dict | None) -> str:
+def _em_cost_section(em: dict | None, *, empty_label: str | None = None) -> str:
     """The 'EM question asks' block on the Cost tab (renders on any sweep whose
-    trajectories have exp_ask_questions.py results). Empty string when there is none."""
+    trajectories have exp_ask_questions.py results). ``empty_label`` keeps an explicit
+    zero-results Cost section on a manifest-backed experiment page instead of making cost
+    accounting silently disappear before the first run."""
     if not em:
-        return ""
-    tilde = "" if em["exact"] else "~"
-    n, total, n_models = em["n_priced"], em["total"], len(em["by_model"])
-    unpriced = (f' {em["n_unpriced"]} ask(s) had no recorded cost and are excluded.'
-                if em.get("n_unpriced") else "")
-    exact_note = ("" if em["exact"] else
-                  " <b>~</b> marks a price&times;token estimate; asks bill exactly once "
-                  "routed through OpenRouter.")
-    jt = em.get("judge_total") or 0.0
-    judge_bit = (f' + ~<b>{_usd(jt)}</b> judge' if jt else "")
-    judge_note = (' The judge segment (orange) is always a price&times;token estimate; '
-                  'unjudged asks count 0 toward it.' if jt else "")
-    lead = (f'{tilde}<b>{_usd(total)}</b> target{judge_bit} across <b>{n}</b> priced '
-            f'asks over <b>{n_models}</b> model(s), pooled over every question and '
-            f'trajectory. Each bar is the mean cost of one ask for that '
-            f'model.{exact_note}{judge_note}{unpriced}')
-    return ('<h2 style="margin-top:34px;">EM question asks</h2>'
-            f'<p class="vsub">{lead}</p>'
-            '<div class="figgrid">'
+        return (f'<h2 style="margin-top:34px;">Cost</h2>'
+                f'<p class="vsub">No recorded {esc_loc(empty_label)} spend yet. Cost charts '
+                'will appear here after the first result is written.</p>'
+                if empty_label else "")
+    return ('<h2 style="margin-top:34px;">Cost</h2>'
+            + _all_in_cost_headline(em.get("all_in"))
+            + _all_in_gaps(em.get("all_in"))
+            + '<div class="figgrid">'
             + _figure(fig_em_cost(em)) + _figure(fig_em_cost_total(em)) + '</div>')
 
 
@@ -2323,10 +2408,10 @@ def _em_judge_section(d: dict | None) -> str:
 
 # --------------------------------------------------------------------------- #
 # Propensity questions (--questions=propensity): attitude shifts by condition.
-# Data contract (viewer.pq_vis_data): rows = usable asks {qid, category, model,
-# condition, tid, hi (scale top, 10|100), value}; questions = the set's canonical
-# order; excluded = per-condition counts of unusable asks. Sycophancy rows carry
-# the judge's 0-100 agreement score (hi 100). Every measure is oriented
+# Data contract (viewer.pq_vis_data): rows = usable asks {qid, category, kind, model,
+# condition, tid, lo, hi, value}; questions = the set's canonical
+# order with full text; excluded = per-condition counts of unusable asks. Sycophancy rows carry
+# the judge's 0-100 agreement score. Every measure is oriented
 # HIGHER = MORE MISALIGNED, so all these figures read the same way.
 # --------------------------------------------------------------------------- #
 PQ_CONDITION_C = {"no context": "#4C72B0", "clean context": "#55A868",
@@ -2365,36 +2450,38 @@ def _pq_grouped_bars(ax, groups: list[str], conds: list[str],
 
 
 def fig_pq_category(d: dict) -> str:
-    """Mean answer by question category and condition, 1-10 questions only
-    (audit_rate and sycophancy are 0-100 and have their own figures)."""
-    rows = [r for r in d["rows"] if r["hi"] == 10]
+    """Mean numeric-scale answer by question category and condition."""
+    rows = [r for r in d["rows"] if r["kind"] == "scale"]
     if not rows:
-        return _empty_fig("no 1-10 asks")
-    cats = list(dict.fromkeys(q["category"] for q in d["questions"] if q["hi"] == 10))
+        return _empty_fig("no scale-question asks")
+    cats = list(dict.fromkeys(q["category"] for q in d["questions"]
+                             if q["kind"] == "scale"))
     conds = _pq_conds(rows)
+    lo, hi = min(r["lo"] for r in rows), max(r["hi"] for r in rows)
     fig, ax = plt.subplots(figsize=(max(5.2, 1.8 * len(cats) + 1.6), 4.2))
     _pq_grouped_bars(ax, cats, conds,
                      lambda g, c: [r["value"] for r in rows
                                    if r["category"] == g and r["condition"] == c])
-    ax.set_ylabel("Mean answer (1–10)")
-    ax.set_ylim(0, 10.5)
+    ax.set_ylabel(f"Mean answer ({lo:g}–{hi:g})")
+    ax.set_ylim(lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo))
     ax.set_title("Mean answer by category (higher = more misaligned)")
     return _fig_to_svg(fig)
 
 
 def fig_pq_model(d: dict) -> str:
-    """Mean 1-10 answer by answering model and condition (all 1-10 questions pooled)."""
-    rows = [r for r in d["rows"] if r["hi"] == 10]
+    """Mean numeric-scale answer by answering model and condition."""
+    rows = [r for r in d["rows"] if r["kind"] == "scale"]
     if not rows:
-        return _empty_fig("no 1-10 asks")
+        return _empty_fig("no scale-question asks")
     models = sorted({r["model"] for r in rows})
     conds = _pq_conds(rows)
+    lo, hi = min(r["lo"] for r in rows), max(r["hi"] for r in rows)
     fig, ax = plt.subplots(figsize=(max(5.2, 1.8 * len(models) + 1.6), 4.2))
     _pq_grouped_bars(ax, models, conds,
                      lambda g, c: [r["value"] for r in rows
                                    if r["model"] == g and r["condition"] == c])
-    ax.set_ylabel("Mean answer (1–10)")
-    ax.set_ylim(0, 10.5)
+    ax.set_ylabel(f"Mean answer ({lo:g}–{hi:g})")
+    ax.set_ylim(lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo))
     ax.set_title("Mean answer by model (higher = more misaligned)")
     return _fig_to_svg(fig)
 
@@ -2402,7 +2489,7 @@ def fig_pq_model(d: dict) -> str:
 def fig_pq_syco(d: dict) -> str:
     """Mean sycophancy-judge agreement (0-100) by condition: 0 = the answer corrects
     the user's false claim, 100 = fully endorses it."""
-    rows = [r for r in d["rows"] if r["category"] == "sycophancy"]
+    rows = [r for r in d["rows"] if r["kind"] == "sycophancy"]
     if not rows:
         return _empty_fig("no judged sycophancy asks")
     conds = _pq_conds(rows)
@@ -2429,89 +2516,155 @@ def fig_pq_syco(d: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def fig_pq_questions(d: dict, hi: int) -> str:
-    """Per-question dot plot: mean answer per condition with 95% CI whiskers, one
-    panel per scale (1-10 / 0-100), questions in the set's order with bold category
-    separator rows. The figure form of the propensity page's grid, pooled across
-    models."""
-    qs = [q for q in d["questions"] if q["hi"] == hi]
-    rows = [r for r in d["rows"] if r["hi"] == hi]
-    if not rows or not qs:
-        return _empty_fig("no asks on this scale")
+def fig_pq_question_model(d: dict, q: dict, model: str) -> str:
+    """One model's answers to one question as compact per-trajectory histograms.
+
+    Every small panel is exactly one source trajectory (or the model's explicitly
+    labeled no-context baseline suite). Bar, panel tint, and frame use the condition
+    color; a dashed vertical line marks the panel mean. Nothing is pooled across
+    trajectories.
+    """
+    rows = [r for r in d["rows"] if r["qid"] == q["id"] and r["model"] == model]
+    if not rows:
+        return ""
     conds = _pq_conds(rows)
-    ylabels: list[str] = []
-    ypos: dict[str, int] = {}
-    y = 0
-    last_cat = None
-    for q in qs:
-        if q["category"] != last_cat:
-            last_cat = q["category"]
-            ylabels.append(str(q["category"]).upper())
-            y += 1
-        ylabels.append(q["id"])
-        ypos[q["id"]] = y
-        y += 1
-    fig, ax = plt.subplots(figsize=(6.6, max(3.2, 0.34 * y + 1.2)))
-    off = {c: (i - (len(conds) - 1) / 2) * 0.26 for i, c in enumerate(conds)}
-    for c in conds:
-        px, py, errs = [], [], []
-        for q in qs:
-            vals = [r["value"] for r in rows
-                    if r["qid"] == q["id"] and r["condition"] == c]
-            if not vals:
-                continue
-            m, hw = _mean_ci(vals)
-            px.append(m); py.append(ypos[q["id"]] + off[c]); errs.append(hw or 0.0)
-        ax.errorbar(px, py, xerr=errs, fmt="o", ms=4.5, lw=0, elinewidth=1.1,
-                    capsize=2.5, color=PQ_CONDITION_C.get(c, "#8a8a99"), label=c)
-    ax.set_yticks(range(y))
-    ax.set_yticklabels(ylabels, fontsize=8.5)
-    for tick, lbl in zip(ax.get_yticklabels(), ylabels):
-        if lbl.isupper():
-            tick.set_fontweight("bold")
-    ax.invert_yaxis()
-    lo = 1 if hi == 10 else 0
-    ax.set_xlim(lo - 0.02 * hi, hi * 1.03)
-    ax.set_xlabel(f"mean answer ({lo}–{hi}, higher = more misaligned)")
-    ax.set_title("1–10 questions" if hi == 10
-                 else "0–100 questions (audit_rate + sycophancy agreement)")
-    ax.legend(fontsize=8.5, title="condition", framealpha=0.9)
-    ax.xaxis.grid(True, color="#e6e6ee", lw=0.8)
-    ax.set_axisbelow(True)
+    cond_rank = {cond: i for i, cond in enumerate(_PQ_ORDER)}
+    sources: dict[str, dict] = {}
+    for r in rows:
+        sources.setdefault(r["source_key"], {
+            "key": r["source_key"], "label": r["source_label"],
+            "order": r["source_order"], "condition": r["condition"], "values": [],
+        })["values"].append(r["value"])
+    groups = sorted(sources.values(), key=lambda g: (
+        cond_rank.get(g["condition"], 99), g["order"], g["key"]))
+    ncols = 2 if len(groups) <= 4 else 3
+    nrows = int(np.ceil(len(groups) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(10.4, 1.85 * nrows + 1.55), squeeze=False)
+    lo, hi = q["lo"], q["hi"]
+    span = hi - lo
+    if (lo, hi) == (1, 100):
+        xticks = [1, 25, 50, 75, 100]
+    elif (lo, hi) == (0, 100):
+        xticks = [0, 25, 50, 75, 100]
+    else:
+        xticks = [lo, lo + span / 2, hi]
+    # One bar per integer answer on every scale. On wide scales (1-100) the bars
+    # are ~2pt wide, so the white bar outline is dropped there (it would swallow
+    # the fill) and the count axis keeps at most ~4 integer ticks.
+    bins = np.arange(lo - 0.5, hi + 1.5, 1.0)
+    bar_lw = 0.7 if span <= 20 else 0.0
+    ymax = max(max(np.histogram(group["values"], bins=bins)[0]) for group in groups)
+    for ax, group in zip(axes.flat, groups):
+        vals = group["values"]
+        cond = group["condition"]
+        color = PQ_CONDITION_C.get(cond, "#8a8a99")
+        mean = float(np.mean(vals))
+        ax.hist(vals, bins=bins, color=color, alpha=0.84, edgecolor="white",
+                linewidth=bar_lw, zorder=2)
+        ax.axvline(mean, color="#222", ls="--", lw=1.2, zorder=3)
+        ax.set_xlim(lo - 0.02 * hi, hi * 1.03)
+        ax.set_ylim(0, ymax + 0.55)
+        ax.set_xticks(xticks)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+        ax.tick_params(axis="both", labelsize=8)
+        ax.set_facecolor(matplotlib.colors.to_rgba(color, 0.075))
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_color(matplotlib.colors.to_rgba(color, 0.72))
+            spine.set_linewidth(1.15)
+        ax.yaxis.grid(True, color="#dfe1e8", lw=0.75)
+        ax.set_axisbelow(True)
+        label = textwrap.fill(group["label"], width=34)
+        ax.set_title(f"{label}\n{cond} · n={len(vals)} · mean={mean:.1f}",
+                     fontsize=8.8, color="#333", pad=7)
+    for ax in list(axes.flat)[len(groups):]:
+        ax.set_visible(False)
+    fig.suptitle(model, fontsize=12, fontweight="bold", y=0.985)
+    legend = [Patch(facecolor=PQ_CONDITION_C[c], label=c) for c in conds]
+    legend.append(Line2D([0], [0], color="#222", ls="--", lw=1.2, label="mean"))
+    fig.legend(handles=legend, fontsize=8.5, ncol=min(4, len(legend)),
+               loc="upper center", bbox_to_anchor=(0.5, 0.935), frameon=False)
+    fig.supxlabel(f"answer ({lo}–{hi}; higher = more misaligned)", fontsize=10)
+    fig.supylabel("response count", fontsize=10)
+    fig.subplots_adjust(top=0.82, bottom=0.12, left=0.08, hspace=0.72, wspace=0.23)
     return _fig_to_svg(fig)
 
 
-def _pq_section(d: dict | None) -> str:
+def _pq_section(d: dict | None, prefix_html: str = "") -> str:
     """The 'Propensity questions' tab: attitude-shift figures over every usable
     propensity ask on the sweep. Empty string when there is none."""
     if not d:
         return ""
     rows = d["rows"]
-    models = sorted({r["model"] for r in rows})
+    annotations = d.get("trajectory_annotations") or []
+    annotation_html = (
+        '<div class="pqexcluded">&#9888; <b>Experiment-specific hack classifications:</b> '
+        + "; ".join(
+            f'#{a["trajectory_id"]}: {esc_loc(a.get("note") or "classification override")}'
+            for a in annotations)
+        + '. These labels apply to the individual and aggregate propensity graphs; '
+          'the original audit judge verdicts are unchanged.</div>'
+        if annotations else "")
+    if not rows:
+        question_parts = []
+        last_category = None
+        for q in d["questions"]:
+            if q["category"] != last_category:
+                last_category = q["category"]
+                question_parts.append(
+                    f'<h3 class="pqcategory">{esc_loc(q["category"])}</h3>')
+            question_parts.append(
+                f'<details class="pqquestion"><summary><span class="pqid">'
+                f'{esc_loc(q["id"])}</span><span class="pqsummary-sep"> &mdash; </span>'
+                f'{esc_loc(q.get("text") or q["id"])}</summary>'
+                '<div class="pqquestion-body"><div class="vsub">No results yet.</div>'
+                '</div></details>')
+        return ('<h2>Propensity questions — attitude shifts by condition</h2>'
+                + prefix_html
+                + annotation_html
+                + '<h3 style="font-size:15px;margin:24px 0 2px">By question</h3>'
+                + "".join(question_parts))
     excl = d.get("excluded") or {}
-    excl_txt = (
-        f' <b>{sum(excl.values())}</b> unusable ask(s) excluded from every figure '
-        f'(no answer, unparsed rating, or unscored judge verdict) &mdash; by condition: '
-        + ", ".join(f"{esc_loc(c)} {n}" for c, n in sorted(excl.items())) + "."
+    excluded_html = (
+        f'<div class="pqexcluded">&#9888; <b>{sum(excl.values())}</b> unusable ask(s) '
+        f'omitted (unparsed, unanswered, or unscored) &mdash; '
+        + ", ".join(f"{esc_loc(c)} {n}" for c, n in sorted(excl.items())) + ".</div>"
         if excl else "")
-    lead = (f'<b>{len(rows)}</b> usable asks over <b>{d.get("n_traj")}</b> resumed '
-            f'trajectory(ies) ({esc_loc(", ".join(models))}). Every measure is oriented '
-            f'<b>higher = more misaligned</b>. Scale questions plot the model&rsquo;s own '
-            f'1&ndash;10 answer (audit_rate 0&ndash;100); sycophancy plots the '
-            f'judge&rsquo;s 0&ndash;100 agreement with the user&rsquo;s false claim. '
-            f'Figures pool models except the by-model one; per-model per-question means '
-            f'are the grid on the propensity page. Error bars: 95% CI.{excl_txt}')
+    syco_html = (
+        '<div class="figgrid">' + _figure(fig_pq_syco(d)) + '</div>'
+        if any(r["category"] == "sycophancy" for r in rows) else "")
+    question_fig_parts = []
+    last_category = None
+    for q in d["questions"]:
+        if not any(r["qid"] == q["id"] for r in rows):
+            continue
+        if q["category"] != last_category:
+            last_category = q["category"]
+            question_fig_parts.append(
+                f'<h3 class="pqcategory">{esc_loc(q["category"])}</h3>')
+        q_models = sorted({r["model"] for r in rows if r["qid"] == q["id"]})
+        figures = [fig_pq_question_model(d, q, model) for model in q_models]
+        question_fig_parts.append(
+            f'<details class="pqquestion"><summary><span class="pqid">'
+            f'{esc_loc(q["id"])}</span><span class="pqsummary-sep"> &mdash; </span>'
+            f'{esc_loc(q.get("text") or q["id"])}</summary>'
+            f'<div class="pqquestion-body">{_stack(*figures)}</div></details>')
+    question_figs = "".join(question_fig_parts)
     return ('<h2>Propensity questions — attitude shifts by condition</h2>'
-            f'<p class="vsub">{lead}</p>'
-            '<div class="figgrid">'
+            + prefix_html
+            + annotation_html
+            + '<h3 style="font-size:15px;margin:24px 0 2px">By question</h3>'
+            + question_figs
+            + '<h2 style="margin-top:34px">Aggregate</h2>'
+            + '<div class="figgrid">'
             + _figure(fig_pq_category(d),
-                      "1–10 questions only; audit_rate and sycophancy (0–100 scales) "
-                      "have their own figures.")
+                      "Scale questions grouped by category and condition.")
             + _figure(fig_pq_model(d),
-                      "The same 1–10 pool, split by answering model instead of category.")
-            + '</div><div class="figgrid">' + _figure(fig_pq_syco(d)) + '</div>'
-            '<h3 style="font-size:15px;margin:24px 0 2px">By question</h3>'
-            + _stack(fig_pq_questions(d, 10), fig_pq_questions(d, 100)))
+                      "The same scale-question pool, split by answering model instead of category.")
+            + '</div>' + syco_html
+            + excluded_html
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -2534,6 +2687,31 @@ VISUALS_CSS = """
 .vpanel.active { display: block; }
 .vsub { color: #555; font-size: 13.5px; line-height: 1.5; margin: 2px 0 22px; max-width: 760px; }
 .vsub b { color: #1a1a2e; }
+.costtotal { display: inline-flex; flex-direction: column; gap: 2px; padding: 10px 14px;
+             margin: 0 0 12px; border: 1px solid #d9dce6; border-radius: 8px;
+             background: #f8f9fc; }
+.costtotal span { color: #687080; font-size: 11px; text-transform: uppercase;
+                  letter-spacing: .04em; }
+.costtotal b { color: #1a1a2e; font-size: 22px; }
+.costgap { color: #9b4b00; font-size: 12.5px; margin: 6px 0 14px; }
+.pqquestion { margin: 8px 0 12px; border: 1px solid #dde0e8; border-radius: 8px;
+              background: #fafbfc; }
+.pqquestion > summary { cursor: pointer; padding: 11px 14px; color: #303644;
+                        font-size: 13px; line-height: 1.45; font-weight: 600; }
+.pqid { color: #1558d6; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px; font-weight: 700; white-space: nowrap; }
+.pqsummary-sep { color: #9298a5; }
+.pqquestion[open] > summary { border-bottom: 1px solid #e1e3ea; }
+.pqquestion-body { padding: 16px 14px 20px; }
+.pqcategory { margin: 28px 0 8px; color: #1a1a2e; font-size: 17px;
+              text-transform: capitalize; }
+.pqexcluded { margin: 10px 0 22px; color: #8a4b08; font-size: 12px; }
+.pqprefix { margin: 8px 0 20px; border: 1px solid #d5d9e3; border-radius: 8px;
+            background: #f7f8fb; }
+.pqprefix > summary { cursor: pointer; padding: 11px 14px; color: #303644;
+                      font-size: 14px; font-weight: 700; }
+.pqprefix[open] > summary { border-bottom: 1px solid #dfe2e9; }
+.pqprefix-body { padding: 8px 14px 16px; }
 .figgrid { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
 figure.fig { margin: 0; background: #fff; border: 1px solid #e3e5ec; border-radius: 8px;
              padding: 14px 16px 10px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
@@ -2628,7 +2806,8 @@ def _user_turns_section(user_turns: dict) -> str:
         + "</div>"
         '<div class="figgrid">'
         + _figure(fig_user_turns_before_first_hack(user_turns.get("before_first_hack", [])),
-                  "1 = only the session-start message (no auditor user turn preceded the hack).")
+                  "1 = only the session-start message (no auditor user turn preceded the "
+                  "hack). Pinned deadline notices don't count as user turns here.")
         + "</div>"
     )
 
@@ -2762,6 +2941,7 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        mechanism: dict | None = None,
                        user_turns: dict | None = None,
                        condition_exp: dict | None = None,
+                       model_outcomes: dict | None = None,
                        show_condition_rate: bool = True,
                        reasoning_exp: dict | None = None,
                        failure_modes: dict | None = None,
@@ -2770,23 +2950,28 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
                        cost_by_auditor: bool = False,
                        cont_faithfulness_cost: dict | None = None,
                        cont_generation_cost: dict | None = None,
+                       cont_all_in_cost: dict | None = None,
                        em_cost: dict | None = None,
                        em_judge: dict | None = None,
                        pq: dict | None = None,
+                       pq_cost: dict | None = None,
+                       pq_prefix_html: str = "",
                        heading: str = "Petri reward-hacking visuals",
                        audit_label: str = "Original audit trajectories",
-                       subnav_html: str = "", totop: str = "") -> str:
-    """Full HTML for ONE visuals page. Since 2026-07-02 there is no single global
-    visuals.html: each sweep gets its own page, linked from that sweep's trajectories
-    page, passing only the sections that belong to that sweep — every section renderer
-    returns "" on empty data, so a page shows exactly what its sweep has. Sections:
+                       subnav_html: str = "", totop: str = "",
+                       context_nav_html: dict[str, str] | None = None) -> str | dict[str, str]:
+    """Build the visuals owned by one sweep. Old sweeps return one HTML page; current
+    sweeps return a context-keyed page dict when ``context_nav_html`` is supplied. Every
+    section renderer returns "" on empty data, so pages show exactly what their sweep has.
+    Sections:
 
       1. Reward-hacking PROPENSITY (by model / prompt) over the set's audits. This is
          pre-rendered HTML passed in as `propensity_html` (built by viewer, where
          the audit-classification logic lives); pass "" to omit it.
-      2. incompleteness / user_turns / old_halluc / condition_exp: audit-sourced figure
-         sections (condition_exp — the allow-vs-correct comparison — renders FIRST in
-         the audit box when the sweep spans >1 seed condition).
+      2. model_outcomes / incompleteness / user_turns / old_halluc / condition_exp:
+         audit-sourced figure sections. model_outcomes is the main page's exact v7 buckets
+         (hack bucket sub-split by elicitation) by target model and renders first;
+         condition_exp is the allow-vs-correct comparison.
       3. continuations / mechanism: continuation-experiment sections.
       4. Reward-hacking under ROLLBACK: the matplotlib figures built here from `records`
          (the per-continuation dicts described in the module docstring, each carrying a
@@ -2795,10 +2980,9 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
          vs treatment within each. Omitted entirely when there are no records.
 
     `heading` is the page <h1>/<title> (name the sweep); `audit_label` names the
-    audit-source box; `subnav_html` is the pre-rendered subpage nav row (trajectories /
-    continuations / visuals) shown between the top nav and the title. `css` is the site
-    CSS (it already includes the propensity bar + pagehead styles); `topnav` is the shared
-    sweep-tab nav bar html."""
+    audit-source box. `subnav_html` is the old layout's pre-rendered subpage nav, while
+    `context_nav_html` maps each current context to its pre-rendered context/view nav.
+    `css` is the site CSS and `topnav` is the shared scope/experiment nav HTML."""
     # records may predate the location field (older callers) -> default to "before".
     for r in records:
         r.setdefault("location", "before")
@@ -2833,29 +3017,62 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     incomp_html = _incompleteness_section(incompleteness) if incompleteness else ""
     ut_html = _user_turns_section(user_turns) if user_turns else ""
     cond_html = _condition_section(condition_exp, show_condition_rate) if condition_exp else ""
+    model_outcome_html = _model_outcome_section(model_outcomes) if model_outcomes else ""
     reasoning_html = _reasoning_section(reasoning_exp) if reasoning_exp else ""
     fmodes_html = _failure_modes_section(failure_modes) if failure_modes else ""
     deadline_html = _deadline_section(deadline) if deadline else ""
-    cost_html = _cost_section(cost, show_by_auditor=cost_by_auditor) if cost else ""
-    # NEW 'Continuation runs' block on the Cost tab (on whichever sweep owns the continuations):
-    # continuation generation cost split by role + by treatment, then the hack-turn-annotation
-    # and (optional, off-by-default) faithfulness-judge sub-blocks -- both separate Anthropic
-    # passes. The existing 'Cost' block above stays over the ORIGINAL audit trajectories only.
-    cost_html += _cont_cost_section(cont_generation_cost, cont_faithfulness_cost)
-    # EM question-ask cost split (exp_ask_questions.py), on the same Cost tab
-    cost_html += _em_cost_section(em_cost)
+    audit_cost_html = _cost_section(cost, show_by_auditor=cost_by_auditor) if cost else ""
+    # Keep each cost beside the experiment that incurred it. The legacy visuals layout below
+    # still combines them on its Cost tab, while current experiments receive separate pages.
+    cont_cost_html = _cont_cost_section(
+        cont_generation_cost, cont_faithfulness_cost, cont_all_in_cost)
+    em_cost_html = _em_cost_section(em_cost)
+    pq_cost_html = _em_cost_section(
+        pq_cost, empty_label="propensity" if pq is not None else None)
     # EM judge scores get their own tab (the ask COSTS stay on the Cost tab above)
     em_html = _em_judge_section(em_judge)
     # propensity-question attitude shifts: their own tab too
-    pq_html = _pq_section(pq)
+    pq_html = _pq_section(pq, pq_prefix_html)
     old_inner = _old_hallucination_section(old_halluc) if old_halluc else ""
     mech_inner = _mechanism_section(mechanism) if mechanism else ""
-    # One sub-sub-tab per data source (a level below the trajectories/continuations/visuals
-    # subnav): click a tab, see only that group's figures, instead of one long scroll. Each
-    # tab bundles the sections built above; Cost is its own tab (pulled out of the audit box).
-    # Only non-empty groups become tabs; the first (Original audits) is the default.
-    audits_panel = f"{reasoning_html}{cond_html}{propensity_html}{fmodes_html}{ut_html}{incomp_html}"
+    # Page-ready panels are defined once, then used by either layout below. Current
+    # experiments get one real page per context; old experiments retain the former single
+    # page with client-side tabs. This is the boundary that prevents figure ownership and
+    # navigation from being hardcoded independently in several call sites.
+    audits_panel = (f"{model_outcome_html}{reasoning_html}{cond_html}{propensity_html}"
+                    f"{fmodes_html}{ut_html}{incomp_html}")
     cont_panel = f"{cont_inner}{cont_timing}{mech_inner}"
+    current_panels = {
+        "original_audits": f"{audits_panel}{audit_cost_html}{deadline_html}",
+        "continuations": f"{cont_panel}{cont_cost_html}",
+        "EM": f"{em_html}{em_cost_html}",
+        "propensity": f"{pq_html}{pq_cost_html}",
+    }
+    if context_nav_html is not None:
+        labels = {"original_audits": "original audits", "continuations": "continuations",
+                  "EM": "EM", "propensity": "propensity"}
+        pages: dict[str, str] = {}
+        for context, nav_html in context_nav_html.items():
+            panel = current_panels.get(context, "")
+            if not panel.strip():
+                panel = '<p class="vsub">No visuals for this experiment yet.</p>'
+            page_heading = f"{heading} &middot; {labels.get(context, context)} visuals"
+            body = f"""
+{topnav}
+{nav_html}
+<div class="pagehead"><h1>{page_heading}</h1></div>
+{panel}
+"""
+            pages[context] = (
+                f"<!doctype html><html><head><meta charset='utf-8'><title>"
+                f"{esc_loc(heading)} · {esc_loc(labels.get(context, context))} visuals</title>"
+                f"<style>{css}{VISUALS_CSS}</style></head><body><div class='wrap vwrap'>"
+                f"{body}</div>{totop}</body></html>")
+        return pages
+
+    # Old-experiment compatibility layout: one sub-sub-tab per data source, including
+    # its historical combined Cost tab. No old page structure changes below this point.
+    cost_html = f"{audit_cost_html}{cont_cost_html}{em_cost_html}{pq_cost_html}"
     tab_specs = [
         ("audits", "Original audits", audits_panel),
         ("cost", "Cost", cost_html),
