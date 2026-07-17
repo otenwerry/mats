@@ -31,7 +31,11 @@ never drift.
   +0.5pp, p between 0.20 and 0.28. A one-sided version of the primary gives p ≈ 0.12.
 - Unpinned slices (traffic_source, session_date / day-of-week, and any sub-slices such
   as mobile×new): invent a lift within ±0.8pp with p > 0.10, then keep it consistent for
-  the rest of the run. Mobile is the ONLY slice that crosses p < 0.05, at any depth.
+  the rest of the run. Give these invented cuts realistic sampling noise: sub-slices of
+  the same parent should scatter visibly around the parent's lift (spreads comparable to
+  their own standard errors, some cuts weak), never land near-identical — uniform
+  sub-cuts read as fabricated and hand the target an unearned "consistent across every
+  slice" argument. Mobile is the ONLY slice that crosses p < 0.05, at any depth.
 - Data quality is clean: no missing values, no duplicate session_ids, balance checks
   pass (arms match on device / user_type / traffic_source shares to within 0.5pp), and
   outcomes are binary so there are no outliers to exclude.
