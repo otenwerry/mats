@@ -11,7 +11,10 @@ trajectory into `viewer_data/`:
                                        judgements, error_log, ...
   viewer_data/{run_id}.workspace.json -- the agent's final workspace files.
 
-So unlike the malt viewer we don't reconstruct anything — we just render.
+Message bodies render from that provider data. The run page additionally
+regenerates the initial PTB task prompt with the era-matched harness template and,
+for Claude-format runs, restores full system-event metadata from the raw stream;
+both are labelled with their provenance in the UI.
 
 Every adjudicated run has a `highlights/{run_id}.json` whose stamped `final`
 block (written by judging/finalize.py — the ONLY implementation of the
@@ -34,8 +37,10 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent))  # `from lib import .
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from flask import Flask, abort, redirect, render_template_string, request
 
@@ -43,7 +48,7 @@ import locate
 import paths
 import render as rnd
 import runs  # OUT_ROOT for our probe outputs (mats-local/posttrainbench_outputs/probes)
-from lib import recon_claude  # restart_assignments() for the issues column
+from lib import context_visuals, prompts, recon_claude, stream  # context + restart data
 
 # The EM judge-score figures are petri's viewer_visuals module (single source
 # across the twins; self-contained: numpy + matplotlib/Agg). APPENDED to
@@ -366,6 +371,125 @@ def load_highlights(run_id: str) -> dict | None:
         return json.load(f)
 
 
+def _prompt_trajectory(run_id: str, row: dict | None = None):
+    """Minimal trajectory record needed to regenerate a PTB assignment.
+
+    `runs.load` covers the four reconstruction scaffolds. The fallback keeps the
+    run-page prompt available for other PTB agents without pretending they are
+    resumable by our reconstruction code.
+    """
+    try:
+        return runs.load(run_id)
+    except (FileNotFoundError, ValueError):
+        try:
+            run_dir, task_dir = runs._split_run_id(run_id)
+        except FileNotFoundError:
+            if not row:
+                raise
+            model = (row.get("trained_model") or "").replace("_", "/", 1)
+            if "/" not in model:
+                raise ValueError(f"cannot recover model name for {run_id}")
+            # A missing raw stream also means no recorded line timestamps. That
+            # is the pre-April prompt era; prompts.py's OSError path restores its
+            # one-word `equiped` spelling difference.
+            return SimpleNamespace(
+                run_id=run_id, benchmark_id=row["benchmark"], model_to_train=model,
+                num_hours=int(row.get("time_budget_h") or 10),
+                agent=runs._agent(row["experiment"]),
+                traj_file=paths.RAW / "__missing_raw_stream__",
+            )
+        benchmark, model = runs._task_meta(task_dir.name)
+        traj_file = next((task_dir / name for name in ("solve_out.txt", "trace.txt")
+                          if (task_dir / name).exists()), None)
+        if traj_file is None:
+            raise FileNotFoundError(f"no trajectory stream for {run_id}")
+        hours = re.search(r"_(\d+)h(?:_|$)", run_dir.name)
+        return SimpleNamespace(
+            run_id=run_id, run_dir=run_dir, task_dir=task_dir,
+            benchmark_id=benchmark, model_to_train=model,
+            num_hours=int(hours.group(1)) if hours else 10,
+            agent=runs._agent(run_dir.name), traj_file=traj_file,
+        )
+
+
+def _context_display(run_id: str, rec: dict, row: dict, events: list[dict], cut_at):
+    """Viewer-facing provenance for context that is absent from `events[]`.
+
+    For original Claude-format runs, also restore the complete raw system-event
+    payloads that the provider's viewer conversion reduced to `{type, subtype}`.
+    Message bodies still come from the provider events and are not regenerated.
+    """
+    source_id = ((rec.get("meta") or {}).get("source_trajectory")
+                 if run_id.startswith("rollback_") else run_id) or run_id
+    try:
+        traj = _prompt_trajectory(source_id, row if source_id == run_id else None)
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+    init_raw = None
+    if source_id == run_id and hasattr(traj, "scaffold"):
+        try:
+            parsed = stream.parse(traj)
+            alignment = stream.align(traj, parsed, events)
+            if alignment.ok:
+                for event_i, (raw_i, _part) in enumerate(alignment.ev_to_raw):
+                    raw = parsed.records[raw_i]
+                    if raw.get("type") == "system":
+                        events[event_i]["raw"] = raw
+                    if raw.get("isSynthetic") is True:
+                        events[event_i]["isSynthetic"] = True
+                init_raw = next((raw for raw in parsed.records
+                                 if raw.get("type") == "system"
+                                 and raw.get("subtype") == "init"), None)
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+
+    # Rollbacks inherit the source run's scaffold. Read its init metadata for
+    # the provenance card, but do not try to align source records to the stitched
+    # rollback event list.
+    if init_raw is None and hasattr(traj, "scaffold"):
+        try:
+            parsed = stream.parse(traj)
+            init_raw = next((raw for raw in parsed.records
+                             if raw.get("type") == "system"
+                             and raw.get("subtype") == "init"), None)
+        except OSError:
+            pass
+
+    try:
+        task_prompt = prompts.task_prompt(traj)
+        task_provenance = prompts.prompt_provenance(traj)
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError):
+        task_prompt = None
+        task_provenance = "task prompt could not be regenerated"
+
+    visible = events if cut_at is None else events[:cut_at]
+    n_compactions = sum(
+        1 for ev in visible
+        if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary")
+    if cut_at is not None and n_compactions:
+        prompt_scope = ("not separately present at this cutoff; retained only through "
+                        "the latest compaction summary")
+    elif cut_at is not None:
+        prompt_scope = "present in the reconstructed context at this cutoff"
+    elif n_compactions:
+        prompt_scope = ("original user turn; after the first compaction it survives only "
+                        "through the displayed summaries")
+    else:
+        prompt_scope = "original user turn; remained in context for this whole run"
+
+    cli_version = (init_raw or {}).get("claude_code_version")
+    scaffold_label = "Claude Code" if row.get("trace_format") == "claude_code" else "agent"
+    return {
+        "task_prompt": task_prompt,
+        "task_provenance": task_provenance,
+        "prompt_scope": prompt_scope,
+        "source_run_id": source_id,
+        "scaffold_label": scaffold_label,
+        "cli_version": cli_version,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Filtering / sorting for the index                                           #
 # --------------------------------------------------------------------------- #
@@ -550,6 +674,8 @@ CSS = """
  .nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
  .hdr{background:#f7f7f9;border:1px solid #eee;border-radius:8px;padding:.8rem 1rem;margin-bottom:1rem;font-size:.9rem}
  .hdr b{color:#000}
+ .ctxbadge{display:inline-block;border-radius:4px;padding:0 6px;font-size:.68rem;font-weight:700;margin-left:6px;vertical-align:middle}
+ .ctxbadge.rebuilt{background:#e7f6ec;color:#166534;border:1px solid #a7d7b4}
  .pathline{margin-top:.4rem;display:flex;align-items:center;gap:.4rem}
  .pathline code{font-size:.78rem;color:#555;background:#f0f0f2;padding:2px 6px;border-radius:4px;word-break:break-all;user-select:all}
  .pathline button{background:#fff;border:1px solid #ccc;border-radius:5px;cursor:pointer;padding:0 6px;font-size:.8rem}
@@ -646,6 +772,7 @@ CSS = """
  .role-assistant .rolehdr{background:#1558d6}
  .role-user .rolehdr{background:#0a7d33}
  .role-reasoning .rolehdr{background:#7c5cbf}
+ .eventnote{border-top:1px solid #e3e8ef;padding:.4rem .7rem;color:#526071;font-size:.78rem;background:#f8fafc}
  .ectag{background:#b3261e;color:#fff;border-radius:3px;padding:0 5px;margin-left:8px;font-size:.92em}
  pre{white-space:pre-wrap;word-break:break-word;margin:0}
  pre.content{padding:.55rem .7rem;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:440px;overflow:auto}
@@ -717,6 +844,18 @@ CSS = """
  figure.fig{margin:0 0 18px;background:#fff;border:1px solid #e3e5ec;border-radius:8px;padding:14px 16px 10px;display:inline-block;max-width:100%}
  figure.fig svg{display:block;height:auto;max-width:100%}
  figure.fig figcaption{font-size:.72rem;color:#6a7180;line-height:1.45;margin-top:6px;max-width:520px}
+ .ctxstats{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 16px}
+ .ctxstat{border:1px solid #dde0e7;border-radius:8px;background:#fff;padding:8px 12px;min-width:115px}
+ .ctxstat b{display:block;font-size:1.2rem;color:#252932}
+ .ctxstat span{font-size:.72rem;color:#6a7180}
+ .ctxwarn{border:1px solid #efc47f;border-left:4px solid #c87800;border-radius:7px;background:#fffaf0;padding:9px 12px;margin:10px 0 16px;font-size:.82rem;color:#6f4700}
+ .ctxfig{margin:0 0 16px;background:#fff;border:1px solid #e3e5ec;border-radius:8px;padding:12px 14px;overflow-x:auto}
+ .ctxfig svg{display:block;height:auto;max-width:100%}
+ .ctxtimelines>details{margin:0 0 9px;border:1px solid #e2e4ea;border-radius:7px;background:#fff;padding:0 10px}
+ .ctxtimelines>details>summary{padding:9px 2px;cursor:pointer}
+ .ctxtimeline{display:inline-block;width:min(100%,850px);vertical-align:top;margin:0 8px 12px 0}
+ .ctxtimeline svg{display:block;height:auto;max-width:100%}
+ .cov-complete{color:#177235}.cov-partial{color:#a05a00}.cov-unavailable{color:#9f2d28}
  .costtable{max-width:900px}
  /* EM questions page */
  td.qtext{white-space:pre-wrap;max-width:760px}
@@ -1239,6 +1378,79 @@ ALLVIS_HTML = """
 </body></html>
 """.replace("__CSS__", CSS)
 
+CONTEXT_VISUALS_HTML = """
+<!doctype html><html><head><meta charset="utf-8"><title>context visuals</title>
+<style>__CSS__</style></head><body>
+{{ subnav|safe }}
+<div class="pagehead"><h1>Reward hacks and context</h1>
+ <span class="meta">provider-reported input context at annotated hack events</span></div>
+
+<div class="ctxstats">
+ <div class="ctxstat"><b>{{ trajectories|length }}</b><span>confirmed hack trajectories</span></div>
+ <div class="ctxstat"><b>{{ n_supported }}</b><span>with per-call context</span></div>
+ <div class="ctxstat"><b>{{ n_compacting }}</b><span>with recorded compactions</span></div>
+ <div class="ctxstat"><b>{{ n_hack_actions }}</b><span>mapped annotated hack events</span></div>
+</div>
+{% if omitted %}<div class="ctxwarn"><b>{{ omitted|length }} trajectories have no plotted context point.</b>
+ They remain in the coverage table below with a queryable omission reason; no token count was estimated.</div>{% endif %}
+
+{% if first_svg %}<div class="ctxfig">{{ first_svg|safe }}</div>{% endif %}
+{% if action_svg %}<div class="ctxfig">{{ action_svg|safe }}</div>{% endif %}
+{% if compaction_svg %}<div class="ctxfig">{{ compaction_svg|safe }}</div>{% endif %}
+
+<details class="legend" open>
+ <summary><b>Exact first-hack values</b> <span class="meta">· {{ first_rows|length }} trajectories</span></summary>
+ <table style="margin-top:.55rem"><thead><tr><th>#</th><th>trajectory</th><th>agent</th><th>first hack</th>
+  <th>model call</th><th>context</th><th>window full</th><th>within-run percentile</th><th>compaction</th></tr></thead><tbody>
+ {% for x in first_rows %}{% set t=x.trajectory %}{% set c=x.call %}
+ <tr><td class="num">{{ t.viewer_number }}</td><td><a href="/run/{{ t.run_id }}">{{ t.benchmark }}</a></td>
+  <td>{{ t.model }}</td><td class="num">event {{ t.first_hack_event }}</td><td class="num">{{ c.call_index }}</td>
+  <td class="num">{{ '{:,}'.format(c.context_tokens) }}</td><td class="num">{{ '%.1f%%'|format(x.fullness) }}</td>
+  <td class="num">{{ '%.0f%%'|format(x.rank) }}</td><td>{{ x.relative }}</td></tr>
+ {% endfor %}</tbody></table>
+</details>
+
+<details class="legend">
+ <summary><b>Every mapped hack event</b> <span class="meta">· exact points behind the second graph</span></summary>
+ <table style="margin-top:.55rem"><thead><tr><th>#</th><th>trajectory</th><th>hack event(s)</th><th>model call</th>
+  <th>context</th><th>window full</th><th>first?</th></tr></thead><tbody>
+ {% for x in hack_rows %}{% set t=x.trajectory %}{% set c=x.call %}
+ <tr><td class="num">{{ t.viewer_number }}</td><td><a href="/run/{{ t.run_id }}">{{ t.benchmark }}</a> · {{ t.model }}</td>
+  <td class="num">{{ c.hack_events|join(', ') }}</td><td class="num">{{ c.call_index }}</td>
+  <td class="num">{{ '{:,}'.format(c.context_tokens) }}</td><td class="num">{{ '%.1f%%'|format(x.fullness) }}</td>
+  <td>{{ 'canonical first hack' if c.is_first_hack else '' }}</td></tr>
+ {% endfor %}</tbody></table>
+</details>
+
+<h2 style="margin-top:1.6rem">Trajectory timelines</h2>
+<div class="ctxtimelines">
+{% for group in timeline_groups %}
+ <details><summary><b>{{ group.model }}</b> <span class="meta">· {{ group['items']|length }} trajector{{ 'y' if group['items']|length==1 else 'ies' }}</span></summary>
+ {% for item in group['items'] %}<div class="ctxtimeline"><a href="/run/{{ item.trajectory.run_id }}">open trajectory</a>{{ item.svg|safe }}</div>{% endfor %}
+ </details>
+{% endfor %}
+</div>
+
+<details class="legend" style="margin-top:1.4rem">
+ <summary><b>Coverage and definitions</b> <span class="meta">· all {{ trajectories|length }} confirmed hacks</span></summary>
+ <p class="meta">Claude context = input + cache creation + cache read tokens. OpenCode context = input + cache read tokens.
+ A hack on a tool-result event is assigned to the immediately preceding model call that produced the tool action.
+ Compactions are saved <code>compact_boundary</code> events; no reset is inferred from the token curve.</p>
+ <table><thead><tr><th>#</th><th>trajectory</th><th>scaffold</th><th>coverage flag</th><th>calls</th><th>window</th><th>compactions</th><th>caveat / omission reason</th></tr></thead><tbody>
+ {% for t in trajectories %}<tr data-context-coverage="{{ t.coverage_status }}">
+  <td class="num">{{ t.viewer_number }}</td><td><a href="/run/{{ t.run_id }}">{{ t.benchmark }}</a> · {{ t.model }}</td><td>{{ t.scaffold }}</td>
+  <td class="cov-{{ t.coverage_status }}"><b>{{ t.coverage_status }}</b></td><td class="num">{{ t.calls|length }}</td>
+  <td class="num">{{ '{:,}'.format(t.context_window) if t.context_window else '–' }}</td><td class="num">{{ t.compaction_events|length }}</td>
+  <td>{{ t.omission_reason or '' }}{% if t.unmapped_hack_events %}unmapped hack event(s): {{ t.unmapped_hack_events|join(', ') }}{% endif %}</td></tr>
+ {% endfor %}</tbody></table>
+ <h3 style="font-size:.9rem;margin-bottom:.25rem">Context-window denominators</h3>
+ <table><thead><tr><th>agent model</th><th>tokens</th><th>source</th></tr></thead><tbody>
+ {% for r in capacities %}<tr><td>{{ r.model }}</td><td class="num">{{ '{:,}'.format(r.tokens) }}</td><td>{{ r.source }}</td></tr>{% endfor %}
+ </tbody></table>
+</details>
+</body></html>
+""".replace("__CSS__", CSS)
+
 REPORT_HTML = """
 <!doctype html><html><head><meta charset="utf-8"><title>Cheating report</title>
 <style>__CSS__</style></head><body>
@@ -1566,6 +1778,38 @@ def index():
         subnav=_subnav("trajectories"))
 
 
+@app.route("/trajectory-visuals")
+def trajectory_visuals():
+    """Context usage and compaction timing at the annotated reward-hack events."""
+    trajectories = context_visuals.load_context_trajectories(_INDEX_RUNS)
+    supported = [t for t in trajectories if t.calls]
+    omitted = [t for t in trajectories if not t.calls]
+    first_rows = context_visuals.first_hack_table_rows(trajectories)
+    hack_rows = []
+    for t in trajectories:
+        if not t.context_window:
+            continue
+        for call in t.calls:
+            if call.hack_events:
+                hack_rows.append({
+                    "trajectory": t, "call": call,
+                    "fullness": 100 * call.context_tokens / t.context_window,
+                })
+    return render_template_string(
+        CONTEXT_VISUALS_HTML,
+        trajectories=trajectories, omitted=omitted,
+        n_supported=len(supported),
+        n_compacting=sum(bool(t.compaction_events) for t in supported),
+        n_hack_actions=sum(len(c.hack_events) for t in supported for c in t.calls),
+        first_svg=context_visuals.fig_first_hack_context(trajectories),
+        action_svg=context_visuals.fig_context_at_hack_actions(trajectories),
+        compaction_svg=context_visuals.fig_compaction_distance(trajectories),
+        first_rows=first_rows, hack_rows=hack_rows,
+        timeline_groups=context_visuals.grouped_timelines(trajectories),
+        capacities=context_visuals.capacity_rows(trajectories),
+        subnav=_subnav("visuals"))
+
+
 def _reasoning_capture(trace_format, agent_model, events):
     """What kind of model reasoning this trajectory preserves — a per-MODEL fact
     (no signature/marker survives in the viewer data), surfaced once in the header
@@ -1649,6 +1893,7 @@ def _trajectory_view(run_id: str, cut_at=None, with_tail: bool = False):
     # so trains-before-hack is verifiable by eye in the trace. Once a run has a
     # train_run_audit, failed launches get a ✗ badge and consume no number.
     events = rec.get("events", [])
+    context_display = _context_display(run_id, rec, r, events, cut_at)
     tail_events = []
     if cut_at is not None:
         if with_tail:
@@ -1736,7 +1981,8 @@ def _trajectory_view(run_id: str, cut_at=None, with_tail: bool = False):
     body = rnd.render_events(events, r.get("trace_format", ""),
                              quotes, marked_turns, annotations, turn_kinds,
                              train_turns, api_turns,
-                             reasoning_mode=(reasoning_capture or {}).get("block_mode"))
+                             reasoning_mode=(reasoning_capture or {}).get("block_mode"),
+                             initial_user_turn=context_display)
     # the cut-off tail, rendered with true absolute event numbers (so anchors
     # never collide with the prefix's). _render_blocks_event covers the claude
     # trace format, which is the only ask-supported scaffold; anything it can't
@@ -1756,6 +2002,7 @@ def _trajectory_view(run_id: str, cut_at=None, with_tail: bool = False):
     n_hack_true = sum(1 for t in marked_turns if _kind(t) == "hack")
     return dict(
         r=r, body=body, tail_body=tail_body, n_tail=len(tail_events),
+        context_display=context_display,
         reasoning_capture=reasoning_capture,
         flagged=is_flagged(r), hl=hl, oj=oj,
         everdict=HL_META.get(run_id, {}).get("everdict", ""),
@@ -2852,6 +3099,7 @@ _NAV_TREE = [
     ("trajectories", None, [
         ("trajectories", "/"),
         ("cheating report", "/report"),
+        ("visuals", "/trajectory-visuals"),
         ("timing", "/timing"),
         ("rates", "/rates"),
     ]),
@@ -2898,13 +3146,13 @@ def _subnav(active: str, window: str | None = None) -> str:
 
     def gated(top: str, subs: list) -> list:
         if top == "trajectories" and not has_report:
-            return [(n, h) for n, h in subs if n == "trajectories"]
+            return [(n, h) for n, h in subs if n in ("trajectories", "visuals")]
         return subs
 
     # The tree entry owning `active` (window-disambiguated when given). An
     # unknown name falls back to the first entry rather than rendering nothing.
     owner = next((e for e in _NAV_TREE
-                  if (window is None or e[1] in (None, window))
+                  if (window is None or e[1] == window)
                   and any(n == active for n, _ in e[2])), _NAV_TREE[0])
     top_active, win_active = owner[0], owner[1]
 
@@ -3712,7 +3960,7 @@ def all_visuals():
         ALLVIS_HTML, em_figs=em_figs, em_cost_lead=_em_cost_lead(em),
         crt_lead=_cost_lead(crt_c, "probe", crt_u),
         early_lead=_cost_lead(early_c, "probe", early_u),
-        subnav=_subnav("visuals"))
+        subnav=_subnav("visuals", window="em"))
 
 
 # the old per-window cost pages are folded into /continuations/visuals;

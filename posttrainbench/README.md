@@ -11,7 +11,12 @@ Layout:
   then open http://127.0.0.1:5001). Faithful port of the original, plus two new tabs:
   **Continuations** (one page per `exp_probe_context` probe — a copy of the trajectory
   with the probe's cut point marked and the probe Q&A appended at the bottom) and
-  **Visuals → Cost** (billed cost of the probes).
+  **Visuals → Cost** (billed cost of the probes). Run pages insert the
+  era-matched initial task prompt at its model-visible position (after the first
+  `system:init`, before the first assistant response) and restore recorded
+  scaffold-init metadata with provenance. Every compaction record keeps its true
+  event number: status pings, boundary, and the verbatim synthetic-user summary
+  render separately.
 - `reconstruct.py`, `exp_probe_context.py` — the reconstruction/probe tools (below).
 - `lib/` — the reconstruction package (`runs`, `stream`, `recon_*`, `prompts`) plus the
   viewer's helpers (`render`, `paths`, `locate`).

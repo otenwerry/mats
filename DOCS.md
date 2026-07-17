@@ -13,11 +13,17 @@ uv run shared/exp_ask_questions.py
     [--n=1]
     [--turn=end (or a turn/event index, 'first_hack')]
     [--only=<qid,qid>]
+    [--include-inactive]   # propensity only; requires --only, permits retained/archived qids
     [--concurrency=50]
     [--timeout=600]
     [--campaign=questions_<set>]   # output subdirectory, under the env's own output root
-    [--baseline=no]   # yes = also ask each question without resumed context, per model config
+    [--baseline=no]   # yes = also ask each question without resumed context, per model config; only = just those baselines, no trajectory asks
     [--no-judge, --dry-run]
+
+For `--questions=propensity`, numeric ranges come from each question's
+`answer_format` in `shared/propensity_questions.json`; most active scale
+questions currently use 1–100, while `audit_rate` uses 0–100. Changing only the
+displayed question text does not change parsing or viewer axes.
     posttrainbench only: [--cli=original] [--user-config]
 
 # Petri
@@ -25,10 +31,13 @@ uv run shared/exp_ask_questions.py
 ## Viewer
 uv run viewer.py
 
+The ML scenarios / original audits / visuals page starts with a count-stacked
+outcome graph by target model, using the same five buckets as the main page.
+
 ## Auditing
 uv run exp_audit_pipeline.py
 	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n --condition=allow/correct 
-    [--reasoning=yes/no]
+    [--reasoning=yes]
 	[--max-turns=60]
 	[--auditor=deepseek-v4-pro]
 	[--auditor-thinking=no]
@@ -69,6 +78,13 @@ uv run exp_ask_questions.py
 
 ## Viewer
 uv run viewer.py        
+
+The main Trajectories / visuals page compares annotated reward-hack events with
+provider-reported context size and recorded compaction boundaries. It includes
+raw tokens, percent of the run's context-window capacity, within-trajectory
+percentiles, exact event tables, and complete per-trajectory timelines. Codex
+and Qwen trajectories remain visible with missing-data flags because their
+streams do not preserve usable per-call input-context counts.
 
 ## Reconstruct context (free)
 uv run reconstruct.py

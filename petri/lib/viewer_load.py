@@ -941,12 +941,17 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # pre-thinking run -> shown as plain auditor (no suffix).
                         auditor_reasoning_effort=(log.eval.metadata or {}).get("auditor_reasoning_effort"),
                         # TARGET run knobs AS RUN (stamped by exp_rh_audit). max_turns = the
-                        # auditor turn cap; reasoning = native target reasoning on/off (None on
-                        # runs predating the flag). Surfaced as skim columns + the reasoning
-                        # visuals on the settings sweep (see viewer write_table /
-                        # reasoning_comparison_data).
+                        # auditor turn cap; reasoning = native target reasoning on/off. Runs
+                        # predating the run-level `reasoning` flag (added 2026-07-07) fall back
+                        # to the older per-target `reasoning_enabled` stamp -- the pin actually
+                        # sent to OpenRouter, so it means the same thing; None only when neither
+                        # was stamped. Surfaced as the Metadata target-reasoning cell + the
+                        # reasoning visuals on the settings sweep (whose runs all stamp
+                        # `reasoning` directly, so the fallback never feeds those figures).
                         max_turns=(log.eval.metadata or {}).get("max_turns"),
-                        reasoning=(log.eval.metadata or {}).get("reasoning"),
+                        reasoning=((log.eval.metadata or {}).get("reasoning")
+                                   if (log.eval.metadata or {}).get("reasoning") is not None
+                                   else (log.eval.metadata or {}).get("reasoning_enabled")),
                         # FIXED-SP field: True = this run pinned the target system prompt via
                         # --fixed_sp (stamped into log.eval.metadata by exp_rh_audit).
                         # Informational only: the sweep split (see SWEEPS in viewer)

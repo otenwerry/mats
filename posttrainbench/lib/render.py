@@ -287,33 +287,91 @@ def _reasoning_badge(mode: str | None) -> str:
 _COMPACT_PREAMBLE = "This session is being continued from a previous conversation"
 
 
-def _compaction_block(summary: str | None) -> str:
-    """Collapsed dropdown (closed by default) for a context compaction. `summary`
-    is the VERBATIM post-compaction summary the model saw (claude / claude_non_api
-    preserve it in the trace); None when a run compacted without a recorded
-    summary — labelled so the verbatim-vs-not distinction is never silent."""
-    if summary is not None:
-        badge = '<span class="compbadge verbatim">verbatim</span>'
-        body = f'<pre class="content">{html.escape(summary)}</pre>'
+def _compaction_boundary(ev: dict, n: int) -> str:
+    """Render the compact-boundary record itself, without swallowing its index.
+
+    The following synthetic user event carries the model-visible summary and is
+    rendered separately. Keeping both records visible makes the event numbering
+    faithful to the saved stream.
+    """
+    raw = ev.get("raw") or {"type": "system", "subtype": "compact_boundary"}
+    txt = json.dumps(raw, indent=2)
+    return ('<details class="compaction"><summary>'
+            f'&#128476; #{n} · system · compact_boundary &mdash; '
+            'earlier conversation replaced by the next synthetic user summary'
+            '</summary>'
+            f'<pre class="content tool">{html.escape(txt)}</pre></details>')
+
+
+def _is_compaction_summary(ev: dict) -> bool:
+    if ev.get("type") != "user":
+        return False
+    text = "".join(
+        b.get("text", "") for b in (ev.get("blocks") or [])
+        if b.get("type") == "text")
+    return text.strip().startswith(_COMPACT_PREAMBLE)
+
+
+def _compaction_summary_event(ev: dict, n: int, quotes) -> str:
+    """Render the exact synthetic user turn after a compaction, as its own event."""
+    text = "".join(
+        b.get("text", "") for b in (ev.get("blocks") or [])
+        if b.get("type") == "text")
+    badge = '<span class="compbadge verbatim">verbatim model-visible summary</span>'
+    if text:
+        body = (f'<details class="toolout"><summary>summary · {len(text):,} chars</summary>'
+                f'<pre class="content">{mark(text, quotes)}</pre></details>')
     else:
         badge = '<span class="compbadge para">summary not recorded</span>'
-        body = ('<pre class="content empty">(this run compacted here, but the '
-                'summary text was not preserved in the trace)</pre>')
-    return ('<details class="compaction"><summary>&#128476; context compaction '
-            '&mdash; the earlier conversation was summarized here ' + badge
-            + '</summary>' + body + '</details>')
+        body = '<pre class="content empty">(synthetic summary text missing)</pre>'
+    return (f'<div class="msg role-user compactsummary">'
+            f'<div class="rolehdr">#{n} · Synthetic user · compaction summary{badge}</div>'
+            f'{body}</div>')
+
+
+def _initial_user_event(info: dict) -> str:
+    """The PTB assignment was a CLI argument, so it has no raw event index."""
+    prompt = info.get("task_prompt") or "(prompt unavailable)"
+    provenance = info.get("task_provenance") or ""
+    scope = info.get("prompt_scope") or ""
+    badge = '<span class="ctxbadge rebuilt">era-matched reconstruction</span>'
+    note = " · ".join(x for x in (scope, provenance) if x)
+    return (f'<div class="msg role-user initial-user-turn">'
+            f'<div class="rolehdr">Initial user turn · unnumbered in the raw stream{badge}</div>'
+            f'<pre class="content">{html.escape(prompt)}</pre>'
+            f'<div class="eventnote">{html.escape(note)}</div></div>')
+
+
+def _system_init_event(ev: dict, n: int, info: dict) -> str:
+    """Recorded init metadata plus an explicit account of unarchived scaffold context."""
+    raw = ev.get("raw") or {"type": "system", "subtype": "init"}
+    txt = json.dumps(raw, indent=2)
+    if len(txt) > 200:
+        payload = (f'<details class="toolout"><summary>recorded init metadata · '
+                   f'{len(txt):,} chars</summary><pre class="content tool">'
+                   f'{html.escape(txt)}</pre></details>')
+    else:
+        payload = f'<pre class="content tool">{html.escape(txt)}</pre>'
+    cli = f" CLI {info['cli_version']}." if info.get("cli_version") else ""
+    caveat = (
+        f"The built-in {info.get('scaffold_label', 'agent')} system prompt and tool "
+        f"schemas were supplied but not archived.{cli} No PTB project-instruction "
+        "file was supplied. The task-specific user turn follows below.")
+    payload += f'<div class="eventnote">{html.escape(caveat)}</div>'
+    return _msg("system", f"#{n} · system · init", payload)
 
 
 def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
                   annotations=None, turn_kinds=None, train_turns=None,
-                  api_turns=None, reasoning_mode=None) -> str:
+                  api_turns=None, reasoning_mode=None,
+                  initial_user_turn=None) -> str:
     """`marked_turns`: marked event indices. `turn_kinds`: {turn: {kind, reason}}
     classifying each marked turn as 'hack' (direct hacking action, red) or
     'context' (notable but not a hack, neutral); unclassified turns default to
     'hack'. `annotations`: {turn: [{note,quote,kind}]} reviewer notes appended
-    below the relevant turn. A `compact_boundary` system event + the synthetic
-    summary user turn that follows it (+ its "compacting" status pings) are folded
-    into one collapsed compaction dropdown (see _compaction_block)."""
+    below the relevant turn. Compaction boundaries, status records, and the
+    synthetic summary user turn are each rendered under their own true event
+    number; the large summary text is collapsed by default."""
     hacks = set(marked_turns or ())
     anno = {int(k): v for k, v in (annotations or {}).items()}
     kinds = {}
@@ -321,30 +379,13 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
         if isinstance(v, str):
             v = {"kind": v}
         kinds[int(k)] = v
-    # fold each compaction (its `compact_boundary` event + the synthetic summary
-    # user turn right after it + its "compacting" status pings) into one collapsed
-    # dropdown; `comp_consumed` events are not rendered on their own.
-    comp_summary, comp_consumed = {}, set()
+    out, last_session, initial_inserted = [], None, False
     for n, ev in enumerate(events):
         if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
-            summ = None
-            if n + 1 < len(events) and events[n + 1].get("type") == "user":
-                txt = "".join(b.get("text", "") for b in (events[n + 1].get("blocks") or [])
-                              if b.get("type") == "text")
-                if txt.strip().startswith(_COMPACT_PREAMBLE):
-                    summ = txt
-                    comp_consumed.add(n + 1)
-            comp_summary[n] = summ
-        elif (ev.get("type") == "system" and ev.get("subtype") == "status"
-              and (ev.get("raw") or {}).get("status") == "compacting"):
-            comp_consumed.add(n)
-
-    out, last_session = [], None
-    for n, ev in enumerate(events):
-        if n in comp_consumed:
+            out.append(_compaction_boundary(ev, n))
             continue
-        if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
-            out.append(_compaction_block(comp_summary.get(n)))
+        if _is_compaction_summary(ev):
+            out.append(_compaction_summary_event(ev, n, quotes if (n in hacks or not hacks) else ()))
             continue
         # rollback-experiment dividers render as distinct banners
         if ev.get("rollback_marker"):
@@ -360,6 +401,12 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
         if sidx != last_session and sidx is not None:
             out.append(f'<div class="sessdiv">— session {sidx} —</div>')
             last_session = sidx
+        if (initial_user_turn and not initial_inserted
+                and ev.get("type") == "system" and ev.get("subtype") == "init"):
+            out.append(_system_init_event(ev, n, initial_user_turn))
+            out.append(_initial_user_event(initial_user_turn))
+            initial_inserted = True
+            continue
         marked = n in hacks
         mk = mk_title = None
         if marked:
@@ -389,4 +436,6 @@ def render_events(events: list, trace_format: str, quotes=(), marked_turns=(),
             out.append(_render_blocks_event(ev, n, q, mk, mk_title or "", extra, reasoning_mode))
         if n in anno:
             out.append(_annotations_html(anno[n]))
+    if initial_user_turn and not initial_inserted:
+        out.insert(0, _initial_user_event(initial_user_turn))
     return "\n".join(out)

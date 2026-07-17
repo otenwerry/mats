@@ -2,7 +2,7 @@
 
 > **Covers:** the PostTrainBench context-reconstruction issue tracker — per-run fidelity tags (nudge restarts, background restarts, edits lost, reasoning lost, effort, task-prompt rebuild, resume turns) and the universal caveats. Ties to `lib/recon_claude.py`, `exp_ask_questions.py`, `lib/prompts.py`, and the viewer's issues column on `/continuations/hacks`.
 > **Read when:** doing PTB context-reconstruction / probe work, or reading a run's reconstruction-fidelity flags.
-> **Last updated:** 2026-07-15
+> **Last updated:** 2026-07-16
 > **NB (2026-07-15):** `exp_probe_context.py` and `exp_run_context_recon.py` are RETIRED — the probe now runs as `exp_ask_questions.py --questions=context` (DEFAULT_PROBE + resolve_cli moved there verbatim). Mentions of the old files below are historical; the fixes they describe live on in the shared recon/ask code paths.
 > **Original path:** posttrainbench/ISSUES.md
 > **Note:** the file's own rule — when an issue changes, update this file AND the viewer tags/legend in the same change.
@@ -227,6 +227,24 @@ with the harness's `get_prompt.py`.
   existing continuation predates the fix (re-run clears it).
 - Residual risk: the run-time harness might not match any public commit; one
   saved `prompt.txt` from Maksym would settle it completely.
+
+### Viewer context display (fixed 2026-07-16)
+
+The trajectory viewer now inserts the era-matched initial PTB task prompt at its
+model-visible position: directly after the first `system:init` and before the
+first assistant response. It is styled as a user turn and explicitly left
+unnumbered because the CLI argument was never emitted as a raw stream event; a
+provenance line states whether it is still separately present at a continuation
+cutoff or survives only through the latest compaction summary. The first
+`system:init` block states that the scaffold system prompt/tool schemas were not
+archived and records the absence of harness-supplied project instruction files.
+
+Claude-format run pages re-align to the raw stream and restore full system-event
+payloads that the provider viewer data reduced to `{type, subtype}`. Compaction
+display is event-faithful: `compacting` status records, the numbered
+`compact_boundary`, and the following numbered synthetic user summary all render
+separately. The large summary stays collapsed by default and is labelled as the
+verbatim model-visible text.
 
 ### `edits lost` (all 7 codex runs)
 
