@@ -6,7 +6,8 @@ secondarily annotated for its hack turns, and everything linked up. The three st
 each reusing the standalone scripts' code (single source of truth):
 
   1. AUDIT     (exp_rh_audit.build_tasks + run_eval): targets x seeds x epochs
-               trajectories, each judged inline on all 5 dims. -> one timestamped
+               trajectories, each judged inline on its global + seed-scoped dimensions.
+               -> one timestamped
                log dir under mats-local/petri/logs/.
   2. ANNOTATE  (exp_annotate_hacks.run_annotation): secondary turn-level judging of
                exactly the FULL reward hacks (the binary definition / first viewer
@@ -20,7 +21,7 @@ Robustness (the point of this file):
     aborted on (unlike the standalone exp_rh_audit CLI, which aborts). Annotation
     catches per-trajectory errors and keeps going. Annotate/viewer are each wrapped
     so a failure in one still lets the others complete.
-  - No re-judge step: fresh exp_rh_audit runs already produce all 5 dims, so the
+  - No re-judge step: fresh exp_rh_audit runs already produce their routed dimensions, so the
     binary-hack gate works directly. (exp_rejudge_rh.py is only for OLDER audits.)
 
 --targets, --seed-dir, --seeds and --epochs are REQUIRED (no defaults) so the experiment
@@ -102,6 +103,7 @@ from exp_rh_audit import (
     TARGET_CHOICES, SEEDS_ROOT, DATA, MAX_TURNS, REASONING_EFFORT, build_tasks, run_eval,
     dead_targets, reasoning_tag, resolve_auditor, resolve_auditor_thinking, resolve_seeds,
     resolve_fixed_sp, reject_fixed_sp_flag, resolve_condition, resolve_reasoning, JUDGE,
+    print_dimension_plan,
 )
 from exp_annotate_hacks import load_all_original_audits, run_annotation
 from model_routing import route  # match build_tasks' provider routing for the dead-target guard
@@ -246,6 +248,7 @@ def run_audit_stage(cfg: dict):
     eff = cfg["auditor_reasoning_effort"]
     thinking_note = "off" if eff is None else f"adaptive (effort={eff}, summarized)"
     print(f"  auditor={cfg['auditor']} [thinking: {thinking_note}]  judge={JUDGE}")
+    print_dimension_plan(seeds, cfg["seeds_path"])
     fsp = cfg["fixed_system_prompt"]
     if isinstance(fsp, dict):
         sizes = ", ".join(f"{m}={len(fsp[m])}ch" for m in seeds)

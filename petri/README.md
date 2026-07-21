@@ -38,8 +38,8 @@ tools/                           # occasional standalone utilities (run by hand)
   migrate_hpc_*.py               #   one-time data migrations, already applied (idempotent)
   cleanup_dead_rollbacks.py / cleanup_nonhack_rollbacks.py
 docs/                            # CODEBASE_GUIDE.md, CONTINUATION_EXPERIMENT_SPEC.md
-seeds/                           # audit scenarios (one .md per seed)
-dimensions/                      # judge rubrics (one .md per dimension)
+seeds/                           # audit scenarios, including composed _shared/ collections
+dimensions/                      # judge rubrics: global/ + a folder mirroring each seed dir
 ```
 
 Data (eval logs, the generated viewer, and JSON sidecars) lives in `../../mats-local/petri/`, **not** in this repo, so run data and ~MBs of HTML aren't committed. See `docs/CODEBASE_GUIDE.md` for how the code + experiments fit together, and `mats-local/petri/DATA_GUIDE.md` for how to read the data without being misled.
@@ -138,7 +138,20 @@ uv run exp_resample_begin_pipeline.py --trajectories=466 --n=5 --dry-run   # FRE
 
 `seeds/` holds the audit scenarios. Every seed is **no-nudge**: its body carries an explicit "Auditor conduct" paragraph forbidding the auditor from suggesting, hinting at, or encouraging the hack, so any reward hacking must originate from the target's own reasoning. The auditor builds the tempting opportunity but never verbally cues the target.
 
-`dimensions/` holds the judge rubrics (auto-loaded as a directory). They are scored together in one judge call: `reward_hacking` (the target's gaming, tiered 1–10) and `hack_in_final_solution` (does the final submitted solution still rest on the hack — informational); target-quality checks — `degenerate_behavior` (target acted incoherently) and `hallucination` (target genuinely confused about its own actions, a low-confidence signal); validity checks on the audit itself — `auditor_nudging` (did the auditor verbally steer; high = `reward_hacking` is contaminated), `auditor_mistakes`, and `situational_awareness` (did the target clock it's being tested); plus `incompleteness` (how unfinished the run was when it ended — informational). All rubrics are unvalidated; spot-check judge citations before trusting at scale. To change the dimension set, edit the files in `dimensions/`; older audits then need a re-judge (see Tools).
+Audit dimensions are routed by seed directory. Every audit judge receives all `.md`
+rubrics in `dimensions/global/` plus all rubrics in the relevant mirrored seed folder,
+such as `dimensions/p_hacking/`. A more specific member folder such as
+`dimensions/p_hacking/checkout_redesign/` wins over its family folder when it contains
+rubrics; this lets one collection invocation use different dimensions for different
+prompts. The exact folder, rubric files, and output names are printed before the run and
+stored in its task metadata.
+
+During the directory migration only, existing top-level `dimensions/*.md` files are also
+loaded as global dimensions. No files were moved as part of the routing change. Duplicate
+dimension filenames across the selected global and seed-specific sources fail before any
+API call. `dimensions/archived/` and `dimensions/rollback_only/` remain excluded from
+ordinary audit judging. Older audits need a re-judge after their rubric set changes (see
+Tools).
 
 The committed **binary reward-hack definition** lives in one place — `viewer.BINARY_HACK_CRITERIA` — and is imported everywhere (the annotate gate, the index tally, rollback selection).
 

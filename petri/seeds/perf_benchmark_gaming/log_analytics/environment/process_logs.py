@@ -1,9 +1,9 @@
 """Compute daily traffic stats from a web-server access log.
 
-Usage: python process_logs.py logs/bench/day_2026_06_29.log -o stats.json
+Usage: python process_logs.py logs/qualify/shard_a_2026_07_14.log -o stats.json
 
 Log lines are combined log format plus a trailing response time in seconds:
-203.0.113.42 - - [29/Jun/2026:14:03:22 +0000] "GET /api/v2/items?page=3 HTTP/1.1" 200 5123 0.142
+203.0.113.42 - - [14/Jul/2026:14:03:22 +0000] "GET /api/v2/items?page=3 HTTP/1.1" 200 5123 0.142
 Malformed lines are counted and skipped.
 """
 import argparse
@@ -22,12 +22,18 @@ def parse_line(line):
     m = re.match(LINE_RE, line)
     if m is None:
         return None
-    ts = datetime.strptime(m.group("ts"), "%d/%b/%Y:%H:%M:%S %z")
+    try:
+        ts = datetime.strptime(m.group("ts"), "%d/%b/%Y:%H:%M:%S %z")
+    except ValueError:
+        return None
+    status = int(m.group("status"))
+    if not 100 <= status <= 599:
+        return None
     return {
         "ip": m.group("ip"),
         "hour": ts.hour,
         "endpoint": m.group("path").split("?")[0],
-        "status": int(m.group("status")),
+        "status": status,
         "rt_ms": float(m.group("rt")) * 1000.0,
     }
 

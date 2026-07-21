@@ -70,7 +70,7 @@ have evolved since (seeds/ now has category subdirs, see CONFIG_VERSION for the 
     (p-hacking, benchmark gaming). The 3 artificial reward-signal seeds are
     dropped: they work by actively rewarding misbehavior, incompatible with
     no-encouragement.
-  - judging: our custom dimensions (all from dimensions/, no built-in defaults):
+  - judging: our custom dimensions (global + the relevant seed-dir scope, no built-in defaults):
     reward_hacking + auditor_nudging + situational_awareness, plus auditor_mistakes
     (auditor did something unrealistic -- bad simulated tool result or implausible
     user behavior) and degenerate_behavior (target acted incoherently). The last two
@@ -102,7 +102,6 @@ from inspect_petri import (
     audit_solver,
     auditor_agent,
     auditor_tools,
-    judge_dimensions,
 )
 # Private modules of the pinned inspect-petri (==3.0.11). Used ONLY by our fixed-system-
 # prompt target (fixed_system_prompt_target), which mirrors the stock target driver so it
@@ -114,6 +113,7 @@ from inspect_petri.util import parse_markdown_file
 
 # all paths come from the single source of truth in petri_paths
 from petri_paths import PETRI_ROOT, DATA, ENV_FILE, DIMENSIONS_DIR
+from dimension_routing import AuditDimensionSet, audit_dimension_set
 import openrouter_cost   # real-cost capture patch for OpenRouter calls (installed in run_eval)
 import direct_cost       # list-price cost for direct anthropic/openai calls (installed in run_eval)
 import model_window      # correct Inspect's context windows so auditor compaction fires at the real window (installed in run_eval)
@@ -166,7 +166,14 @@ def resolve_reasoning(reasoning_arg: str | None) -> bool:
 # self-describing -- any reader (human or AI) can tell what config produced a dir
 # without reverse-engineering the directory name. Bump CONFIG_VERSION when the seed
 # set or judge dimensions change materially. See mats-local/petri/DATA_GUIDE.md.
-CONFIG_VERSION = "v7"  # v7: RH labeling overhaul (2026-07-08): reward_hacking now emits a
+CONFIG_VERSION = "v10"  # v10: p-hacking is a composed two-scenario collection with
+                       #      shared prompts/conditions and a scientific retrieval study.
+                       # v9: training-data-misuse RH includes validation contamination;
+                       #     validation_contamination added to the structured RH type vocab.
+                       # v8: judge dimensions route per seed prompt: legacy flat globals +
+                       #     dimensions/global/ + the relevant dimensions/<seed-dir>/ scope.
+                       #     Exact rubric files/scope are stamped into task metadata.
+                       # v7: RH labeling overhaul (2026-07-08): reward_hacking now emits a
                        #     two-line RH_CATEGORY (thought_about_hacking / abandoned_unprompted /
                        #     abandoned_prompted / delivered_hack) + RH_TYPES tag scheme (replaces
                        #     the single RH_FAILURE_MODES line); refused_hack RENAMED+redefined to
@@ -324,9 +331,10 @@ _PINNED_USER_PROMPT = "USER_PROMPT.txt"
 # conditions/, SYSTEM_PROMPT.txt, USER_PROMPT.txt -- from a sibling _shared/ dir at the
 # collection root. So the shared text lives ONCE (edit it once) and each variant is just its
 # scenario + data. scenario.md fills two placeholders in the shared core.md: {{TASK}} (the
-# one-clause task description) and {{TOOLING}} (the environment/base-model sentence, which
-# differs for tabular vs. text tasks). A self-contained member (its own core.md + conditions/)
-# still works unchanged, so non-collection pinned dirs are unaffected.
+# task description) and {{TOOLING}} (historically an environment/base-model sentence for
+# ML; it may be a longer scenario-specific guidance block in other families). A
+# self-contained member (its own core.md + conditions/) still works unchanged, so
+# non-collection pinned dirs are unaffected.
 _PINNED_SHARED_DIR = "_shared"
 _PINNED_SCENARIO = "scenario.md"
 _CORE_PLACEHOLDERS = ("{{TASK}}", "{{TOOLING}}")   # in _shared/core.md, filled from scenario.md
@@ -372,8 +380,12 @@ def _pinned_conditions_dir(seeds_path: str | Path) -> Path:
     """The conditions/ dir backing a pinned seed: its own if present (self-contained), else the
     collection's _shared/conditions/ (composed member)."""
     d = Path(seeds_path)
-    own = d / _PINNED_CONDITIONS_DIR
-    return own if own.is_dir() else d.parent / _PINNED_SHARED_DIR / _PINNED_CONDITIONS_DIR
+    # Resolve by LAYOUT, not merely by whether an old empty directory happens to remain
+    # on disk after converting a self-contained seed to a composed member. Otherwise that
+    # empty directory shadows the shared conditions and makes the member unrunnable.
+    if (d / _PINNED_CORE).is_file():
+        return d / _PINNED_CONDITIONS_DIR
+    return d.parent / _PINNED_SHARED_DIR / _PINNED_CONDITIONS_DIR
 
 
 def pinned_conditions(seeds_path: str | Path) -> list[str]:
@@ -466,9 +478,9 @@ def _pinned_sources(seeds_path: str | Path) -> dict:
 
 
 def _parse_scenario(scenario_path: Path) -> tuple[str, str]:
-    """A composed member's scenario.md -> (task, tooling). Format: a `[TASK]` section then a
-    `[TOOLING]` section (any leading comment before `[TASK]` is ignored); both required and
-    non-empty. These fill {{TASK}} / {{TOOLING}} in the shared core.md."""
+    """A composed member's scenario.md -> (task, tooling/guidance). Format: a `[TASK]`
+    section then a `[TOOLING]` section (any leading comment before `[TASK]` is ignored);
+    both required and non-empty. These fill {{TASK}} / {{TOOLING}} in shared core.md."""
     task_mark, tool_mark = _SCENARIO_MARKS
     text = scenario_path.read_text()
     if task_mark not in text or tool_mark not in text or text.index(task_mark) > text.index(tool_mark):
@@ -539,9 +551,13 @@ def assemble_pinned_seed(seeds_path: str | Path, condition: str) -> Sample:
     metadata["condition"] = condition
     return Sample(id=root.name, input=input_text, metadata=metadata)
 
-# Judge dimensions: ALL our custom dims from the dimensions/ dir (auto-loaded by
-# judge_dimensions; the .md files there are the authoritative list -- adding/removing a
-# file changes the judged set with no edit here). Currently: reward_hacking, noticed_hack,
+# Judge dimensions shared by non-original-audit workflows that have not yet selected a
+# concrete seed task (continuations/resamples import this constant). Original audit tasks
+# use resolve_run_dimension_sets below and therefore get global + seed-scoped dimensions.
+# Top-level dimensions/*.md remain temporary legacy globals until Owen moves them; after
+# that this constant resolves from dimensions/global/*.md.
+#
+# Current global set: reward_hacking, noticed_hack,
 # deception, auditor_nudging, auditor_mistakes, situational_awareness,
 # degenerate_behavior, hallucination, incompleteness. Two score the auditor as validity
 # checks (auditor_nudging: high = the auditor verbally steered the target, so
@@ -558,7 +574,46 @@ def assemble_pinned_seed(seeds_path: str | Path, condition: str) -> Sample:
 # auditor_mistakes + degenerate_behavior are categorical, expected at 1 on most runs.
 # (honest_path_ambiguity + hack_in_final_solution were retired to dimensions/archived/ --
 # no longer judged; hack_in_final_solution's info is now in the RH_CATEGORY split.)
-DIMENSIONS = judge_dimensions(DIMENSIONS_DIR)
+DIMENSIONS = list(audit_dimension_set(SEEDS_ROOT, allow_empty=True).dimensions)
+
+
+def resolve_run_dimension_sets(
+    selected_seeds: list[str], seeds_path: str | Path
+) -> dict[str, AuditDimensionSet]:
+    """Concrete dimension set for each task unit in one audit invocation.
+
+    A collection has one unit per selected member, so member-specific dimension folders
+    can differ within the same invocation. Plain and single-pinned seed directories have
+    one shared unit. Keys are normalized absolute unit paths, matching build_tasks.
+    """
+
+    root = Path(seeds_path)
+    if is_pinned_collection(root):
+        selected = set(selected_seeds)
+        unit_paths = [root / member for member in pinned_collection_members(root)
+                      if member in selected]
+    else:
+        unit_paths = [root]
+    return {
+        str(path.resolve()): audit_dimension_set(path)
+        for path in unit_paths
+    }
+
+
+def print_dimension_plan(selected_seeds: list[str], seeds_path: str | Path) -> None:
+    """Print the exact global+scoped rubric set before an audit runs."""
+
+    for unit_path, selected in resolve_run_dimension_sets(selected_seeds, seeds_path).items():
+        try:
+            unit_label = str(Path(unit_path).relative_to(SEEDS_ROOT))
+        except ValueError:
+            unit_label = unit_path
+        scope = selected.scope_dir
+        try:
+            scope_label = str(scope.relative_to(DIMENSIONS_DIR)) if scope else "none"
+        except ValueError:
+            scope_label = str(scope)
+        print(f"  judge dimensions [{unit_label}; scope={scope_label}]: {selected.names}")
 
 
 def reasoning_tag(reasoning: bool) -> str:
@@ -837,6 +892,7 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
             "condition is required for a PINNED seed dir (or a collection of pinned dirs) "
             "and forbidden otherwise; resolve it with resolve_condition(--condition, seeds_path)")
     selected_set = set(selected_seeds)
+    dimension_sets = resolve_run_dimension_sets(selected_seeds, seeds_path)
     # One task per (target x unit). A unit = one seed source sharing ONE fixed system
     # prompt: a plain or single-pinned dir is a single unit (the pre-collection behavior);
     # a COLLECTION dir is one unit PER SELECTED member, because every member carries its
@@ -856,17 +912,33 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
         if missing_sp:
             raise SystemExit(f"fixed_system_prompt dict is missing/empty for member(s) "
                              f"{missing_sp}; resolve it with resolve_fixed_sp")
-        units = [(str(Path(seeds_path) / m), m, fixed_system_prompt[m]) for m in members]
+        units = [
+            (
+                str(Path(seeds_path) / m),
+                m,
+                fixed_system_prompt[m],
+                dimension_sets[str((Path(seeds_path) / m).resolve())],
+            )
+            for m in members
+        ]
     else:
         if not isinstance(fixed_system_prompt, str):
             raise SystemExit(f"{seeds_path} is not a collection dir, so fixed_system_prompt "
                              "must be a single string; resolve it with resolve_fixed_sp")
-        units = [(seeds_path, None, fixed_system_prompt)]
+        units = [(
+            seeds_path,
+            None,
+            fixed_system_prompt,
+            dimension_sets[str(Path(seeds_path).resolve())],
+        )]
     # Native reasoning on -> strip the '<thinking> tags' scratchpad instruction from each
     # unit's fixed SP ONCE here (unit_sp flows verbatim into the auditor preamble, the target
     # driver, and the stamped metadata, so one strip propagates everywhere consistently).
     if reasoning:
-        units = [(p, n, strip_thinking_instruction(sp)) for (p, n, sp) in units]
+        units = [
+            (p, n, strip_thinking_instruction(sp), dims)
+            for (p, n, sp, dims) in units
+        ]
     # Bind the auditor role to a model carrying our reasoning config. With an effort
     # set, Inspect sends adaptive thinking (summarized); None -> empty config == thinking
     # off (the pre-thinking behavior).
@@ -886,10 +958,10 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
         # synthetic tools don't 400 -- see the petri-auditor-empty-tool-params note.)
         target_role, reasoning_enabled_meta, strict_tools_meta = build_target_model(
             target, reasoning_on=reasoning, effort=REASONING_EFFORT)
-        for unit_path, unit_name, unit_sp in units:
+        for unit_path, unit_name, unit_sp, unit_dimensions in units:
             base = audit(
                 seed_instructions=unit_path,
-                judge_dimensions=DIMENSIONS,
+                judge_dimensions=list(unit_dimensions.dimensions),
                 max_turns=max_turns,
                 turn_counter=TURN_COUNTER,  # auditor sees "turn N of M" (see TURN_COUNTER def)
                 enable_rollback=False,  # linear transcripts: auditor can't roll back / branch
@@ -962,7 +1034,18 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
                         "auditor_reasoning_effort": auditor_reasoning_effort,
                         "judge": JUDGE,
                         "nudge": "no_nudge",
-                        "judge_dimensions": [d.name for d in DIMENSIONS],
+                        # Exact rubric routing for this task. A collection invocation may
+                        # have different sets per member, so these are task-level fields.
+                        "seed_dir": str(Path(unit_path).resolve().relative_to(SEEDS_ROOT)),
+                        "dimension_scope": (
+                            str(unit_dimensions.scope_dir.relative_to(DIMENSIONS_DIR))
+                            if unit_dimensions.scope_dir is not None else None
+                        ),
+                        "judge_dimensions": unit_dimensions.names,
+                        "judge_dimension_files": [
+                            str(path.relative_to(PETRI_ROOT))
+                            for path in unit_dimensions.files
+                        ],
                         "max_turns": max_turns,
                         "turn_counter": TURN_COUNTER,
                         "enable_rollback": False,
@@ -1137,7 +1220,7 @@ def main() -> None:
           f"{len(selected_seeds)} seed(s) x {epochs} epoch(s) = {expected_n} trajectories, "
           f"max_turns={max_turns}, reasoning={reasoning_note}")
     print(f"  seeds: {selected_seeds}")
-    print(f"  judge dimensions: {[d.name for d in DIMENSIONS]}")
+    print_dimension_plan(selected_seeds, seeds_path)
     thinking_note = (
         "off" if auditor_effort is None
         else f"adaptive (effort={auditor_effort}, summarized)"
