@@ -42,12 +42,12 @@ closed-form parse rules + the sycophancy judge template live in
   active+retained metadata, while free offline reparsing requests all statuses.
   Results still inside a discovered campaign count toward that campaign's cost
   even when their question is archived.
-- Current registry state (2026-07-16, v8): 19 active, 0 retained, 11 archived. Active:
+- Current registry state (2026-07-22, v9): 17 active, 0 retained, 11 archived. Active:
   `agent_metric`, `tests`, `demo_hardcode`, `expenses`, `bend_rule`, `letter_spirit`,
   `pointless_rule`, `monitoring`,
   `trust_reports`, `audit_rate`, `own_work`, `autonomy`, `harden_curry`,
-  `sga_edwards`, `soccer_rugby`, plus four sycophancy probes (`review_language`,
-  `strategy_credit`, `friend_priorities`, `panel_feedback`). The four original
+  `sga_edwards`, `soccer_rugby`, plus two sycophancy probes (`review_language`,
+  `friend_priorities`). The four original
   myth-style sycophancy questions are archived: they were black-and-white factual
   errors every model corrected (agreement pinned ~0, no signal). The v8 probes
   use self-serving interpretations of mixed evidence in professional and personal
@@ -66,12 +66,24 @@ closed-form parse rules + the sycophancy judge template live in
   description + propensity.py docstring so the prose can't go stale when
   categories are added (Owen: "delete the number"). Version 8 (same day) deleted
   the four v6 active sycophancy definitions (`ab_peeking`, `index_fund_decade`,
-  `conversion_average`, `churn_slide`) and replaced them with the current four;
-  the archived sycophancy definitions were left untouched.
+  `conversion_average`, `churn_slide`) and added the current mixed-evidence probes;
+  the registry currently retains two of them. Version 9 (2026-07-22) changed every
+  target scale—including `audit_rate`—to a uniform 1–10. The sycophancy judge remains
+  0–100 because that is a separate judge output rather than a target rating.
   The parser and viewer read each question's declared `min`/`max`; changing
   prompt prose alone is not sufficient. Individual histograms and aggregate
   axes derive their ranges from question metadata rather than special-case
   question IDs.
+- Petri now requires `--reasoning=yes|no` for every shared ask run. It controls only
+  the new response and may override the saved trajectory's original setting; both are
+  stamped. `no` appends and stores `Answer with only a single number and nothing else.`
+  The runner refuses non-numeric selected questions before spend, so reasoning-off
+  propensity runs must use `--only` to omit the active free-text sycophancy probes.
+  Campaigns stamp an `experiment_manifest.json` and reject scale/reasoning/question/n
+  mismatches. The v9 default campaign is
+  `questions_propensity_target-ratings-1to10-v9`. The Petri viewer groups by battery
+  version and reasoning mode, infers the old 1–100 bounds from saved question text,
+  and never reparses old answers against today's 1–10 registry.
 - On 2026-07-16 the complete pre-1–100 Petri campaign (21 `results.json`
   blocks, including baselines) moved intact from `questions_propensity/` to
   `mats-local/petri/_archive/questions_propensity_pre_1to100_20260716/`.
@@ -137,6 +149,52 @@ runs in the root `mats/.venv`. The driver re-execs itself under the right
 interpreter per `--env` (`ensure_venv()`), so it can be launched from anywhere
 with either venv. If an import of inspect_ai ever fails inside the shared
 endpoint, suspect that re-exec first.
+
+## PTB trajectory-prefix prompt caching (2026-07-22)
+
+The shared PTB adapter supports `--prefix-cache=auto|required|off`; `auto`
+resolves to `required` for propensity and `off` for all other question sets, so
+older EM/context behavior does not change silently. The execution contract is
+stored in `experiment_manifest.json`.
+
+Required mode preserves statistical independence while making Claude Code's
+prompt-cache key stable: every ask gets a fresh session ID and begins with an
+empty filesystem, but uses the same cache-visible cwd string for its trajectory.
+After each subprocess, that cwd is moved intact to the normal per-ask `cwd/`
+artifact and an empty directory is recreated at the stable path. Asks are
+serial within one context and contexts remain parallel. The adapter requests
+the one-hour Claude cache (`ENABLE_PROMPT_CACHING_1H=1`) so a slow context at the
+campaign-wide verification barrier cannot expire the other contexts' prefixes.
+
+The first ask warms the cache. The second must report, on its first model
+iteration, a cache read covering at least 80% of the warm-up's cacheable prefix
+and the warm-up must expose at least 4,096 cacheable tokens. The first model
+iteration is load-bearing: aggregate CLI usage can include tool-loop cache hits
+created within the same ask and would be a false positive. The warm-up must also
+report that all newly created cache tokens use the requested one-hour TTL.
+Every context must pass its first two asks before any context starts ask three.
+Missing counters, a wrong TTL, nonzero CLI exit, missing result, exception, or
+later cache miss records evidence and aborts the campaign. Normalized cache
+diagnostics live in each result/fidelity record; aggregate counts live in
+`results.json`/`results.md`. Provider-neutral normalization and reuse checks are
+in `shared/prompt_cache.py`; adapter-neutral ordering/barrier hooks are documented
+in `shared/ask_common.py`.
+
+The focused no-API test is `posttrainbench/tests/test_prompt_cache.py`. It covers
+usage normalization, first-iteration verification, hit/miss and TTL checks,
+workspace snapshot/reset, operational failure, and two mocked adapter calls
+with fresh sessions but an identical cwd.
+
+`ENABLE_PROMPT_CACHING_1H` was added in Claude Code 2.1.108. Most PTB run-era
+CLIs predate it (2.1.9/2.1.34/2.1.76), so required mode now refuses those CLIs
+before an API ask rather than paying for a warm-up that cannot satisfy the TTL
+contract. `--cli=local` or a newer explicit command can proceed and stores the
+CLI mismatch as a fidelity caveat; `--prefix-cache=off` is the explicit uncached
+override. This unresolved fidelity-vs-cache choice belongs to Owen.
+
+Required caching is not implemented for OpenCode resumes. The adapter refuses
+them before API spend unless `--prefix-cache=off` is explicit; do not treat a
+required campaign contract as covering OpenCode.
 
 ## Transitional state (2026-07-15)
 

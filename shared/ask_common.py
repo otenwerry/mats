@@ -33,6 +33,22 @@ exp_ask_env module to provide):
                                          (models/cost hooks/CLI/config); may
                                          write per-unit context files and must
                                          finalize md_info for every unit
+    serialize_asks(unit, args) -> bool   OPTIONAL. When true, the shared driver
+                                         preserves question/sample order and runs
+                                         at most one ask for this unit at a time.
+                                         Other units still run concurrently. This
+                                         supports stable-prefix cache warmup and
+                                         filesystem isolation without imposing a
+                                         provider-specific policy on the driver.
+    verification_asks(unit, args) -> int OPTIONAL. Number of leading serialized
+                                         asks that must finish for every applicable
+                                         unit before any remaining asks launch.
+                                         This caps spend when a warmed-cache or
+                                         similar paid invariant fails.
+    experiment_contract(args) -> dict    OPTIONAL. Adapter-specific condition
+                                         fields stored in the campaign manifest,
+                                         so incompatible execution/cache modes
+                                         cannot silently share one campaign.
     async ask(unit, q, sent, i, ask_dir, fidelity, args) -> record dict
                                          one independent ask; mutates
                                          fidelity["flags"]/["cost"] and writes
@@ -47,6 +63,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+class AbortExperiment(RuntimeError):
+    """Fail-fast signal raised after an ask's artifacts have been persisted.
+
+    Adapters put a private ``_abort_experiment`` reason on the returned record;
+    the driver writes the normal per-ask evidence and then raises this exception.
+    This is used for safety contracts such as "the warmed expensive prefix MUST
+    produce a cache hit" where continuing would spend money under a false premise.
+    """
 
 
 @dataclass

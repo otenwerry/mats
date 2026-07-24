@@ -14,9 +14,10 @@ datum (flagged probe_used_tools; the recorded answer is whatever text
 accompanied the calls). If the reconstructed context ends with a user message,
 the question is FOLDED into it (prev + blank line + question) instead of being
 appended as a second user turn, which some providers reject -- same convention
-as exp_rollback (flagged question_folded_into_user_turn). The target model is
-rebuilt exactly as the original run configured it (build_target_model with the
-original's stamped reasoning settings + provider routing).
+as exp_rollback (flagged question_folded_into_user_turn). The target model uses
+the mandatory --reasoning=yes|no setting for the NEW ask response. The original
+setting remains separately stamped, and a mismatch is flagged on every ask; the
+saved trajectory prefix itself is unchanged.
 
 --turn is a TARGET ASSISTANT-TURN INDEX (the viewer's [A<n>] numbering; the cut
 goes immediately before that turn), or 'end' / 'first_hack'. When the final
@@ -54,6 +55,8 @@ from model_routing import route
 import direct_cost
 import model_prices
 import openrouter_cost
+import prompt_cache
+import prompt_caching
 
 from viewer import is_hack_binary, load_originals_by_id, page_name
 
@@ -93,7 +96,13 @@ BASELINE_HELP = ("yes = ADDITIONALLY ask every question bare (no context, no "
 
 
 def add_cli_args(ap):
-    """No petri-only flags."""
+    """Petri's resumed target generation has an explicit reasoning condition."""
+    ap.add_argument(
+        "--reasoning", required=True, choices=("yes", "no"),
+        help="REQUIRED: native reasoning for the new one-turn target response. "
+             "This may differ from the saved trajectory's original setting; the "
+             "override is stamped and shown. 'no' is numeric-only in the shared "
+             "runner and appends a recorded number-only instruction.")
 
 
 class CutError(Exception):
@@ -111,6 +120,8 @@ class AskBundle:
     target_slug: str          # routed target model slug
     reasoning_on: bool
     reasoning_effort: str | None
+    original_reasoning_on: bool | None
+    original_reasoning_effort: str | None
     messages: list            # the resumed context (recorded verbatim)
     tools: list               # ToolInfo list the target had at the cut
     cut_label: str            # "a<j>" or "end" (used in the output dir name)
@@ -175,7 +186,8 @@ def _first_hack_turn(orig: dict) -> int:
     return sum(1 for num, role in heads if role.startswith("assistant") and num <= m)
 
 
-def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
+def build_bundle(tid: int, orig: dict, turn_arg: str,
+                 requested_reasoning: str) -> AskBundle:
     """Read the trajectory's sample and build the resumable context at the cut.
     Raises CutError on invalid/unsupported positions."""
     log, s = _find_sample(orig["mode"], orig["task"], orig["seed"], orig["epoch"])
@@ -254,24 +266,35 @@ def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
         if turn_arg == "end" and not end_snapped:
             est += u.output_tokens or 0
 
-    # ---- target model config, inherited from the original run's stamped metadata ----
+    # ---- target model config: original stamp + mandatory NEW-response setting ----
     roles = log.eval.model_roles or {}
     target_slug = route(getattr(roles.get("target"), "model", None)
                         or str(roles.get("target", "?")))
     meta = log.eval.metadata or {}
-    reasoning_on = (bool(meta["reasoning"]) if "reasoning" in meta
-                    else (meta.get("reasoning_enabled") is True))
-    reasoning_effort = meta.get("reasoning_effort") or REASONING_EFFORT
+    original_reasoning_on = (bool(meta["reasoning"]) if "reasoning" in meta
+                             else (meta.get("reasoning_enabled") is True))
+    original_reasoning_effort = ((meta.get("reasoning_effort") or REASONING_EFFORT)
+                                 if original_reasoning_on else None)
+    reasoning_on = requested_reasoning == "yes"
+    reasoning_effort = ((original_reasoning_effort or REASONING_EFFORT)
+                        if reasoning_on else None)
 
     flags.append({
         "code": "context_recorded_verbatim", "severity": "info",
         "detail": "the resumed context is the target's own recorded model-call input "
                   "at the cut turn (attachments resolved); nothing was synthesized"})
-    flags.append({
-        "code": "reasoning_replicated", "severity": "info",
-        "detail": f"target rebuilt via build_target_model(reasoning_on={reasoning_on}"
-                  + (f", effort={reasoning_effort}" if reasoning_on else "")
-                  + "), matching the original run's stamped settings"})
+    if reasoning_on == original_reasoning_on:
+        flags.append({
+            "code": "reasoning_explicitly_matched", "severity": "info",
+            "detail": f"mandatory --reasoning={requested_reasoning} explicitly matches "
+                      "the original trajectory's stamped target-reasoning setting"})
+    else:
+        flags.append({
+            "code": "reasoning_overridden_for_ask", "severity": "warn",
+            "detail": f"the saved trajectory used target reasoning "
+                      f"{'on' if original_reasoning_on else 'off'}, but the new response "
+                      f"is forced {'on' if reasoning_on else 'off'} by mandatory "
+                      f"--reasoning={requested_reasoning}; the prefix is unchanged"})
 
     return AskBundle(
         tid=tid,
@@ -279,6 +302,8 @@ def build_bundle(tid: int, orig: dict, turn_arg: str) -> AskBundle:
         target_slug=target_slug,
         reasoning_on=reasoning_on,
         reasoning_effort=reasoning_effort,
+        original_reasoning_on=original_reasoning_on,
+        original_reasoning_effort=original_reasoning_effort,
         messages=messages,
         tools=tools,
         cut_label=cut_label,
@@ -382,7 +407,7 @@ def build_units(args) -> list[AskUnit]:
     units: list[AskUnit] = []
     for tid in tids:
         try:
-            b = build_bundle(tid, originals[tid], args.turn)
+            b = build_bundle(tid, originals[tid], args.turn, args.reasoning)
         except CutError as e:
             print(f"[id {tid}] CUT REFUSED: {e}")
             continue
@@ -391,7 +416,8 @@ def build_units(args) -> list[AskUnit]:
                else "? tok")
         print(f"[id {tid}] {b.target_slug.split('/')[-1]}  cut {b.cut_label} "
               f"(turn {b.cut_turn} of {b.n_turns}), context = {ctx}, "
-              f"{len(b.tools)} tool(s)")
+              f"{len(b.tools)} tool(s), response reasoning={args.reasoning} "
+              f"(original={'on' if b.original_reasoning_on else 'off'})")
         for fl in b.flags:
             print(f"  [{fl['severity']:5}] {fl['code']}"
                   + (f" -- {fl['detail']}" if fl["severity"] == "warn" else ""))
@@ -412,6 +438,7 @@ def add_baselines(units: list[AskUnit], args) -> list[AskUnit]:
         b = AskBundle(
             tid=None, page="(baseline -- no context)", target_slug=slug,
             reasoning_on=r_on, reasoning_effort=r_eff, messages=[], tools=[],
+            original_reasoning_on=None, original_reasoning_effort=None,
             cut_label="baseline", cut_turn=0, n_turns=0, est_context_tokens=0,
             baseline_for=sorted(anchor_tids),
             flags=[{
@@ -419,8 +446,8 @@ def add_baselines(units: list[AskUnit], args) -> list[AskUnit]:
                 "detail": "baseline ask: the bare question only -- no trajectory "
                           "context, no system prompt, no tools, and NO transition "
                           "prefix (the EM paper's protocol); the target is rebuilt "
-                          "with the same reasoning settings as the trajectory asks "
-                          "it anchors"}],
+                          "with the mandatory response-reasoning setting used by the "
+                          "trajectory asks it anchors"}],
             is_baseline=True)
         out.append(_unit(b))
         print(f"[baseline] {slug}  bare questions, no context")
@@ -453,20 +480,27 @@ _GEN_CONFIG: GenerateConfig | None = None
 def prepare(units: list[AskUnit], args) -> None:
     """Paid-run setup: exact-cost capture hooks (same ones the audit/rollback
     pipelines install), one model per distinct (slug, reasoning) config rebuilt
-    exactly as the original ran, and the shared context bundle written once per
-    unit (context.jsonl + tools.json)."""
+    with the requested response-reasoning setting, and the shared context bundle
+    written once per unit (context.jsonl + tools.json)."""
     global _GEN_CONFIG
     openrouter_cost.install()
     direct_cost.install()
+    prompt_caching.install_inspect_warmup()
     _GEN_CONFIG = GenerateConfig(timeout=args.timeout, max_connections=args.concurrency)
 
     models: dict[tuple, object] = {}
     for u in units:
         b = u.env["bundle"]
-        key = (b.target_slug, b.reasoning_on, b.reasoning_effort)
+        # One routing key per resumed context. OpenAI combines this with the exact
+        # prefix, so it improves shard affinity without allowing content collisions.
+        context_cache_key = "petri-ask-" + prompt_caching.stable_key(
+            "openai-cache-routing", b.target_slug, b.page, b.cut_label)[:32]
+        key = (b.target_slug, b.reasoning_on, b.reasoning_effort, context_cache_key)
         if key not in models:
-            m, _, _ = build_target_model(b.target_slug, reasoning_on=b.reasoning_on,
-                                         effort=b.reasoning_effort)
+            m, _, _ = build_target_model(
+                b.target_slug, reasoning_on=b.reasoning_on,
+                effort=b.reasoning_effort or REASONING_EFFORT,
+                prompt_cache_key=context_cache_key)
             models[key] = get_model(m) if isinstance(m, str) else m
         u.env["model"] = models[key]
 
@@ -482,7 +516,8 @@ def prepare(units: list[AskUnit], args) -> None:
 async def ask(unit: AskUnit, q: dict, sent: str, i: int, ask_dir, fidelity: dict,
               args) -> dict:
     """One question against a fresh copy of the reconstructed context: one
-    generate call, no cache, no agentic loop. Writes response.json; the driver
+    generate call, no response replay, no agentic loop. Provider prompt caching
+    remains enabled and is recorded. Writes response.json; the driver
     judges and writes fidelity.json/probe_result.md afterwards."""
     b: AskBundle = unit.env["bundle"]
     ask_dir.mkdir(parents=True, exist_ok=True)
@@ -515,6 +550,21 @@ async def ask(unit: AskUnit, q: dict, sent: str, i: int, ask_dir, fidelity: dict
              "message": msg.model_dump(exclude_none=True),
              "usage": _usage_dict(output.usage)}, indent=2))
 
+    usage = getattr(output, "usage", None) if output is not None else None
+    cache_diagnostic = {
+        "mode": "provider_default_with_warmup_barrier",
+        "phase": "provider_reported",
+        "reuse_check": None,
+        "usage": prompt_cache.normalize_usage({
+            "input_tokens": usage.input_tokens if usage else 0,
+            "output_tokens": usage.output_tokens if usage else 0,
+            "cache_creation_input_tokens": (
+                usage.input_tokens_cache_write or 0) if usage else 0,
+            "cache_read_input_tokens": (
+                usage.input_tokens_cache_read or 0) if usage else 0,
+        }),
+    }
+
     if n_tool_uses:
         fidelity["flags"].append({
             "code": "probe_used_tools", "severity": "warn",
@@ -534,6 +584,7 @@ async def ask(unit: AskUnit, q: dict, sent: str, i: int, ask_dir, fidelity: dict
     return {"dir": ask_dir.name, "answer": result_text, "cost_usd": cost,
             "cost_source": cost_source, "duration_s": round(dt, 1),
             "n_tool_uses": n_tool_uses,
+            "prompt_cache": cache_diagnostic,
             "stop_reason": str(stop_reason) if stop_reason else None,
             **({"error": error} if error else {})}
 
@@ -543,4 +594,8 @@ def summary_fields(unit: AskUnit, args) -> dict:
     return {"trajectory_id": b.tid, "page": b.page,
             "target_model": b.target_slug,
             "cut": b.cut_label, "cut_turn": b.cut_turn,
-            "n_target_turns": b.n_turns, "requested_turn": args.turn}
+            "n_target_turns": b.n_turns, "requested_turn": args.turn,
+            "reasoning": b.reasoning_on,
+            "reasoning_effort": b.reasoning_effort,
+            "original_reasoning": b.original_reasoning_on,
+            "original_reasoning_effort": b.original_reasoning_effort}

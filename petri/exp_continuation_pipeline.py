@@ -100,7 +100,6 @@ from inspect_ai import eval_set
 
 import viewer
 import exp_continuation as C
-from exp_rh_audit import DIMENSIONS
 
 DEFAULT_CONCURRENCY = 50
 DEFAULT_DEVIATION_MODEL = "claude-opus-4-8"
@@ -246,16 +245,21 @@ async def run_pipeline(cfg: dict) -> None:
             fams = {C.seed_family(p.ref.seed_dir) for p in plan.prefixes}
             cross = ("  [CROSS-FAMILY: target keeps the prefix's system prompt + pivot note]"
                      if fams - {C.seed_family(b.seed_dir)} else "")
+            fixed_tools = plan.b_tool_sets[b.traj_id]
             # the auditor is always primed with this reference, so its size is always relevant.
             refsz = f", reference={len(C.build_reference_blob(b)):,} chars"
             print(f"      new task               #{b.traj_id}  (seed {b.seed}{_cond(b)}, "
                   f"family {C.seed_family(b.seed_dir)}, max_turns={b.max_turns}{refsz}){cross}")
+            print(f"          fixed target tools from B: "
+                  f"{', '.join(fixed_tools.names) if fixed_tools.names else '(none)'} "
+                  f"[{fixed_tools.fingerprint[:12]}]")
+            print(f"          judge dimensions: {', '.join(b.dimension_set.names)}")
         for b in plan.b_refs:
             if has_prefixes:
                 for p in plan.prefixes:
-                    tasks.append(C.build_continuation_task(plan, b, treatment, p, DIMENSIONS))
+                    tasks.append(C.build_continuation_task(plan, b, treatment, p))
             else:
-                tasks.append(C.build_continuation_task(plan, b, treatment, None, DIMENSIONS))
+                tasks.append(C.build_continuation_task(plan, b, treatment, None))
 
     expected = len(tasks) * cfg["n"]
     print(f"\n  treatment {treatment!r}: {len(plans)} model(s), {len(tasks)} cell(s) x "
@@ -272,9 +276,11 @@ async def run_pipeline(cfg: dict) -> None:
     import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
     import direct_cost       # exact list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
     import model_window      # correct context windows so the auditor compacts at the real window (see lib/model_window.py)
+    import prompt_caching    # provider-prefix warm-up barrier + stored cache evidence
     openrouter_cost.install()
     direct_cost.install()
     model_window.install()
+    prompt_caching.install_inspect_warmup()
     success, _logs = eval_set(
         tasks,
         epochs=cfg["n"],
@@ -284,12 +290,13 @@ async def run_pipeline(cfg: dict) -> None:
         log_dir=str(run_dir),
     )
     print(f"[generate] eval_set finished, success={success}")
+    prompt_caching.write_report(run_dir)
 
     # provenance: what was run, under what inherited config (self-describing run dir).
     (run_dir / "continuation_meta.json").write_text(json.dumps({
         "experiment": "continuation",
         "run_kind": cfg["run_dir_stem"],   # continuation
-        "config_version": "continuation-v3",
+        "config_version": "continuation-v5",
         "n": cfg["n"],
         "treatment": treatment,
         "preamble": C.PREAMBLE,
@@ -316,6 +323,9 @@ async def run_pipeline(cfg: dict) -> None:
                         "auditor": b.auditor_model,
                         "judge": b.judge_model,
                         "max_turns": b.max_turns,
+                        "target_tools_mode": "fixed-from-original-b",
+                        "target_tool_names": plan.b_tool_sets[b.traj_id].names,
+                        "target_tools_fingerprint": plan.b_tool_sets[b.traj_id].fingerprint,
                     }
                     for b in plan.b_refs
                 ],

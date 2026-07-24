@@ -19,8 +19,8 @@ What happens at the cut:
     "phantom" message.
 
 This is PART 1 of the rollback pipeline. It produces the continuations and the
-live Petri judge-1 scores only (all dims in dimensions/ plus eval_awareness -- see
-get_rollback_dims), which run as the eval scorer. The two slow post-run judges are
+live Petri judge-1 scores only (the global + seed-family dimensions selected by the
+shared dimension router), which run as the eval scorer. The two slow post-run judges are
 PART 2, split into a separate, concurrent module so we can iterate on judging
 without regenerating continuations:
   - judge 2 (secondary hack-turn annotation) and
@@ -76,7 +76,7 @@ from inspect_ai.solver import solver
 from inspect_ai.tool import ToolDef, ToolParams, tool
 from shortuuid import uuid
 
-from inspect_petri import audit_judge, auditor_agent, judge_dimensions
+from inspect_petri import audit_judge, auditor_agent
 from inspect_petri._auditor.auditor import (
     _add_timelines,
     _read_tools,
@@ -107,9 +107,16 @@ _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
 
 # reuse viewer's loaders so transcript numbering matches the viewer exactly
 from viewer import DATA, LOGS, load_mode, page_name
-from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from petri_paths import ENV_FILE
 from model_routing import route  # provider routing (see lib/model_routing.py)
+from prompt_caching import stable_key
 from exp_rh_audit import build_target_model, REASONING_EFFORT  # shared target reasoning config
+from dimension_routing import (
+    AuditDimensionSet,
+    dimension_provenance,
+    dimensions_for_seed,
+    resolve_seed_path,
+)
 import direct_cost               # list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
 import model_window               # correct Inspect's context windows so the auditor compacts at the real window (see lib/model_window.py)
 
@@ -282,6 +289,9 @@ class TrajRef:
     target_model: str
     auditor_model: str   # the original's auditor (resamples inherit it)
     judge_model: str     # the original's judge   (resamples inherit it)
+    seed_dir: str | None
+    dimension_scope: str | None
+    dimension_set: AuditDimensionSet | None
     reasoning: bool                  # native target reasoning AS RUN (from metadata). Resamples
                                      # rebuild the target via build_target_model with this, so a
                                      # reasoning-on original isn't re-rolled with reasoning off.
@@ -340,12 +350,33 @@ def _all_refs() -> dict[int, TrajRef]:
             for s in log.samples or []:
                 key = f"{mode_dir.name}__{log.eval.task}__{s.id}__e{s.epoch}"
                 if key in ids:
-                    refs[ids[key]] = TrajRef(ids[key], key, mode_dir.name,
-                                             log.eval.task, str(s.id), s.epoch,
-                                             target, auditor, judge, reasoning_on,
-                                             reasoning_effort_val, reasoning_enabled_legacy,
-                                             aud_eff, max_turns, turn_counter)
+                    refs[ids[key]] = TrajRef(
+                        traj_id=ids[key], key=key, mode=mode_dir.name,
+                        task=log.eval.task, seed=str(s.id), epoch=s.epoch,
+                        target_model=target, auditor_model=auditor, judge_model=judge,
+                        seed_dir=meta.get("seed_dir"),
+                        dimension_scope=meta.get("dimension_scope"), dimension_set=None,
+                        reasoning=reasoning_on, reasoning_effort=reasoning_effort_val,
+                        reasoning_enabled=reasoning_enabled_legacy,
+                        auditor_reasoning_effort=aud_eff, max_turns=max_turns,
+                        turn_counter=turn_counter,
+                    )
     return refs
+
+
+def route_ref_dimensions(ref: TrajRef) -> None:
+    """Resolve dimensions lazily for a selected rollback source.
+
+    ``_all_refs`` scans the full historical registry, which includes a couple of deleted
+    prototype seeds. Resolving every historical seed up front would make a modern rollback
+    fail because of an unrelated 2026 prototype. Selected trajectories still fail loudly
+    before task construction if their own seed cannot be resolved.
+    """
+    if ref.dimension_set is not None and ref.seed_dir is not None:
+        return
+    seed_path = resolve_seed_path(ref.seed, ref.seed_dir)
+    ref.seed_dir = str(seed_path)
+    ref.dimension_set = dimensions_for_seed(seed_path)
 
 
 def _clean_hack_ids() -> list[int]:
@@ -770,12 +801,7 @@ def resume_solver(spec: ResumeSpec):
 # --------------------------------------------------------------------------- #
 # Task building (shared by the CLI and exp_rollback_pipeline)
 # --------------------------------------------------------------------------- #
-def get_rollback_dims():
-    """The rollback judge-1 dimension set: every dim in dimensions/ + eval_awareness."""
-    return judge_dimensions(DIMENSIONS_DIR) + judge_dimensions(["eval_awareness"])
-
-
-def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
+def build_rollback_task(spec: ResumeSpec, task_name: str | None = None):
     """One Inspect Task that replays `spec` to its cut, goes live, and scores with the
     cut-aware judge-1. cut_m is the generation-time approximation (the original's j-th
     assistant M); exp_rejudge_rollbacks recomputes the exact cut from the finished
@@ -793,18 +819,24 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
     task_name overrides the default `rollback_<id>_<seed>` -- the pipeline passes a
     name that ALSO encodes location+condition so a single combined eval_set can hold
     every cell's tasks with unique names (they're split back into per-cell dirs after)."""
+    route_ref_dimensions(spec.ref)
+    assert spec.ref.dimension_set is not None and spec.ref.seed_dir is not None
     judge_instructions = rollback_judge_instructions(spec.prompt, cut_m=spec.approx_cut_m)
     base = Task(
         dataset=MemoryDataset([Sample(
             id=spec.ref.seed, input=spec.seed_input, metadata=spec.seed_metadata)]),
         solver=resume_solver(spec),
-        scorer=audit_judge(dims, instructions=judge_instructions),
+        scorer=audit_judge(list(spec.ref.dimension_set.dimensions),
+                           instructions=judge_instructions),
     )
     # Rebuild the target via the SAME helper build_tasks used, from the reasoning setting AS
     # RUN, so the rollback configures the target byte-identically (reasoning + strict_tools per
     # provider). (Also fixes a latent gap: the old path never set strict_tools on OpenRouter.)
     target_role, tgt_reasoning_enabled, tgt_strict_tools = build_target_model(
-        spec.ref.target_model, reasoning_on=spec.ref.reasoning, effort=spec.ref.reasoning_effort)
+        spec.ref.target_model, reasoning_on=spec.ref.reasoning, effort=spec.ref.reasoning_effort,
+        prompt_cache_key="petri-rollback-" + stable_key(
+            "openai-cache-routing", spec.ref.target_model, spec.ref.traj_id,
+            spec.target_cut, spec.prompt)[:32])
     # Re-apply the original's auditor extended-thinking setting. None = thinking off ->
     # bare string (so resamples of pre-thinking originals are byte-for-byte unchanged);
     # otherwise rebuild the auditor with that effort (Inspect -> adaptive thinking for
@@ -827,7 +859,8 @@ def build_rollback_task(spec: ResumeSpec, dims, task_name: str | None = None):
                   "reasoning_enabled": tgt_reasoning_enabled,
                   "strict_tools": tgt_strict_tools,
                   "max_turns": spec.ref.max_turns,
-                  "turn_counter": spec.ref.turn_counter},
+                  "turn_counter": spec.ref.turn_counter,
+                  **dimension_provenance(spec.ref.seed_dir, spec.ref.dimension_set)},
     )
 
 
@@ -878,6 +911,8 @@ def main() -> None:
 
     print(f"\n[build] rendering + reconstructing cut points for {len(wanted)} trajectory(ies) ...")
     wanted_refs = [refs[tid] for tid in wanted]
+    for ref in wanted_refs:
+        route_ref_dimensions(ref)
     transcripts = asyncio.run(render_originals(wanted_refs))
     specs: list[ResumeSpec] = []
     for ref in wanted_refs:
@@ -912,20 +947,21 @@ def main() -> None:
           f"max_turns={'/'.join(map(str, turns))}  (all inherited per source trajectory)  "
           f"concurrency={concurrency}")
 
-    dims = get_rollback_dims()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     # standalone runs always cut before the hack; condition is the only variable.
     # uniform label so these group/dedup with the pipeline's before-hack cells.
     label = f"before-{'treatment' if prompt else 'control'}"
     run_dir = DATA / "logs" / f"rollback-{label}-{N}x-{timestamp}"
 
-    tasks = [build_rollback_task(spec, dims) for spec in specs]
+    tasks = [build_rollback_task(spec) for spec in specs]
 
     print(f"  logs -> {run_dir}\n")
     import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
     openrouter_cost.install()
     direct_cost.install()    # exact list-price cost for direct anthropic/openai calls (see lib/direct_cost.py)
     model_window.install()   # correct context windows so the auditor compacts at the real window, not 128k (see lib/model_window.py)
+    import prompt_caching    # provider-prefix warm-up barrier + stored cache evidence
+    prompt_caching.install_inspect_warmup()
     # Active tasks = the connection budget: enough to keep the shared auditor pool fed,
     # no more (the pool is the real ceiling). Matches exp_rollback_pipeline's max_tasks.
     success, logs = eval_set(
@@ -933,6 +969,7 @@ def main() -> None:
         max_samples=concurrency, max_connections=concurrency, log_dir=str(run_dir),
     )
     print(f"\neval_set finished, success={success}")
+    prompt_caching.write_report(run_dir)
     # record the cut provenance (before-hack: reroll_turn == first-hack turn k)
     write_rollback_meta(run_dir, "before", "treatment" if prompt else "control", prompt, specs)
 

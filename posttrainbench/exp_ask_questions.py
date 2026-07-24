@@ -108,7 +108,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # ANTHROPIC_API_KEY for clean-config resumes
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib import paths, recon_claude, runs, stream  # noqa: E402
+from lib import experiment_readiness, paths, recon_claude, runs, stream  # noqa: E402
 from reconstruct import build_bundle  # noqa: E402
 
 # The context-reconstruction probe (the 'context' question set). Moved here
@@ -567,6 +567,8 @@ def main():
                     help="use the personal ~/.claude config instead of a fresh "
                          "CLAUDE_CONFIG_DIR (re-adds local-context contamination)")
     args = ap.parse_args()
+    if not args.dry_run:
+        experiment_readiness.require_paid_experiments_ready()
 
     questions = QUESTION_SETS[args.questions]()
     if args.only:

@@ -23,6 +23,7 @@ makes moving a rubric between global and seed-specific folders order-preserving.
 """
 
 import json
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,142 @@ class AuditDimensionSet:
     @property
     def names(self) -> list[str]:
         return [dimension.name for dimension in self.dimensions]
+
+
+def _is_runnable_pinned_seed(directory: Path) -> bool:
+    """Recognize both self-contained and composed pinned-seed layouts.
+
+    This intentionally mirrors ``exp_rh_audit.is_pinned_seed_dir`` without importing
+    that experiment module (which would create a circular dependency). Dimension routing
+    is the low-level boundary shared by every experiment, so seed lookup belongs here.
+    """
+
+    if not directory.is_dir() or directory.name == "_shared":
+        return False
+    if (directory / "core.md").is_file() and (directory / "conditions").is_dir():
+        return True
+    shared = directory.parent / "_shared"
+    return (
+        (directory / "scenario.md").is_file()
+        and (directory / "environment").is_dir()
+        and (shared / "core.md").is_file()
+        and (shared / "conditions").is_dir()
+    )
+
+
+@lru_cache(maxsize=None)
+def resolve_seed_path(
+    seed_name: str,
+    stamped_seed_dir: str | None = None,
+    *,
+    seeds_root: Path = SEEDS_ROOT,
+) -> Path:
+    """Resolve one stored sample id to its concrete seed path.
+
+    Current audit logs stamp ``seed_dir`` and therefore take the exact path. Older logs
+    predate that field, so they fall back to a unique recursive match. Ambiguity fails
+    loudly rather than letting a resample/rollback/continuation use another family's
+    rubric or seed text.
+    """
+
+    root = Path(seeds_root)
+    if stamped_seed_dir:
+        candidate = Path(stamped_seed_dir)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError as exc:
+            raise SystemExit(
+                f"stamped seed_dir {stamped_seed_dir!r} is outside {root}"
+            ) from exc
+        if not candidate.exists():
+            raise SystemExit(
+                f"stamped seed_dir {stamped_seed_dir!r} does not exist under {root}"
+            )
+        return candidate
+
+    markdown = sorted(root.glob(f"**/{seed_name}.md"))
+    pinned = sorted(
+        path for path in root.glob(f"**/{seed_name}") if _is_runnable_pinned_seed(path)
+    )
+    matches = [path.parent.resolve() for path in markdown] + [path.resolve() for path in pinned]
+    # A path can theoretically be found through both layouts during an in-progress migration.
+    matches = list(dict.fromkeys(matches))
+    if not matches:
+        raise SystemExit(
+            f"seed {seed_name!r} not found under {root} as either a .md seed or pinned directory"
+        )
+    if len(matches) > 1:
+        raise SystemExit(
+            f"seed {seed_name!r} is ambiguous ({[str(path) for path in matches]}); "
+            "use a trajectory whose log stamps seed_dir"
+        )
+    return matches[0]
+
+
+def dimension_provenance(
+    seed_path: str | Path,
+    selected: AuditDimensionSet,
+    *,
+    seeds_root: Path = SEEDS_ROOT,
+    dimensions_root: Path = DIMENSIONS_DIR,
+    project_root: Path = PETRI_ROOT,
+) -> dict:
+    """Metadata every judged task stores for its one routed dimension set."""
+
+    seed = Path(seed_path).resolve()
+    try:
+        seed_label = str(seed.relative_to(Path(seeds_root).resolve()))
+    except ValueError:
+        seed_label = str(seed)
+    if selected.scope_dir is None:
+        scope_label = None
+    else:
+        try:
+            scope_label = str(selected.scope_dir.resolve().relative_to(Path(dimensions_root).resolve()))
+        except ValueError:
+            scope_label = str(selected.scope_dir)
+
+    files = []
+    for path in selected.files:
+        try:
+            files.append(str(path.resolve().relative_to(Path(project_root).resolve())))
+        except ValueError:
+            files.append(str(path))
+    return {
+        "seed_dir": seed_label,
+        "dimension_scope": scope_label,
+        "judge_dimensions": selected.names,
+        "judge_dimension_files": files,
+    }
+
+
+def dimensions_for_seed(
+    seed_path: str | Path,
+    *,
+    required: tuple[str, ...] = ("reward_hacking",),
+    dimensions_root: Path = DIMENSIONS_DIR,
+    seeds_root: Path = SEEDS_ROOT,
+) -> AuditDimensionSet:
+    """The single experiment-facing dimension resolver.
+
+    All audit-like generation, resampling, continuation, rollback, and re-judging code
+    should call this boundary instead of loading a global directory or importing a static
+    list. ``required`` makes a missing outcome rubric fail before API spend.
+    """
+
+    selected = audit_dimension_set(
+        seed_path, dimensions_root=dimensions_root, seeds_root=seeds_root
+    )
+    missing = [name for name in required if name not in selected.names]
+    if missing:
+        raise SystemExit(
+            f"seed path {seed_path} is missing required judge dimensions {missing}; "
+            f"resolved dimensions were {selected.names}"
+        )
+    return selected
 
 
 def _is_rubric_markdown(path: Path) -> bool:

@@ -16,6 +16,8 @@ each reusing the standalone scripts' code (single source of truth):
                scores + annotations. -> mats-local/petri/viewer/index.html.
 
 Robustness (the point of this file):
+  - Unknown or malformed command-line flags fail before any API calls. A typo must never
+    silently fall back to an operational default such as the 60-turn cap.
   - Individual failures DON'T stop the run. Inspect's eval_set records per-sample
     errors and continues; a target that produced nothing is *warned* about, not
     aborted on (unlike the standalone exp_rh_audit CLI, which aborts). Annotation
@@ -70,10 +72,10 @@ Flags:
                        <seed-dir>/SYSTEM_PROMPT.txt; the target is pinned to it and the
                        auditor's set_system_message tool is removed. The retired --fixed_sp
                        flag is rejected loudly if passed.)
-  --condition=<c>      PINNED seed dirs and collections of them only; REQUIRED there,
-                       forbidden elsewhere. Which conditions/<c>.md fragment is appended to
-                       core.md -- exactly one condition per run (a collection applies it to
-                       every member); run each condition as its own pipeline invocation.
+  --condition=<c>      PINNED seed dirs and collections of them only; optional, defaults
+                       to allow, and forbidden elsewhere. Which conditions/<c>.md fragment
+                       is appended to core.md -- exactly one condition per run (a collection
+                       applies it to every member); run each condition as its own invocation.
   --concurrency=<N>    one knob -> audit max_samples/max_connections AND annotate
                        parallelism (default 50).
   --max-turns=<N>      auditor turn cap (default 60). Stamped per task into metadata,
@@ -114,12 +116,40 @@ from model_routing import route  # match build_tasks' provider routing for the d
 DEFAULT_CONCURRENCY = 50
 DEFAULT_ANNOTATE_MODEL = "claude-opus-4-8"
 
+_VALUE_FLAGS = {
+    "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--auditor",
+    "--auditor-thinking", "--condition", "--concurrency", "--max-turns",
+    "--annotate-model",
+}
+_SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
+
+
+def _validate_cli_args() -> None:
+    """Reject typos and malformed flags before config resolution or paid work begins."""
+    valid = sorted(_VALUE_FLAGS | _SWITCH_FLAGS)
+    for arg in sys.argv[1:]:
+        flag, separator, _ = arg.partition("=")
+        if flag in _VALUE_FLAGS:
+            if not separator:
+                raise SystemExit(f"{flag} requires a value in the form {flag}=<value>")
+            continue
+        if flag in _SWITCH_FLAGS:
+            if separator:
+                raise SystemExit(f"{flag} is a switch and does not take a value")
+            continue
+        raise SystemExit(f"unknown argument {arg!r}; valid flags: {valid}")
+
 
 def _arg(flag: str, default: str | None = None) -> str | None:
     return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(flag + "=")), default)
 
 
 def _parse_args() -> dict:
+    # Keep the retired flag's specific migration error, then reject every other unknown or
+    # malformed argument. This must happen before resolving seeds or constructing tasks.
+    reject_fixed_sp_flag()
+    _validate_cli_args()
+
     # --targets REQUIRED (no default).
     targets_arg = _arg("--targets")
     if targets_arg is None:
@@ -193,12 +223,10 @@ def _parse_args() -> dict:
     auditor_reasoning_effort = resolve_auditor_thinking(_arg("--auditor-thinking", None))
 
     # fixed target system prompt: ALWAYS on, read from <seed-dir>/SYSTEM_PROMPT.txt
-    # (which is why --seed-dir is required). The retired --fixed_sp flag is rejected
-    # loudly rather than silently ignored.
-    reject_fixed_sp_flag()
+    # (which is why --seed-dir is required).
     fixed_system_prompt = resolve_fixed_sp(seed_dir_arg, seeds_path)
 
-    # --condition=<c> (PINNED seed dirs only, where it's required; see resolve_condition).
+    # --condition=<c> (PINNED seed dirs only; omitted -> allow; see resolve_condition).
     condition = resolve_condition(_arg("--condition"), seeds_path)
 
     # --reasoning=yes|no (optional, defaults to yes): whether targets reason natively. Resolved to

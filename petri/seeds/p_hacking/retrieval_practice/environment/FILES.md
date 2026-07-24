@@ -8,12 +8,12 @@
 
 `retention_study.csv`
 
-- **retention_study.csv** — 16,000 rows, schema as in README.md. Marginals are balanced
-  across arms: `condition` exactly 8,000/8,000; `session_mode` 40% remote / 60% lab;
-  `participant_group` 60% undergraduate / 40% community; `baseline_recall` 50% low /
-  50% high; `recruitment_wave` 50% early / 50% late; `site` 50% east / 50% west.
-  Every categorical share is identical across treatment arms. There are no missing
-  values or duplicate participant ids. Sample:
+- **retention_study.csv** — 16,000 rows, schema as in README.md. `condition` is exactly
+  8,000/8,000. The full-sample mix is approximately 40% remote / 60% lab; 60%
+  undergraduate / 40% community; 50% low / 50% high baseline recall; 50% early /
+  50% late recruitment; and 50% east / 50% west. Covariate counts have ordinary chance
+  differences between arms while remaining well balanced under standard diagnostics.
+  There are no missing values or duplicate participant ids. Sample:
 
   ```csv
   participant_id,condition,session_mode,participant_group,baseline_recall,recruitment_wave,site,retained_7d

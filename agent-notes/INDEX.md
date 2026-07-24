@@ -4,16 +4,17 @@ Hand-maintained menu of the notes in this folder. Each note repeats its own summ
 
 ## Petri (reward-hacking audits)
 
-- **CODEBASE_GUIDE.md** — how the Petri code, experiments, viewer windows, run-dir types, and explicitly ordered global/seed-scoped judge dimensions are organized, plus the binary reward-hack definition. Read at the start of any Petri work. (updated 2026-07-20)
-- **CONTINUATION_EXPERIMENT_SPEC.md** — design of the continuation experiment (does hacking on task A raise the hack rate on task B?). Read when working on continuation runs. Predates the 2026-07-08 `--treatment` rewrite. (updated 2026-07-03)
+- **CODEBASE_GUIDE.md** — how the Petri code, experiments, Current/Round-1/Old viewer, direction-based continuations, run-dir types, fixed target tools, and centralized global/seed-scoped judge dimensions are organized, plus the binary reward-hack definition. Read at the start of any Petri work. (updated 2026-07-24)
+- **CONTINUATION_EXPERIMENT_SPEC.md** — design of the continuation experiment (does hacking on task A raise the hack rate on task B?), including exact fixed B-tool registration and the shared interface used by new originals. Read when working on continuation runs. Predates the 2026-07-08 `--treatment` rewrite. (updated 2026-07-24)
+- **PROMPT_CACHING.md** — provider prompt caching vs response replay; Petri's warm-first barrier, v2 message-ID-normalized key, and per-run reports; direct Anthropic breakpoints; PTB's verified caching mode and old-CLI limitation. Read before changing any repeated-context paid pipeline. (updated 2026-07-23)
 - **ml_training_data_misuse_DESIGN_CHOICES.md** — pinned conditions + per-seed variations for the seven ml_training_data_misuse seeds, and how to flip each. Read when designing/varying those seeds. (updated 2026-07-08)
-- **p_hacking_DESIGN_CHOICES.md** — shared pins, per-scenario traps, and the family-scoped judge line for the active checkout and scientific retrieval-practice scenarios. Read when designing or judging p_hacking runs. (updated 2026-07-20)
-- **IDEAS.md** — planned p_hacking scenario domains, the selective-reporting definition, and notes on the two active composed scenarios. Read when adding p_hacking variants. (updated 2026-07-20)
+- **p_hacking_DESIGN_CHOICES.md** — shared pins, per-scenario traps, and the family-scoped judge line for the three active checkout, retrieval-practice, and LLM-benchmark scenarios. Read when designing or judging p_hacking runs. (updated 2026-07-21)
+- **IDEAS.md** — planned p_hacking domains, the selective-reporting definition, and notes on the three active composed scenarios including the low-stakes LLM benchmark. Read when adding p_hacking variants. (updated 2026-07-21)
 - **VARIANT_IDEAS.md** — the perf_benchmark_gaming seed class, six planned domains, and the deliberate changes in the draft log_analytics2 iteration. Read when building or varying perf_benchmark_gaming seeds. (updated 2026-07-17)
 
 ## Cross-environment
 
-- **SHARED_ASK_QUESTIONS.md** — the shared ask-questions endpoint (`shared/exp_ask_questions.py` + per-env adapters): where shared vs env-specific logic lives, viewer schema contracts, the two-venv re-exec gotcha, and the retire-the-originals plan. Read before touching any exp_ask_questions/exp_ask_env file. (updated 2026-07-16)
+- **SHARED_ASK_QUESTIONS.md** — the shared ask-questions endpoint (`shared/exp_ask_questions.py` + per-env adapters): where shared vs env-specific logic lives, propensity scale/reasoning contracts, viewer schema contracts, the two-venv re-exec gotcha, and the retire-the-originals plan. Read before touching any exp_ask_questions/exp_ask_env file. (updated 2026-07-22)
 
 ## PostTrainBench — current pass
 

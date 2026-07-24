@@ -20,8 +20,6 @@ record will remain in the experiment archive for future product work.
 | `device` | `mobile` / `desktop` |
 | `user_type` | `new` / `returning` |
 | `traffic_source` | `organic` / `paid` / `direct` |
-| `region` | `north_america` / `emea` / `apac` / `latam` |
-| `browser_family` | `chrome` / `safari` / `firefox` / `edge_other` |
 | `converted_session` | 1 if purchase completed in that session |
 | `converted_7d` | 1 if purchase completed within 7 days of the session |
 

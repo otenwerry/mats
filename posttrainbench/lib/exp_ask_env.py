@@ -46,12 +46,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from lib import recon_claude, runs, stream
+from lib import experiment_readiness, recon_claude, runs, stream
 from reconstruct import build_bundle
 
 import model_prices  # petri/lib (single source with the Petri adapter)
+import prompt_cache   # shared passive usage normalization + reuse checks
 
 from ask_common import AskUnit
+
+
+PREFIX_CACHE_MIN_REUSE_FRACTION = 0.80
+PREFIX_CACHE_MIN_TOKENS = 4096
+PREFIX_CACHE_TTL = "1h"
+_CACHE_WORKSPACE_NAME = "_prefix_cache_workspace"
+_GENERIC_1H_CACHE_MIN_CLI = (2, 1, 108)
 
 NAME = "posttrainbench"
 SUBJECT = "agent"
@@ -93,6 +101,52 @@ def add_cli_args(ap):
     ap.add_argument("--user-config", action="store_true",
                     help="use the personal ~/.claude config instead of a fresh "
                          "CLAUDE_CONFIG_DIR (re-adds local-context contamination)")
+    ap.add_argument(
+        "--prefix-cache", choices=("auto", "required", "off"), default="auto",
+        help=("reuse and verify stable prefixes across independent Claude asks: "
+              "auto (default) requires this for propensity and leaves other "
+              "question sets unchanged; required enables a stable reset-between-"
+              "asks workspace, serializes asks within each trajectory, and aborts "
+              "after the first paid cache miss; off preserves the legacy unique-"
+              "workspace fully-parallel behavior"),
+    )
+
+
+def _prefix_cache_mode(args) -> str:
+    """Resolve the user-facing auto mode without changing non-propensity runs."""
+    if args.prefix_cache == "auto":
+        return "required" if args.questions == "propensity" else "off"
+    return args.prefix_cache
+
+
+def experiment_contract(args) -> dict:
+    """Cache execution policy is part of a campaign's reproducibility contract."""
+    mode = _prefix_cache_mode(args)
+    return {
+        "prompt_cache": {
+            "mode": mode,
+            "min_reuse_fraction": PREFIX_CACHE_MIN_REUSE_FRACTION,
+            "min_cacheable_tokens": PREFIX_CACHE_MIN_TOKENS,
+            "ttl": PREFIX_CACHE_TTL,
+            "independent_sessions": True,
+            "workspace_reset_between_asks": mode == "required",
+        }
+    }
+
+
+def serialize_asks(unit: AskUnit, args) -> bool:
+    """Stable-workspace cache mode requires one in-flight ask per context.
+
+    Units still run concurrently with one another, so a ten-trajectory campaign
+    keeps up to ten paid calls in flight.  OpenCode retains its existing behavior.
+    """
+    is_claude = unit.is_baseline or unit.env["traj"].scaffold == "claude"
+    return is_claude and _prefix_cache_mode(args) == "required"
+
+
+def verification_asks(unit: AskUnit, args) -> int:
+    """Warm once and prove one independent reuse before the expensive remainder."""
+    return 2 if serialize_asks(unit, args) else 0
 
 
 def resolve_cli(cli_arg: str, original_version: str | None) -> list[str]:
@@ -108,6 +162,12 @@ def resolve_cli(cli_arg: str, original_version: str | None) -> list[str]:
     if cli_arg == "local":
         return ["claude"]
     return cli_arg.split()
+
+
+def _cli_supports_generic_1h_cache(cli_version: str) -> bool:
+    """Claude Code added ENABLE_PROMPT_CACHING_1H in 2.1.108."""
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", cli_version or "")
+    return bool(match and tuple(map(int, match.groups())) >= _GENERIC_1H_CACHE_MIN_CLI)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,10 +420,62 @@ def _prep_claude(unit: AskUnit, args) -> None:
     p.update(env_overrides=env_overrides, config_root=config_root,
              model=model, orig_version=orig_version, cli_cmd=cli_cmd,
              cli_version=cli_version, effort_args=effort_args)
+    cache_mode = _prefix_cache_mode(args)
+    p["prefix_cache_mode"] = cache_mode
+    p["prefix_cache_reference"] = None
+    p["prefix_cache_ask_ordinal"] = 0
+    if cache_mode == "required":
+        # Claude Code's default five-minute provider cache is too easy to lose
+        # while other contexts finish the campaign-wide verification barrier.
+        # ENABLE_PROMPT_CACHING_1H was added in Claude Code 2.1.108. Most PTB
+        # originals predate it, so fail before API spend instead of paying for a
+        # warm-up that the run-era CLI can only write with a five-minute TTL.
+        if not _cli_supports_generic_1h_cache(cli_version):
+            sys.exit(
+                "ERROR: --prefix-cache=required needs Claude Code >=2.1.108 for "
+                f"ENABLE_PROMPT_CACHING_1H, but the resolved CLI is {cli_version!r}. "
+                "No API ask was made. Re-run with --cli=local (changes the scaffold "
+                "version and is recorded as a fidelity caveat), choose a newer explicit "
+                "CLI command, or explicitly use --prefix-cache=off."
+            )
+        env_overrides["ENABLE_PROMPT_CACHING_1H"] = "1"
+        workspace = unit.out_dir / _CACHE_WORKSPACE_NAME
+        if workspace.exists() and any(workspace.iterdir()):
+            sys.exit(
+                f"ERROR: stable cache workspace is not empty: {workspace}. "
+                "Use a new --campaign name; refusing to mix leftover files into "
+                "an independent ask."
+            )
+        workspace.mkdir(parents=True, exist_ok=True)
+        p["prefix_cache_workspace"] = workspace
+        fidelity["flags"].append({
+            "code": "prompt_cache_stable_workspace",
+            "severity": "info",
+            "detail": "independent asks use fresh session ids but the same cache-visible "
+                      "workspace path; asks run serially for this context, and after each "
+                      "ask its workspace is moved intact into that ask's cwd/ artifact "
+                      "before an empty workspace is recreated at the stable path",
+        })
+        print(f"[{unit.label}] prompt cache REQUIRED: {PREFIX_CACHE_TTL} TTL, "
+              "stable workspace + serial asks; "
+              f"abort if a post-warmup read covers <"
+              f"{PREFIX_CACHE_MIN_REUSE_FRACTION:.0%} of the prefix")
     unit.md_info = f"- model: {model}   CLI: {cli_version} (original {orig_version})"
 
 
 def prepare(units: list[AskUnit], args) -> None:
+    experiment_readiness.require_paid_experiments_ready()
+    unsupported_cached = [u.label for u in units
+                          if (not u.is_baseline
+                              and u.env["traj"].scaffold == "opencode"
+                              and _prefix_cache_mode(args) == "required")]
+    if unsupported_cached:
+        sys.exit(
+            "ERROR: --prefix-cache=required is not implemented for PTB OpenCode "
+            f"resumes ({unsupported_cached}). No API ask was made. Select Claude "
+            "trajectories, or explicitly pass --prefix-cache=off for an uncached "
+            "OpenCode run."
+        )
     if any(u.env["traj"] is not None and u.env["traj"].scaffold == "opencode"
            for u in units):
         if not shutil.which("opencode"):
@@ -384,6 +496,135 @@ def prepare(units: list[AskUnit], args) -> None:
 # event loop; these are blocking subprocess calls).                            #
 # --------------------------------------------------------------------------- #
 
+def _cache_workspace_for_ask(unit: AskUnit, ask_dir: Path) -> tuple[Path, Path | None]:
+    """Return the live cwd and its per-ask snapshot destination.
+
+    Cache mode keeps the *path string* stable but never carries filesystem state
+    forward: the driver serializes this unit, and `_snapshot_cache_workspace`
+    moves the complete directory into the ask's ordinary `cwd/` artifact before
+    recreating an empty directory at the stable path.
+    """
+    p = unit.env
+    ask_dir.mkdir(parents=True, exist_ok=True)
+    if p.get("prefix_cache_mode") != "required":
+        cwd = ask_dir / "cwd"
+        cwd.mkdir(parents=True, exist_ok=True)
+        return cwd, None
+    cwd = p["prefix_cache_workspace"]
+    snapshot = ask_dir / "cwd"
+    if snapshot.exists():
+        raise RuntimeError(
+            f"ask workspace artifact already exists: {snapshot}; use a new campaign "
+            "rather than overwriting evidence from an earlier ask"
+        )
+    if not cwd.is_dir() or any(cwd.iterdir()):
+        raise RuntimeError(
+            f"stable prompt-cache workspace is missing or not empty before ask: {cwd}"
+        )
+    return cwd, snapshot
+
+
+def _snapshot_cache_workspace(cwd: Path, snapshot: Path | None) -> None:
+    """Persist one ask's complete workspace, then recreate the stable empty cwd."""
+    if snapshot is None:
+        return
+    cwd.rename(snapshot)
+    cwd.mkdir(parents=True, exist_ok=False)
+
+
+def _record_prompt_cache(unit: AskUnit, result_usage: dict | None,
+                         fidelity: dict) -> tuple[dict, str | None]:
+    """Store normalized first-request usage and enforce required prefix reuse.
+
+    Returns `(diagnostic, abort_reason)`.  The first ask is the paid warm-up;
+    every later ask must read at least 80% of that substantial cacheable prefix.
+    Aggregate usage is retained in the raw CLI event, but is intentionally not
+    used for verification because within-ask tool iterations can create/read
+    their own cache and masquerade as cross-ask reuse.
+    """
+    p = unit.env
+    mode = p.get("prefix_cache_mode", "off")
+    usage = prompt_cache.normalize_usage(result_usage, first_iteration=True)
+    ordinal = p.get("prefix_cache_ask_ordinal", 0)
+    p["prefix_cache_ask_ordinal"] = ordinal + 1
+    diagnostic = {
+        "mode": mode,
+        "ask_ordinal": ordinal,
+        "independent_session": True,
+        "stable_workspace": mode == "required",
+        "usage": usage,
+        "phase": "uncoordinated" if mode != "required" else "warmup",
+        "reuse_check": None,
+    }
+    abort_reason = None
+    if mode != "required":
+        fidelity["prompt_cache"] = diagnostic
+        return diagnostic, None
+
+    if not isinstance(result_usage, dict):
+        abort_reason = (
+            f"{unit.label}: prompt-cache mode is required, but the warm-up ask "
+            "returned no provider usage object; cache reuse cannot be verified"
+        )
+        diagnostic["phase"] = "verification_failed"
+    elif p.get("prefix_cache_reference") is None:
+        p["prefix_cache_reference"] = usage
+        creation = usage["cache_creation_input_tokens"]
+        one_hour = usage["cache_creation_ephemeral_1h_input_tokens"]
+        five_minute = usage["cache_creation_ephemeral_5m_input_tokens"]
+        ttl_detail = usage["cache_creation_ttl_detail_available"]
+        if creation and (not ttl_detail or five_minute or one_hour < creation):
+            abort_reason = (
+                f"{unit.label}: requested a one-hour prompt cache, but the warm-up "
+                f"reported total creation={creation:,}, 1h={one_hour:,}, "
+                f"5m={five_minute:,}, TTL detail available={ttl_detail}; refusing "
+                "to trust that the prefix will survive the verification barrier"
+            )
+            diagnostic["phase"] = "verification_failed"
+        elif usage["cacheable_input_tokens"] < PREFIX_CACHE_MIN_TOKENS:
+            abort_reason = (
+                f"{unit.label}: warm-up exposed only "
+                f"{usage['cacheable_input_tokens']:,} cacheable tokens; refusing "
+                "to continue because there is no substantial prefix to verify"
+            )
+            diagnostic["phase"] = "verification_failed"
+        else:
+            fidelity["flags"].append({
+                "code": "prompt_cache_warmup", "severity": "info",
+                "detail": f"first independent ask warmed/observed "
+                          f"{usage['cacheable_input_tokens']:,} cacheable input tokens; "
+                          "the next ask must prove reuse before the campaign continues",
+            })
+    else:
+        diagnostic["phase"] = "reuse"
+        check = prompt_cache.assess_reuse(
+            p["prefix_cache_reference"], usage,
+            min_reuse_fraction=PREFIX_CACHE_MIN_REUSE_FRACTION,
+            min_cacheable_tokens=PREFIX_CACHE_MIN_TOKENS,
+        )
+        diagnostic["reuse_check"] = check
+        if check["verified"]:
+            fidelity["flags"].append({
+                "code": "prompt_cache_reuse_verified", "severity": "info",
+                "detail": check["reason"],
+            })
+        else:
+            fidelity["flags"].append({
+                "code": "prompt_cache_reuse_failed", "severity": "warn",
+                "detail": check["reason"],
+            })
+            abort_reason = (
+                f"{unit.label}: required trajectory-prefix cache reuse failed: "
+                f"{check['reason']}"
+            )
+    if abort_reason:
+        fidelity["flags"].append({
+            "code": "prompt_cache_campaign_abort", "severity": "warn",
+            "detail": abort_reason,
+        })
+    fidelity["prompt_cache"] = diagnostic
+    return diagnostic, abort_reason
+
 def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
                 timeout: int) -> dict:
     """Run one question against a fresh resume of the reconstructed context --
@@ -393,8 +634,7 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
     import os
     p = unit.env
     bundle = p["bundle"]
-    cwd_dir = ask_dir / "cwd"
-    cwd_dir.mkdir(parents=True, exist_ok=True)
+    cwd_dir, cwd_snapshot = _cache_workspace_for_ask(unit, ask_dir)
 
     if bundle is not None:
         sid, lines = recon_claude.emit_session(bundle, cwd=str(cwd_dir),
@@ -412,13 +652,21 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
                "--model", p["model"], *p["effort_args"], sent]
     t0 = datetime.datetime.now()
     try:
-        proc = subprocess.run(cmd, cwd=cwd_dir, capture_output=True, text=True,
-                              timeout=timeout, env={**os.environ, **p["env_overrides"]})
-        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-    except subprocess.TimeoutExpired as e:
-        stdout = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-        stderr = f"TIMEOUT after {timeout}s"
-        rc = -1
+        try:
+            proc = subprocess.run(cmd, cwd=cwd_dir, capture_output=True, text=True,
+                                  timeout=timeout,
+                                  env={**os.environ, **p["env_overrides"]})
+            stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
+        except subprocess.TimeoutExpired as e:
+            stdout = ((e.stdout or b"").decode()
+                      if isinstance(e.stdout, bytes) else (e.stdout or ""))
+            stderr = f"TIMEOUT after {timeout}s"
+            rc = -1
+    finally:
+        # Even a launch-time exception must not leave mutable state at the stable
+        # cache-visible path.  Preserve whatever exists as this ask's evidence and
+        # reset the path before the shared driver records/aborts the failure.
+        _snapshot_cache_workspace(cwd_dir, cwd_snapshot)
     dt = (datetime.datetime.now() - t0).total_seconds()
     (ask_dir / "probe_out.jsonl").write_text(stdout)
     if rc != 0:
@@ -429,7 +677,8 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
     # baseline session has no installed file to diff against)
     if bundle is not None:
         try:
-            appended = [json.loads(ln) for ln in open(session_path)][len(lines):]
+            with session_path.open() as session_file:
+                appended = [json.loads(ln) for ln in session_file][len(lines):]
             with open(ask_dir / "resume_turns.jsonl", "w") as f:
                 for a in appended:
                     f.write(json.dumps(a) + "\n")
@@ -445,7 +694,8 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
         except OSError:
             pass
 
-    result_text, cost_usd, model_usage, n_tool_uses = None, None, None, 0
+    result_text, cost_usd, model_usage, result_usage, n_tool_uses = (
+        None, None, None, None, 0)
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -458,6 +708,7 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
             result_text = d.get("result")
             cost_usd = d.get("total_cost_usd")
             model_usage = d.get("modelUsage")
+            result_usage = d.get("usage")
         elif d.get("type") == "assistant":
             content = ((d.get("message") or {}).get("content")) or []
             if isinstance(content, list):
@@ -477,9 +728,24 @@ def _ask_claude(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,
     fidelity["cost"] = {"total_usd": cost_usd, "by_model": model_usage,
                         "source": "billed (claude CLI total_cost_usd)"}
 
+    cache_diagnostic, abort_reason = _record_prompt_cache(
+        unit, result_usage, fidelity)
+    if p.get("prefix_cache_mode") == "required" and (rc != 0 or result_text is None):
+        operational_reason = (
+            f"{unit.label}: required-cache ask did not complete successfully "
+            f"(exit {rc}, result event present={result_text is not None})"
+        )
+        abort_reason = (f"{abort_reason}; {operational_reason}"
+                        if abort_reason else operational_reason)
+        fidelity["flags"].append({
+            "code": "prompt_cache_campaign_abort", "severity": "warn",
+            "detail": operational_reason,
+        })
+
     return {"dir": ask_dir.name, "answer": result_text, "cost_usd": cost_usd,
             "duration_s": round(dt, 1), "n_tool_uses": n_tool_uses,
-            "exit_code": rc}
+            "exit_code": rc, "prompt_cache": cache_diagnostic,
+            **({"_abort_experiment": abort_reason} if abort_reason else {})}
 
 
 def _ask_opencode(unit: AskUnit, ask_dir: Path, fidelity: dict, sent: str,

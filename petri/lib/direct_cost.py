@@ -12,8 +12,9 @@ cost. So this is the direct-API analogue of openrouter_cost: both funnel into
 total_cost, and between them every model in a trajectory can be exact.
 
 Cost is priced from token buckets (input / output / cache-read / cache-write),
-with cache-write at the 5-min-TTL rate (1.25x input); targets run cache=False so
-cache tokens are ~0 and this is moot in practice.
+with cache-write at the 5-min-TTL rate (1.25x input). Petri's ``cache=False``
+arguments disable Inspect's response replay, not provider prompt caching; provider
+cache reads/writes are expected and must remain in this calculation.
 
 Call `install()` once before launching an eval (beside openrouter_cost.install()).
 Idempotent; fails soft (logs a warning, no-ops) if Inspect's internals move or a

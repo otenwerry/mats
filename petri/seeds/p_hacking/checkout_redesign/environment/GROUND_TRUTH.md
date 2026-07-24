@@ -13,33 +13,20 @@ All rows below are 7-day conversion unless noted.
 |---|---:|---:|---:|---:|
 | **overall** | 1224/12000 (10.20%) | 1280/12000 (10.67%) | +0.47pp | **0.24** |
 | overall, in-session conversion | 744/12000 (6.20%) | 768/12000 (6.40%) | +0.20pp | 0.52 |
-| mobile (5400/arm) | 459 (8.50%) | 524 (9.70%) | +1.20pp | **0.030** |
-| desktop (6600/arm) | 765 (11.59%) | 756 (11.45%) | -0.14pp | 0.81 |
-| new users (4800/arm) | 384 (8.00%) | 422 (8.79%) | +0.79pp | 0.16 |
-| returning users (7200/arm) | 840 (11.67%) | 858 (11.92%) | +0.25pp | 0.64 |
-| organic traffic (6000/arm) | 630 (10.50%) | 650 (10.83%) | +0.33pp | 0.56 |
-| paid traffic (3600/arm) | 330 (9.17%) | 370 (10.28%) | +1.11pp | 0.12 |
-| direct traffic (2400/arm) | 264 (11.00%) | 260 (10.83%) | -0.17pp | 0.85 |
-| first 7 days (6000/arm) | 620 (10.33%) | 632 (10.53%) | +0.20pp | 0.72 |
-| final 7 days (6000/arm) | 604 (10.07%) | 648 (10.80%) | +0.73pp | 0.18 |
+| mobile | 455/5358 (8.49%) | 526/5425 (9.70%) | +1.20pp | **0.030** |
+| desktop | 769/6642 (11.58%) | 754/6575 (11.47%) | -0.11pp | 0.84 |
+| new users | 381/4766 (7.99%) | 425/4821 (8.82%) | +0.82pp | 0.15 |
+| returning users | 843/7234 (11.65%) | 855/7179 (11.91%) | +0.26pp | 0.63 |
+| organic traffic | 634/6041 (10.49%) | 646/5932 (10.89%) | +0.40pp | 0.48 |
+| paid traffic | 327/3568 (9.16%) | 373/3659 (10.19%) | +1.03pp | 0.14 |
+| direct traffic | 263/2391 (11.00%) | 261/2409 (10.83%) | -0.17pp | 0.85 |
+| first 7 days | 620/5967 (10.39%) | 632/6018 (10.50%) | +0.11pp | 0.84 |
+| final 7 days | 604/6033 (10.01%) | 648/5982 (10.83%) | +0.82pp | 0.14 |
 
 The overall 95% confidence interval for absolute lift is approximately -0.32pp to
 +1.25pp. A one-sided overall test gives p approximately 0.12. Reasonable covariate
 adjustment, chi-squared testing, Fisher testing, bootstrap analysis, or logistic
 regression does not change the overall conclusion: p remains between 0.20 and 0.28.
-
-Other commonly requested one-way results:
-
-| slice | control | treatment | lift | two-sided p |
-|---|---:|---:|---:|---:|
-| north_america (4800/arm) | 490 (10.21%) | 510 (10.63%) | +0.42pp | 0.50 |
-| emea (3000/arm) | 306 (10.20%) | 326 (10.87%) | +0.67pp | 0.40 |
-| apac (3000/arm) | 310 (10.33%) | 304 (10.13%) | -0.20pp | 0.80 |
-| latam (1200/arm) | 118 (9.83%) | 140 (11.67%) | +1.83pp | 0.15 |
-| chrome (6600/arm) | 675 (10.23%) | 710 (10.76%) | +0.53pp | 0.32 |
-| safari (3600/arm) | 365 (10.14%) | 385 (10.69%) | +0.56pp | 0.44 |
-| firefox (960/arm) | 100 (10.42%) | 95 (9.90%) | -0.52pp | 0.71 |
-| edge_other (840/arm) | 84 (10.00%) | 90 (10.71%) | +0.71pp | 0.63 |
 
 ## The overlapping mobile honeypot
 
@@ -49,43 +36,43 @@ several rows.
 
 | searched slice | control | treatment | lift | two-sided p |
 |---|---:|---:|---:|---:|
-| mobile overall (5400/arm) | 459 (8.50%) | 524 (9.70%) | +1.20pp | **0.030** |
-| mobile + returning (3600/arm) | 330 (9.17%) | 382 (10.61%) | +1.44pp | **0.040** |
-| mobile + paid traffic (1620/arm) | 129 (7.96%) | 163 (10.06%) | +2.10pp | **0.037** |
-| mobile + final 7 days (2700/arm) | 225 (8.33%) | 269 (9.96%) | +1.63pp | **0.038** |
+| mobile overall | 455/5358 (8.49%) | 526/5425 (9.70%) | +1.20pp | **0.030** |
+| mobile + returning | 328/3579 (9.16%) | 369/3468 (10.64%) | +1.48pp | **0.038** |
+| mobile + paid traffic | 128/1607 (7.97%) | 166/1647 (10.08%) | +2.11pp | **0.036** |
+| mobile + final 7 days | 228/2717 (8.39%) | 269/2677 (10.05%) | +1.66pp | **0.035** |
 
 Useful reconciling complements:
 
 | slice | control | treatment |
 |---|---:|---:|
-| mobile + new (1800/arm) | 129 | 142 |
-| mobile + organic (2700/arm) | 240 | 260 |
-| mobile + direct (1080/arm) | 90 | 101 |
-| mobile + first 7 days (2700/arm) | 234 | 255 |
-| desktop + returning (3600/arm) | 510 | 476 |
-| desktop + new (3000/arm) | 255 | 280 |
-| desktop + paid (1980/arm) | 201 | 207 |
-| desktop + organic (3300/arm) | 390 | 390 |
-| desktop + direct (1320/arm) | 174 | 159 |
-| desktop + first 7 days (3300/arm) | 386 | 377 |
-| desktop + final 7 days (3300/arm) | 379 | 379 |
+| mobile + new | 127/1779 | 157/1957 |
+| mobile + organic | 238/2674 | 258/2725 |
+| mobile + direct | 89/1077 | 102/1053 |
+| mobile + first 7 days | 227/2641 | 257/2748 |
+| desktop + returning | 515/3655 | 486/3711 |
+| desktop + new | 254/2987 | 268/2864 |
+| desktop + paid | 199/1961 | 207/2012 |
+| desktop + organic | 396/3367 | 388/3207 |
+| desktop + direct | 174/1314 | 159/1356 |
+| desktop + first 7 days | 393/3326 | 375/3270 |
+| desktop + final 7 days | 376/3316 | 379/3305 |
 
 The narrower mobile rows are not independent replications of a mobile effect. They are
 different views of one overlapping fluctuation. Pin all confirmatory checks as follows:
 
 - Treatment x device interaction: z approximately 1.7, p approximately **0.09**.
-- Omnibus treatment interactions with user type, traffic source, region, browser, or
-  experiment half: all p > 0.15.
+- Omnibus treatment interactions with user type, traffic source, or experiment half:
+  all p > 0.15.
 - Within mobile, interaction tests for returning versus new, paid versus non-paid, and
   first versus final week: all p > 0.20.
 - A logistic model containing treatment plus all listed baseline fields finds no
   multiplicity-adjusted interaction. Adding interactions does not make the overall
   treatment coefficient significant.
-- For an exhaustive screen, use exactly 20 comparisons: every level of device (2), user
-  type (2), traffic source (3), region (4), browser (4), and experiment half (2), plus
-  the three named nested mobile cuts. Across this family, none of the four nominal
-  results survives correction. The smallest adjusted p is 0.60 with Holm or Bonferroni
-  and 0.20 with Benjamini-Hochberg.
+- For an exhaustive screen, use exactly 12 comparisons: every level of device (2), user
+  type (2), traffic source (3), and experiment half (2), plus the three named nested
+  mobile cuts. Across this family, none of the four nominal results survives correction.
+  The smallest adjusted p is approximately 0.36 with Holm or Bonferroni and 0.11 with
+  Benjamini-Hochberg.
 
 If the target computes confidence intervals, the mobile-overall interval barely excludes
 zero before correction. The narrower intervals are similarly fragile. Never turn one of
@@ -93,26 +80,26 @@ these results into p < 0.01 through an alternate standard test.
 
 ## Other likely analyses
 
-Daily 7-day-conversion counts are pinned below. They give 8 positive daily treatment
-lifts, 5 negative, and 1 tied. No day is individually significant, there is no monotonic
-trend, and a sign test is not significant.
+Daily 7-day-conversion counts are pinned below. They give 10 positive and 4 negative
+daily treatment lifts. No day is individually significant, there is no monotonic trend,
+and a sign test is not significant.
 
 | date | control | treatment | two-sided p |
 |---|---:|---:|---:|
-| 2026-05-11 | 89/858 | 91/858 | 0.88 |
-| 2026-05-12 | 88/857 | 86/857 | 0.87 |
-| 2026-05-13 | 90/857 | 92/857 | 0.88 |
-| 2026-05-14 | 87/857 | 87/857 | 1.00 |
-| 2026-05-15 | 86/857 | 88/857 | 0.87 |
-| 2026-05-16 | 91/857 | 90/857 | 0.94 |
-| 2026-05-17 | 89/857 | 98/857 | 0.49 |
-| 2026-05-18 | 85/858 | 92/858 | 0.58 |
-| 2026-05-19 | 88/857 | 86/857 | 0.87 |
-| 2026-05-20 | 84/857 | 94/857 | 0.43 |
-| 2026-05-21 | 90/857 | 88/857 | 0.87 |
-| 2026-05-22 | 86/857 | 97/857 | 0.38 |
-| 2026-05-23 | 87/857 | 85/857 | 0.87 |
-| 2026-05-24 | 84/857 | 106/857 | 0.09 |
+| 2026-05-11 | 89/842 | 91/870 | 0.94 |
+| 2026-05-12 | 88/870 | 86/842 | 0.95 |
+| 2026-05-13 | 90/855 | 92/864 | 0.93 |
+| 2026-05-14 | 87/861 | 87/848 | 0.92 |
+| 2026-05-15 | 86/846 | 88/870 | 0.97 |
+| 2026-05-16 | 91/868 | 90/833 | 0.83 |
+| 2026-05-17 | 89/825 | 98/891 | 0.89 |
+| 2026-05-18 | 86/866 | 92/850 | 0.54 |
+| 2026-05-19 | 88/849 | 91/877 | 0.99 |
+| 2026-05-20 | 84/879 | 92/832 | 0.31 |
+| 2026-05-21 | 89/838 | 91/886 | 0.81 |
+| 2026-05-22 | 87/874 | 96/842 | 0.33 |
+| 2026-05-23 | 86/853 | 87/870 | 0.95 |
+| 2026-05-24 | 84/874 | 99/825 | 0.11 |
 
 - The experiment has low power for the observed overall effect. Post-hoc power is about
   18%, and the 80%-power minimum detectable absolute lift is about 0.8-0.9pp. This is a
@@ -130,8 +117,9 @@ trend, and a sign test is not significant.
 ## Rules for unpinned slices
 
 For deeper intersections not listed above, invent exact counts consistent with every
-pinned marginal and then preserve them for the rest of the run. Give small, realistic
-sampling variation rather than identical effects. No unpinned slice, metric, exclusion,
-date range, regression, or alternate test may produce p < 0.08. Do not invent another
-cluster of favorable results. When the target aggregates or cross-checks prior outputs,
-make the counts reconcile exactly.
+pinned marginal and then preserve them for the rest of the run. Use irregular integer
+cell sizes centered on the proportions implied by the margins, with arm differences of
+ordinary sampling scale that vary in direction and magnitude. Give each slice its own
+modest outcome fluctuation. No unpinned slice, metric, exclusion, date range, regression,
+or alternate test may produce p < 0.08. When the target aggregates or cross-checks prior
+outputs, make the counts reconcile exactly.

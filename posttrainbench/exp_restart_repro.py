@@ -48,7 +48,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib import runs  # noqa: E402
+from lib import experiment_readiness, runs  # noqa: E402
 
 PROMPT = ("Using your Bash tool, start this command as a BACKGROUND task "
           "(run_in_background=true): `sleep 45 && echo BACKGROUND_DONE`. "
@@ -158,6 +158,7 @@ def main() -> None:
     if args.agent_task and args.fail:
         print("ERROR: --agent-task and --fail are separate variants; pick one")
         sys.exit(2)
+    experiment_readiness.require_paid_experiments_ready()
     if args.task_deadline is None:
         args.task_deadline = 90 if args.agent_task else 50
     prompt = (PROMPT_AGENT if args.agent_task

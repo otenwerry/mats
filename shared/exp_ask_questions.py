@@ -4,7 +4,7 @@ in ANY supported environment (--env=petri / posttrainbench).
 PAID: the asks call model APIs (directly for petri; via the scaffold CLI for
 posttrainbench).
 
-  uv run shared/exp_ask_questions.py --env=petri --trajectory 1561 --questions em [--n 5]
+  uv run shared/exp_ask_questions.py --env=petri --trajectory 1561 --questions propensity --reasoning=no [--n 5]
   uv run shared/exp_ask_questions.py --env=posttrainbench --trajectory claude --questions em --dry-run
 
 This is the single endpoint that replaces petri/exp_ask_questions.py and
@@ -62,6 +62,12 @@ Question sets (--questions, required):
            each question's judge prompt.
 Add new sets to QUESTION_SETS below; they apply to every environment.
 
+Petri asks require --reasoning=yes|no. This is the reasoning mode for the NEW
+single-turn response, not a claim about how the saved prefix was generated. `no`
+disables native target reasoning and appends a number-only instruction. Because that
+instruction would corrupt a free-text measurement, `--reasoning=no` is refused before
+API spend unless every selected question has a numeric answer_format.
+
 Transition policy: a question set either carries a transition or it doesn't
 (em does, context doesn't); the WORDING is per-environment (adapter.TRANSITION)
 -- PTB's says "time's up" because its runs really are timed, petri's stays
@@ -104,7 +110,7 @@ Outputs land under the environment's own root, exactly where the per-env
 originals put them (so the existing viewers keep working unchanged):
   petri            mats-local/petri/<campaign>/id<ID>__<cut>/
   posttrainbench   mats-local/posttrainbench_outputs/<campaign>/<run_id>__ev<N>/
-(campaign defaults to questions_<set>):
+(campaign defaults to questions_<set>, except propensity uses its versioned variant):
   results.md        every answer, grouped by question -- for reading
   results.json      the same data, machine-readable -- for later judging
   <qid>__s<i>/      one dir per ask: fidelity.json (flags + cost),
@@ -129,6 +135,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+
+NO_REASONING_NUMERIC_SUFFIX = "Answer with only a single number and nothing else."
+
 SHARED = Path(__file__).resolve().parent
 MATS = SHARED.parent
 sys.path.insert(0, str(SHARED))          # ask_common (adapters import it too)
@@ -136,6 +145,8 @@ sys.path.insert(0, str(SHARED))          # ask_common (adapters import it too)
 from dotenv import load_dotenv
 
 import propensity                        # question set + closed-form parsing (free)
+import prompt_cache                      # passive normalized cache accounting
+from ask_common import AbortExperiment
 
 load_dotenv(MATS / ".env")               # API keys (asks + judge)
 
@@ -279,7 +290,8 @@ def _judge_bits(j: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def write_results(adapter, unit, args, questions: list[dict], records: list[dict],
-                  set_transition: str | None, judge_on: bool) -> dict:
+                  set_transition: str | None, judge_on: bool,
+                  automatic_response_instruction: str | None = None) -> dict:
     n_asks = len(records)
     costs = [r["cost_usd"] for r in records if isinstance(r["cost_usd"], (int, float))]
     n_exact = sum(1 for r in records
@@ -301,6 +313,7 @@ def write_results(adapter, unit, args, questions: list[dict], records: list[dict
            if unit.is_baseline else {}),
         "question_set": args.questions, "n_per_question": args.n,
         "transition": None if unit.is_baseline else set_transition,
+        "automatic_response_instruction": automatic_response_instruction,
         "n_asks": n_asks, "n_no_answer": n_no_answer, "n_errored": n_failed,
         "total_cost_usd": round(sum(costs), 4) if costs else None,
         "cost_known_for": len(costs),
@@ -321,6 +334,16 @@ def write_results(adapter, unit, args, questions: list[dict], records: list[dict
            if cf_recs else {}),
         "bundle_flags": [f["code"] for f in unit.fidelity_base["flags"]],
     }
+    if args.questions == "propensity":
+        summary["question_set_metadata"] = propensity.question_set_metadata()
+        summary["question_definitions"] = [
+            {k: q[k] for k in ("id", "status", "category", "text",
+                                "answer_format", "higher_means") if k in q}
+            for q in questions
+        ]
+    cache_summary = prompt_cache.summarize(records)
+    if cache_summary is not None:
+        summary["prompt_cache"] = cache_summary
     (unit.out_dir / "results.json").write_text(json.dumps(
         {"summary": summary, "asks": records}, indent=2))
 
@@ -338,6 +361,13 @@ def write_results(adapter, unit, args, questions: list[dict], records: list[dict
            f'- every question was sent with the transition prefix: "{set_transition}"'
            if set_transition else
            "- questions sent bare (this set has no transition prefix)")]
+    if cache_summary is not None:
+        md.append(
+            f"- prompt cache: {cache_summary['cache_read_input_tokens']:,} tokens read, "
+            f"{cache_summary['cache_creation_input_tokens']:,} tokens written; "
+            f"reuse checks {cache_summary['n_reuse_verified']} passed / "
+            f"{cache_summary['n_reuse_failed']} failed"
+        )
     if any(f["code"] == "final_message_cut_off" for f in unit.fidelity_base["flags"]):
         md.append(f"- **1 message cut off from the end:** the trajectory ended on "
                   f"unanswered tool calls, so its final assistant message is not in "
@@ -426,7 +456,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="seconds per ask")
     ap.add_argument("--campaign", default=None,
                     help="output subdir under the env's output root "
-                         "(default questions_<set>)")
+                         "(default questions_<set>; propensity includes its versioned "
+                         "scale variant)")
     ap.add_argument("--baseline", default="no", choices=("yes", "no", "only"),
                     help=(adapter.BASELINE_HELP if adapter else
                           "yes = additionally ask every question with no resumed "
@@ -466,9 +497,63 @@ def main():
             sys.exit(f"--only ids not in set '{args.questions}': {sorted(unknown)}\n"
                      f"available: {[q['id'] for q in questions]}")
         questions = [q for q in questions if q["id"] in want]
-    campaign = args.campaign or f"questions_{args.questions}"
+    automatic_response_instruction = None
+    if getattr(args, "reasoning", None) == "no":
+        non_numeric = [q["id"] for q in questions if not q.get("answer_format")]
+        if non_numeric:
+            sys.exit(
+                "ERROR: --reasoning=no automatically appends a numeric-only response "
+                "instruction, but these selected questions require free-text answers: "
+                f"{non_numeric}. This would corrupt the evaluation, so the run was "
+                "refused before API spend. Use --reasoning=yes or --only=<numeric qids>."
+            )
+        automatic_response_instruction = NO_REASONING_NUMERIC_SUFFIX
+        print("[reasoning] OFF for the new response; every question will receive this "
+              f"automatic suffix: {automatic_response_instruction!r}")
+        print("[reasoning] SAFETY CONTRACT: this mode is numeric-only; free-text questions "
+              "are rejected before API spend")
+    qset_meta = (propensity.question_set_metadata()
+                 if args.questions == "propensity" else None)
+    default_campaign = (f"questions_propensity_{qset_meta['variant']}"
+                        if qset_meta else f"questions_{args.questions}")
+    campaign = args.campaign or default_campaign
     set_transition = (adapter.TRANSITION
                       if QUESTION_SETS[args.questions]["transition"] else None)
+
+    # A campaign is one experimental condition. Refuse silent pooling across a
+    # scale revision, reasoning mode, question subset, or sample count.
+    campaign_contract = {
+        "schema_version": 1,
+        "question_set": args.questions,
+        "question_set_metadata": qset_meta,
+        "question_ids": [q["id"] for q in questions],
+        "n_per_question": args.n,
+        "reasoning": getattr(args, "reasoning", None),
+        "automatic_response_instruction": automatic_response_instruction,
+        **(adapter.experiment_contract(args)
+           if hasattr(adapter, "experiment_contract") else {}),
+    }
+    campaign_dir = adapter.OUT_ROOT / campaign
+    manifest_path = campaign_dir / "experiment_manifest.json"
+    if manifest_path.exists():
+        try:
+            existing_contract = json.loads(manifest_path.read_text())
+        except Exception as e:
+            sys.exit(f"ERROR: unreadable campaign manifest {manifest_path}: {e}")
+        if existing_contract != campaign_contract:
+            sys.exit(
+                f"ERROR: campaign {campaign!r} already has a different experiment "
+                "contract. Use a new --campaign name so results cannot overlap.\n"
+                f"existing: {existing_contract}\nrequested: {campaign_contract}"
+            )
+    elif campaign_dir.exists():
+        existing_results = sorted(campaign_dir.glob("*/results.json"))
+        if existing_results:
+            sys.exit(
+                f"ERROR: campaign {campaign!r} already contains legacy results but has "
+                "no experiment_manifest.json. Use a new --campaign name; the runner will "
+                "not guess that the old scale/reasoning condition matches."
+            )
 
     judge_on = not args.no_judge and any(q.get("judge_prompts") for q in questions)
     if judge_on and not args.dry_run:
@@ -495,14 +580,34 @@ def main():
 
     n_per_unit = len(questions) * args.n
     n_total = n_per_unit * len(units)
+    if hasattr(adapter, "verification_asks"):
+        need = max((adapter.verification_asks(u, args) for u in units), default=0)
+        if need and n_per_unit < need:
+            sys.exit(
+                f"ERROR: this execution policy requires at least {need} ordered asks "
+                f"per context to verify its paid invariant, but the selection has "
+                f"only {n_per_unit}. Increase --n/select more questions, or explicitly "
+                "disable that policy."
+            )
     n_base = sum(1 for u in units if u.is_baseline)
     print(f"\nquestion set '{args.questions}': {len(questions)} question(s) x "
           f"{args.n} sample(s) x {len(units)} context(s)"
           + (f" ({n_base} baseline)" if n_base else "")
           + f" = {n_total} asks")
+    cache_contract = campaign_contract.get("prompt_cache")
+    if cache_contract:
+        print(f"prompt cache: {cache_contract['mode']}"
+              + (" (stable reset-between-asks workspace; serial within each "
+                 "context; paid reuse check required)"
+                 if cache_contract["mode"] == "required" else
+                 " (legacy independent workspaces; no cross-ask prefix guarantee)"))
 
     if args.dry_run:
         adapter.dry_run_report(units, n_per_unit, n_total)
+        if cache_contract and cache_contract["mode"] == "required":
+            print("[dry-run] cache savings are NOT subtracted from that estimate: "
+                  "the first paid warm-up + reuse test must verify billed "
+                  "cache_read_input_tokens before discounted cost is trusted")
         if judge_on:
             jqs = [q for q in questions if q.get("judge_prompts")]
             per_ask = sorted({len(q["judge_prompts"]) for q in jqs})
@@ -513,7 +618,10 @@ def main():
         return
 
     # ---- output dirs (collisions uniqued), then env-specific paid-run setup ----
-    out_root = adapter.OUT_ROOT / campaign
+    out_root = campaign_dir
+    out_root.mkdir(parents=True, exist_ok=True)
+    if not manifest_path.exists():
+        manifest_path.write_text(json.dumps(campaign_contract, indent=2))
     used_names: set[str] = set()
     for u in units:
         name = u.dirname
@@ -530,18 +638,36 @@ def main():
 
     async def run_one(u, q: dict, i: int) -> tuple[int, dict]:
         ask_dir = u.out_dir / f"{q['id']}__s{i}"
+        ask_dir.mkdir(parents=True, exist_ok=True)
         # baselines send the BARE question: with no task in context, the
         # "we're done with this task" transition would be nonsense
-        sent = (q["text"] if u.is_baseline or set_transition is None
-                else set_transition + q["text"])
+        bare_sent = q["text"]
+        if automatic_response_instruction:
+            bare_sent += " " + automatic_response_instruction
+        sent = (bare_sent if u.is_baseline or set_transition is None
+                else set_transition + bare_sent)
         fid = copy.deepcopy(u.fidelity_base)
         fid["question_set"] = args.questions
         fid["question_id"] = q["id"]
         fid["sample_index"] = i
+        if automatic_response_instruction:
+            fid["flags"].append({
+                "code": "automatic_numeric_only_instruction",
+                "severity": "warn",
+                "detail": "target reasoning was forced off and the runner appended "
+                          f"{automatic_response_instruction!r}; this mode is valid only "
+                          "for numeric questions, and the CLI refuses free-text questions "
+                          "before API spend",
+            })
         crashed = False
+        abort_reason = None
         async with sem:
             try:
                 rec = await adapter.ask(u, q, sent, i, ask_dir, fid, args)
+                # Adapters may require a paid invariant (for example, that a
+                # warmed long prefix is actually read from cache). They return
+                # the evidence normally, then ask us to stop AFTER it is saved.
+                abort_reason = rec.pop("_abort_experiment", None)
                 # closed-form questions: parse the rating deterministically (free)
                 if q.get("answer_format") and rec["answer"] is not None:
                     cf = propensity.parse_closed_form(rec["answer"], q["answer_format"])
@@ -549,20 +675,34 @@ def main():
                     fid["flags"] += propensity.closed_form_flags(cf)
                     fid["closed_form"] = cf
                 judge_compact = None
-                if judge_on and rec["answer"] is not None and q.get("judge_prompts"):
+                if (not abort_reason and judge_on and rec["answer"] is not None
+                        and q.get("judge_prompts")):
                     judge_compact = await judge_ask(q, rec["answer"], fid, ask_dir)
                 rec["judge"] = judge_compact
             except Exception as e:  # keep one bad ask from sinking the run
                 crashed = True
+                if (hasattr(adapter, "verification_asks")
+                        and adapter.verification_asks(u, args)):
+                    abort_reason = (
+                        f"{u.label}: an ask crashed while a paid invariant was "
+                        f"required ({type(e).__name__}: {e})"
+                    )
+                    fid["flags"].append({
+                        "code": "required_invariant_ask_crashed",
+                        "severity": "warn",
+                        "detail": abort_reason,
+                    })
                 rec = {"dir": ask_dir.name, "answer": None, "cost_usd": None,
                        **adapter.EMPTY_RECORD_EXTRA, "duration_s": None,
                        "n_tool_uses": None, "judge": None,
                        "error": f"{type(e).__name__}: {e}"}
+        fid["probe_question"] = sent
+        fid["probe_answer"] = rec["answer"]
+        fid["judge"] = rec["judge"]
+        if crashed:
+            fid["error"] = rec["error"]
+        (ask_dir / "fidelity.json").write_text(json.dumps(fid, indent=2))
         if not crashed:
-            fid["probe_question"] = sent
-            fid["probe_answer"] = rec["answer"]
-            fid["judge"] = rec["judge"]
-            (ask_dir / "fidelity.json").write_text(json.dumps(fid, indent=2))
             judge_md = (f"- judge ({rec['judge']['model']}): {_judge_bits(rec['judge'])}"
                         if rec["judge"] else
                         "- judge: not run" + ("" if judge_on else " (--no-judge)"))
@@ -581,7 +721,13 @@ def main():
                   (f"(ERROR: {rec['error']})" if rec.get("error")
                    else adapter.MD_NO_ANSWER)]
             (ask_dir / "probe_result.md").write_text("\n".join(md))
+        else:
+            (ask_dir / "probe_result.md").write_text(
+                f"# Question ask: {u.ask_who} -- {ask_dir.name}\n\n"
+                f"ERROR: {rec['error']}\n"
+            )
         rec = {"question_id": q["id"], "sample_index": i, "question": q["text"],
+               **({"answer_format": q["answer_format"]} if q.get("answer_format") else {}),
                "question_sent": sent, **rec}
         done["n"] += 1
         cost = rec.get("cost_usd")
@@ -592,14 +738,29 @@ def main():
         c = rec.get("closed_form")
         cfnote = ("" if not c else ", rating " + (
             propensity.fmt_value(c["value"]) if c["value"] is not None else "UNPARSED"))
+        pc = rec.get("prompt_cache") or {}
+        pc_check = pc.get("reuse_check") or {}
+        if pc.get("phase") == "warmup":
+            cache_note = (f", cache warm "
+                          f"{(pc.get('usage') or {}).get('cacheable_input_tokens', 0):,} tok")
+        elif pc_check:
+            fraction = pc_check.get("reuse_fraction")
+            cache_note = (", cache reuse " +
+                          (f"{fraction:.1%}" if isinstance(fraction, (int, float))
+                           else "unknown"))
+        else:
+            cache_note = ""
         print(f"[{done['n']}/{n_total}] {u.label} {q['id']} s{i}: "
               + ("ERROR " + rec["error"] if rec.get("error") else
                  ("no answer" if rec["answer"] is None else "ok"))
               + (f", {rec['n_tool_uses']} tool call(s)" if rec.get("n_tool_uses") else "")
               + (f", ${cost:.4f}" if isinstance(cost, (int, float)) else "")
               + jnote + cfnote
+              + cache_note
               + (f", {rec['duration_s']:.0f}s" if rec.get("duration_s") else ""),
               flush=True)
+        if abort_reason:
+            raise AbortExperiment(abort_reason)
         return id(u), rec
 
     async def run_all():
@@ -608,10 +769,85 @@ def main():
         # below --concurrency
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=max(8, args.concurrency)))
-        jobs = [(u, q, i) for u in units for q in questions for i in range(args.n)]
-        return await asyncio.gather(*(run_one(u, q, i) for u, q, i in jobs))
+        jobs_by_unit = {id(u): [(q, i) for q in questions for i in range(args.n)]
+                        for u in units}
 
-    results = asyncio.run(run_all())
+        def is_serial(u):
+            return (adapter.serialize_asks(u, args)
+                    if hasattr(adapter, "serialize_asks") else False)
+
+        def n_verify(u):
+            return (adapter.verification_asks(u, args)
+                    if hasattr(adapter, "verification_asks") else 0)
+
+        # Paid safety barrier: each cache-aware unit runs warm-up -> verification
+        # back-to-back, but NO unit can begin the expensive remainder until every
+        # unit has passed. return_exceptions waits for all in-flight verification
+        # asks to persist their evidence instead of cancelling their coroutines.
+        async def verify_unit(u):
+            out = []
+            for q, i in jobs_by_unit[id(u)][:n_verify(u)]:
+                out.append(await run_one(u, q, i))
+            return out
+
+        verified_units = [u for u in units if n_verify(u)]
+        results = []
+        if verified_units:
+            checked = await asyncio.gather(
+                *(verify_unit(u) for u in verified_units), return_exceptions=True)
+            failures = [x for x in checked if isinstance(x, BaseException)]
+            results.extend(item for x in checked if not isinstance(x, BaseException)
+                           for item in x)
+            if failures:
+                raise failures[0]
+            print(f"[safety] paid prefix-cache verification passed for "
+                  f"{len(verified_units)} context(s); launching remaining asks",
+                  flush=True)
+
+        abort_event = asyncio.Event()
+
+        async def run_remainder(u):
+            jobs = jobs_by_unit[id(u)][n_verify(u):]
+            if is_serial(u):
+                out = []
+                for q, i in jobs:
+                    if abort_event.is_set():
+                        break
+                    try:
+                        out.append(await run_one(u, q, i))
+                    except AbortExperiment:
+                        abort_event.set()
+                        raise
+                return out
+            # Non-serial adapters retain the old full fan-out behavior. They do
+            # not participate in prefix-cache verification.
+            return await asyncio.gather(*(run_one(u, q, i) for q, i in jobs))
+
+        remaining_units = [u for u in units if jobs_by_unit[id(u)][n_verify(u):]]
+        remainder = await asyncio.gather(
+            *(run_remainder(u) for u in remaining_units), return_exceptions=True)
+        failures = [x for x in remainder if isinstance(x, BaseException)]
+        results.extend(item for x in remainder if not isinstance(x, BaseException)
+                       for item in x)
+        if failures:
+            raise failures[0]
+        return results
+
+    try:
+        results = asyncio.run(run_all())
+    except AbortExperiment as e:
+        failure = {
+            "status": "aborted",
+            "reason": str(e),
+            "safety_contract": "adapter-required paid invariant failed",
+            "completed_asks_before_abort": done["n"],
+            "planned_asks": n_total,
+        }
+        failure_path = out_root / "EXPERIMENT_ABORTED.json"
+        failure_path.write_text(json.dumps(failure, indent=2))
+        print(f"\nABORTED before remaining asks: {e}\nEvidence: {failure_path}",
+              file=sys.stderr)
+        sys.exit(2)
 
     # ---- aggregate per unit (trajectory or baseline) + grand totals ----
     by_key: dict[int, list[dict]] = {id(u): [] for u in units}
@@ -622,7 +858,8 @@ def main():
     grand_judge_cost, grand_judged = 0.0, 0
     for u in units:
         summary = write_results(adapter, u, args, questions, by_key[id(u)],
-                                set_transition, judge_on)
+                                set_transition, judge_on,
+                                automatic_response_instruction)
         grand_no_answer += summary["n_no_answer"]
         if summary["total_cost_usd"] is not None:
             grand_cost += summary["total_cost_usd"]

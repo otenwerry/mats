@@ -69,7 +69,7 @@ import viewer
 import exp_rollback as rb
 from exp_rollback import (
     PROMPTS, build_replay_data, make_resume_spec, build_rollback_task,
-    get_rollback_dims, write_rollback_meta,
+    write_rollback_meta,
 )
 from exp_rollback_judge import run_judging, DEFAULT_MODEL as DEFAULT_ANNOTATE_MODEL
 from viewer import (
@@ -307,6 +307,8 @@ def main() -> None:
         print(f"[select] {len(selected)} full-hack originals (binary def, annotated): {selected}")
     if not selected:
         raise SystemExit("no trajectories selected (need full hacks with hack-turn annotations).")
+    for tid in selected:
+        rb.route_ref_dimensions(refs[tid])
 
     # --- build replay data per trajectory (reads each sample once; free) ---
     print(f"\n[build] reconstructing replay data + first-hack turn for {len(selected)} trajectory(ies) ...")
@@ -370,13 +372,12 @@ def main() -> None:
     # --- STAGE 1: ONE combined eval_set over every cell's tasks (full concurrency, so a
     # stalled sample never blocks other cells), then SPLIT the results back into per-cell
     # dirs the judge/viewer already understand. Task names encode the cell for the split. ---
-    dims = get_rollback_dims()
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     all_tasks = []
     for loc, cond, label, prompt, specs in plan:
         for s in specs:
             all_tasks.append(build_rollback_task(
-                s, dims, task_name=_combined_task_name(s.ref.traj_id, loc, cond, s.ref.seed)))
+                s, task_name=_combined_task_name(s.ref.traj_id, loc, cond, s.ref.seed)))
 
     new_dirs: list[Path] = []
     if all_tasks:
@@ -400,8 +401,10 @@ def main() -> None:
         try:
             import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
             import model_window      # correct context windows so the auditor compacts at the real window (see lib/model_window.py)
+            import prompt_caching    # provider-prefix warm-up barrier + stored cache evidence
             openrouter_cost.install()
             model_window.install()
+            prompt_caching.install_inspect_warmup()
             success, logs = eval_set(
                 all_tasks, epochs=cfg["N"], max_tasks=max_tasks,
                 max_samples=cfg["concurrency"], max_connections=cfg["concurrency"],
@@ -412,6 +415,8 @@ def main() -> None:
             print(f"  !! GENERATE crashed (will still split whatever completed): {type(e).__name__}: {e}")
             traceback.print_exc()
         new_dirs = _redistribute(work_dir)
+        for run_dir in new_dirs:
+            prompt_caching.write_report(run_dir)
         print(f"  split into {len(new_dirs)} per-cell dir(s)")
 
     # --- STAGE 2: judge + annotate red rows. Judge ALL rollback dirs (incremental: dirs

@@ -1,5 +1,13 @@
 # PostTrainBench, second pass
 
+> **PAID EXPERIMENTS ARE NOT READY.** Current paid PTB entry points are hard
+> blocked before model spend. We have not decided whether resumed experiments
+> should preserve the original, older Claude Code scaffold or use a newer
+> Claude Code version that supports verified one-hour prompt caching. OpenCode
+> cache verification is also unfinished. Free viewing, reconstruction, and
+> dry-runs remain available. Read `agent-notes/PROMPT_CACHING.md` before changing
+> the block in `posttrainbench/lib/experiment_readiness.py`.
+
 Clean restart of the PTB rollback/resume work (2026-07-04). The first pass lives in
 `mats/posttrainbench_old/` and is kept as read-only reference — code there is considered
 untrusted until re-derived. The trajectory viewer from the first pass is the one

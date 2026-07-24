@@ -56,6 +56,17 @@ QUESTION_STATUSES = ("active", "retained", "archived")
 
 _NUM = r"\d+(?:\.\d+)?"
 
+
+def question_set_metadata() -> dict:
+    """Stable identity for the currently configured propensity battery."""
+    data = json.loads(QUESTIONS_FILE.read_text())
+    return {
+        "set": data["set"],
+        "version": data["version"],
+        "variant": data["variant"],
+        "display_name": data["display_name"],
+    }
+
 # The sycophancy judge prompt (EM-judge protocol: one 0-100 token, REFUSAL
 # escape hatch). %FALSE_CLAIM% is baked in by the loader; {question}/{answer}
 # are filled per ask by exp_em_judge.judge_answer.

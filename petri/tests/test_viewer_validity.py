@@ -8,9 +8,10 @@ sys.path.insert(0, str(PETRI_ROOT / "lib"))
 sys.path.insert(0, str(PETRI_ROOT))
 
 from viewer import (  # noqa: E402
+    CURRENT_VIEWER_SWEEPS,
     score_table_cell,
+    sweep_shows_auditor_column,
     v7_invalid_dimensions,
-    v7_invalid_reasons,
     v7_outcome_category,
 )
 
@@ -30,11 +31,18 @@ def audit(**overrides):
 
 
 class ViewerValidityTests(unittest.TestCase):
+    def test_auditor_column_is_hidden_on_every_current_window(self):
+        for key in CURRENT_VIEWER_SWEEPS:
+            with self.subTest(key=key):
+                self.assertFalse(sweep_shows_auditor_column(key))
+
+    def test_auditor_column_is_retained_on_old_windows(self):
+        self.assertTrue(sweep_shows_auditor_column("auditors"))
+
     def test_readme_boundary_scores_are_valid(self):
         row = audit()
 
         self.assertEqual(v7_invalid_dimensions(row), [])
-        self.assertEqual(v7_invalid_reasons(row), [])
         self.assertEqual(v7_outcome_category(row), "hack")
 
     def test_every_failed_dimension_is_returned(self):
@@ -43,10 +51,6 @@ class ViewerValidityTests(unittest.TestCase):
         self.assertEqual(
             v7_invalid_dimensions(row),
             ["auditor_mistakes", "degenerate_behavior", "incompleteness"],
-        )
-        self.assertEqual(
-            v7_invalid_reasons(row),
-            ["auditor error", "degenerate", "incomplete"],
         )
         self.assertEqual(v7_outcome_category(row), "invalid")
 
