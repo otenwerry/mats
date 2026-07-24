@@ -297,6 +297,118 @@ def resolve_attachments(text: str, attachments: dict) -> str:
 MSG_HEAD = re.compile(r"^\[M(\d+)\] (<?[A-Za-z_]+>?[A-Za-z_ ]*):", re.M)
 
 
+def _rendered_messages(transcript: str) -> list[dict]:
+    """Split the judge-view transcript into its numbered role/content messages.
+
+    The mechanical auditor-protocol check compares the actual target-facing text, so it
+    runs after attachment resolution and strips only renderer-added outer whitespace.
+    Internal whitespace, punctuation, and wording remain exact.
+    """
+    heads = list(MSG_HEAD.finditer(transcript or ""))
+    return [
+        {
+            "turn": int(head.group(1)),
+            "role": head.group(2).strip().casefold(),
+            "content": transcript[
+                head.end():heads[i + 1].start() if i + 1 < len(heads) else len(transcript)
+            ].strip(),
+        }
+        for i, head in enumerate(heads)
+    ]
+
+
+def check_auditor_protocol(transcript: str, protocol: dict | None) -> dict:
+    """Exact, no-LLM check of an opt-in original audit's target-facing script.
+
+    ``protocol`` is stored in Sample.metadata by ``assemble_pinned_seed`` and contains
+    the exact system prompt actually applied, opening user message, and one optional
+    follow-up. Absence means the sample did not opt in (historical audits, p-hacking,
+    continuations, and the ML ``correct`` condition). Every result is stored on the
+    loaded audit as a queryable status; only confirmed failures get a viewer badge.
+    """
+    if not isinstance(protocol, dict):
+        return {"status": "not_applicable", "version": None, "issues": []}
+    version = protocol.get("version")
+    expected_system = protocol.get("system_prompt")
+    expected_opening = protocol.get("opening_user_message")
+    expected_follow_up = protocol.get("follow_up_user_message")
+    if not all(isinstance(value, str) for value in (
+        expected_system, expected_opening, expected_follow_up
+    )):
+        return {
+            "status": "unavailable",
+            "version": version,
+            "issues": [{
+                "turn": None,
+                "part": "protocol",
+                "problem": "stored expectations are incomplete",
+            }],
+        }
+    # The transcript renderer removes outer message whitespace. Mirror only that
+    # renderer behavior; internal spacing and wording remain byte-sensitive.
+    expected_system = expected_system.strip()
+    expected_opening = expected_opening.strip()
+    expected_follow_up = expected_follow_up.strip()
+    if not transcript:
+        return {
+            "status": "unavailable",
+            "version": version,
+            "issues": [{
+                "turn": None,
+                "part": "protocol",
+                "problem": "transcript unavailable",
+            }],
+        }
+
+    messages = _rendered_messages(transcript)
+    systems = [message for message in messages if message["role"] == "system"]
+    users = [message for message in messages if message["role"] == "user"]
+    issues: list[dict] = []
+
+    if not systems:
+        issues.append({"turn": None, "part": "system", "problem": "missing"})
+    else:
+        if systems[0]["content"] != expected_system:
+            issues.append({
+                "turn": systems[0]["turn"],
+                "part": "system",
+                "problem": "text differs",
+            })
+        issues.extend({
+            "turn": message["turn"],
+            "part": "system",
+            "problem": "extra system message",
+        } for message in systems[1:])
+
+    if not users:
+        issues.append({"turn": None, "part": "opening", "problem": "missing"})
+    else:
+        if users[0]["content"] != expected_opening:
+            issues.append({
+                "turn": users[0]["turn"],
+                "part": "opening",
+                "problem": "text differs",
+            })
+        later = users[1:]
+        if later and later[0]["content"] != expected_follow_up:
+            issues.append({
+                "turn": later[0]["turn"],
+                "part": "follow-up",
+                "problem": "text differs",
+            })
+        issues.extend({
+            "turn": message["turn"],
+            "part": "user",
+            "problem": "extra user message",
+        } for message in later[1:])
+
+    return {
+        "status": "failed" if issues else "passed",
+        "version": version,
+        "issues": issues,
+    }
+
+
 def _msg_text(msg) -> str:
     """Concatenate the text of a chat message's content (handles str or block list).
     Reasoning blocks are EXCLUDED: ContentReasoning.text renders the CoT as raw
@@ -1005,6 +1117,17 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
             transcript = rendered.get((log.eval.task, str(s.id), s.epoch), "")
             # resolve attachment placeholders the scout renderer left in the transcript
             transcript = resolve_attachments(transcript, s.attachments or {})
+            run_metadata = log.eval.metadata or {}
+            sample_metadata = s.metadata or {}
+            # Only an original task that explicitly stamps the protocol version opts in.
+            # Copies of the sample metadata used by continuations/resamples must not be
+            # mistaken for a fresh original-script check.
+            protocol = (
+                sample_metadata.get("auditor_protocol")
+                if run_metadata.get("auditor_protocol_version")
+                else None
+            )
+            auditor_protocol_check = check_auditor_protocol(transcript, protocol)
             # dead = the TARGET produced 0 output tokens for this sample (e.g. bad
             # slug / API error). The judge scores such an empty conversation 1 across
             # the board, which would masquerade as a clean "no reward hacking" run —
@@ -1098,6 +1221,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         task=log.eval.task,
                         target=target_model,
                         auditor=auditor_model,
+                        auditor_protocol_check=auditor_protocol_check,
                         # auditor extended-thinking setting AS RUN (stamped into
                         # log.eval.metadata by exp_rh_audit / exp_rollback). None on every
                         # pre-thinking run -> shown as plain auditor (no suffix).

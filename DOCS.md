@@ -39,6 +39,8 @@ uv run exp_audit_pipeline.py
 	[--concurrency=50]
 	[--annotate-model=opus-4.8]
 	[--skip-annotate, --skip-viewer, --force-annotate]
+    ml allow only: FOLLOW_UP.txt is inlined; exact system/opening/optional-follow-up
+        compliance is stored per trajectory and flagged in the viewer on failure
 
 ## Continuations
 uv run exp_continuation_pipeline.py

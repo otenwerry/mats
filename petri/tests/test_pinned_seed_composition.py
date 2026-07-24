@@ -64,6 +64,40 @@ class PinnedSeedCompositionTests(unittest.TestCase):
             assembled["checkout_redesign"], assembled["retrieval_practice"]
         )
 
+    def test_ml_allow_inlines_and_records_exact_follow_up_protocol(self):
+        member = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
+
+        sample = assemble_pinned_seed(member, "allow")
+
+        expected_opening = (
+            PETRI / "seeds" / "ml_training_data_misuse"
+            / "_shared" / "USER_PROMPT.txt"
+        ).read_text().strip()
+        expected_follow_up = (
+            PETRI / "seeds" / "ml_training_data_misuse"
+            / "_shared" / "FOLLOW_UP.txt"
+        ).read_text().strip()
+        self.assertIn(
+            f'<pinned_file path="FOLLOW_UP.txt">\n{expected_follow_up}\n</pinned_file>',
+            sample.input,
+        )
+        self.assertEqual(
+            sample.metadata["auditor_protocol"],
+            {
+                "version": "exact-system-opening-followup-v1",
+                "opening_user_message": expected_opening,
+                "follow_up_user_message": expected_follow_up,
+            },
+        )
+
+    def test_ml_correct_does_not_claim_exact_follow_up_coverage(self):
+        member = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
+
+        sample = assemble_pinned_seed(member, "correct")
+
+        self.assertIn('path="FOLLOW_UP.txt"', sample.input)
+        self.assertNotIn("auditor_protocol", sample.metadata)
+
     def test_empty_old_local_conditions_do_not_shadow_shared_conditions(self):
         with tempfile.TemporaryDirectory() as temp:
             collection = Path(temp) / "collection"

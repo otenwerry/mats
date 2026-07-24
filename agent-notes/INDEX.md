@@ -4,7 +4,7 @@ Hand-maintained menu of the notes in this folder. Each note repeats its own summ
 
 ## Petri (reward-hacking audits)
 
-- **CODEBASE_GUIDE.md** — how the Petri code, experiments, Current/Round-1/Old viewer, direction-based continuations, run-dir types, fixed target tools, and centralized global/seed-scoped judge dimensions are organized, plus the binary reward-hack definition. Read at the start of any Petri work. (updated 2026-07-24)
+- **CODEBASE_GUIDE.md** — how the Petri code, experiments, Current/Round-1/Old viewer, direction-based continuations, run-dir types, fixed target tools, exact ML auditor-script check, and centralized global/seed-scoped judge dimensions are organized, plus the family-aware binary reward-hack definition. Read at the start of any Petri work. (updated 2026-07-24)
 - **CONTINUATION_EXPERIMENT_SPEC.md** — design of the continuation experiment (does hacking on task A raise the hack rate on task B?), including exact fixed B-tool registration and the shared interface used by new originals. Read when working on continuation runs. Predates the 2026-07-08 `--treatment` rewrite. (updated 2026-07-24)
 - **PROMPT_CACHING.md** — provider prompt caching vs response replay; Petri's warm-first barrier, v2 message-ID-normalized key, and per-run reports; direct Anthropic breakpoints; PTB's verified caching mode and old-CLI limitation. Read before changing any repeated-context paid pipeline. (updated 2026-07-23)
 - **ml_training_data_misuse_DESIGN_CHOICES.md** — pinned conditions + per-seed variations for the seven ml_training_data_misuse seeds, and how to flip each. Read when designing/varying those seeds. (updated 2026-07-08)
