@@ -79,8 +79,11 @@ Flags:
   --max-turns=<N>      REQUIRED. Auditor turn cap. Stamped per task into metadata, so
                        runs with different caps are distinguishable and resamples inherit
                        the value.
-  --annotate-model=<m> Anthropic model for the secondary hack-turn judging
-                       (default claude-opus-4-8).
+  --judge=<m>          alignment judge (default: lib/judge_models.py, currently
+                       gpt-5.6-luna; or set $PETRI_JUDGE). A shortname or a full
+                       provider/model string; stamped per task as `judge`.
+  --annotate-model=<m> model for the secondary hack-turn annotation
+                       (default deepseek-v4-pro; see lib/annotate_agent.py).
   --skip-annotate      stop after the audit (still rebuilds the viewer).
   --skip-viewer        don't rebuild the viewer at the end.
   --force-annotate     re-annotate FULL hacks even if already in annotations.json.
@@ -105,7 +108,12 @@ from exp_rh_audit import (
     resolve_fixed_sp, reject_fixed_sp_flag, resolve_condition, resolve_reasoning, JUDGE,
     print_dimension_plan,
 )
-from exp_annotate_hacks import load_all_original_audits, run_annotation
+from exp_annotate_hacks import (
+    DEFAULT_MODEL as ANNOTATE_DEFAULT_MODEL,
+    load_all_original_audits,
+    run_annotation,
+)
+from judge_models import resolve_judge
 from model_routing import route  # match build_tasks' provider routing for the dead-target guard
 from viewer_load import (
     blocking_target_provider_events,
@@ -119,12 +127,14 @@ from viewer_load import (
 # or turn cap.
 # Only the operational knobs (parallelism, annotate model) default.
 DEFAULT_CONCURRENCY = 50
-DEFAULT_ANNOTATE_MODEL = "claude-opus-4-8"
+# Follows lib/exp_annotate_hacks.py (deepseek-v4-pro since the annotator became
+# agentic on 2026-07-30). Pinning a value here would silently override that.
+DEFAULT_ANNOTATE_MODEL = ANNOTATE_DEFAULT_MODEL
 
 _VALUE_FLAGS = {
     "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--auditor",
     "--auditor-thinking", "--condition", "--concurrency", "--max-turns",
-    "--annotate-model",
+    "--judge", "--annotate-model",
 }
 _SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
 
@@ -258,6 +268,8 @@ def _parse_args() -> dict:
         # Required auditor turn cap; stamped per task into metadata (see build_tasks) so
         # different runs are distinguishable and resamples inherit the value.
         "max_turns": _posint("--max-turns", 1),
+        # None -> the shared default judge (lib/judge_models.py, $PETRI_JUDGE aware)
+        "judge": _arg("--judge"),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         "skip_annotate": "--skip-annotate" in sys.argv,
         "skip_viewer": "--skip-viewer" in sys.argv,
@@ -289,7 +301,8 @@ def run_audit_stage(cfg: dict):
     print(f"  seeds ({len(seeds)}): {seeds}")
     eff = cfg["auditor_reasoning_effort"]
     thinking_note = "off" if eff is None else f"adaptive (effort={eff}, summarized)"
-    print(f"  auditor={cfg['auditor']} [thinking: {thinking_note}]  judge={JUDGE}")
+    print(f"  auditor={cfg['auditor']} [thinking: {thinking_note}]  "
+          f"judge={resolve_judge(cfg['judge'])}")
     print_dimension_plan(seeds, cfg["seeds_path"])
     fsp = cfg["fixed_system_prompt"]
     resolved_sp = next(iter(fsp.values())) if isinstance(fsp, dict) else fsp
@@ -316,6 +329,7 @@ def run_audit_stage(cfg: dict):
                             seeds_path=cfg["seeds_path"],
                             fixed_system_prompt=cfg["fixed_system_prompt"],
                             condition=cfg["condition"],
+                            judge=cfg["judge"],
                             max_turns=cfg["max_turns"])
         success, logs = run_eval(tasks, epochs, cfg["concurrency"], log_dir)
     except SystemExit:

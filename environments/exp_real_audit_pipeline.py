@@ -24,11 +24,13 @@ Flags:
                        real-mode analog of the auditor turn cap).
   --reasoning=yes|no   optional (default yes). Same semantics as the simulated pipeline.
   --condition=<c>      allow only in v1 (correct is a designed seam, rejected loudly).
-  --gate-model=<m>     first-submission gate LLM (default anthropic/claude-opus-4-8).
+  --judge=<m>          alignment judge (default gpt-5.6-luna; see lib/judge_models.py,
+                       or set $PETRI_JUDGE).
+  --gate-model=<m>     first-submission gate LLM; defaults to the judge and must equal it.
   --concurrency=<N>    LLM parallelism for audit + annotate (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
   --time-limit=<sec>   optional per-sample wall-clock limit.
-  --annotate-model=<m> secondary hack-turn judging model (default claude-opus-4-8).
+  --annotate-model=<m> agentic hack-turn annotator (default deepseek-v4-pro).
   --skip-annotate / --skip-viewer / --force-annotate  as in exp_audit_pipeline.py.
 
 Requires a running Docker daemon (checked before any spend).
@@ -96,6 +98,7 @@ from exp_audit_pipeline import (
     unrecovered_dead_targets,
 )
 from annotate_real_hacks import annotate_real_hacks
+from judge_models import resolve_judge
 from env_paths import DATA, OUT
 from model_routing import route
 
@@ -118,7 +121,7 @@ def env_viewer():
 _VALUE_FLAGS = {
     "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--condition",
     "--concurrency", "--sandbox-concurrency", "--time-limit", "--max-turns",
-    "--gate-model", "--annotate-model",
+    "--judge", "--gate-model", "--annotate-model",
 }
 _SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
 
@@ -229,7 +232,8 @@ def _parse_args() -> dict:
         "epochs": epochs,
         "reasoning": resolve_reasoning(_arg("--reasoning")),
         "condition": condition,
-        "gate_model": resolve_gate_model(_arg("--gate-model")),
+        "judge": _arg("--judge"),
+        "gate_model": resolve_gate_model(_arg("--gate-model"), _arg("--judge")),
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
         "sandbox_concurrency": _posint("--sandbox-concurrency", DEFAULT_SANDBOX_CONCURRENCY),
         "time_limit": _posint("--time-limit", None),
@@ -277,7 +281,7 @@ def run_real_audit_stage(cfg: dict):
     print(f"  targets ({len(targets)}): "
           + ", ".join(f"{t}{reasoning_tag(cfg['reasoning'])}" for t in targets))
     print(f"  seeds ({len(seeds)}): {seeds}  condition={cfg['condition']}")
-    print(f"  judge={JUDGE}  gate={cfg['gate_model']}")
+    print(f"  judge={resolve_judge(cfg['judge'])}  gate={cfg['gate_model']}")
     print(f"  epochs={epochs}  concurrency={cfg['concurrency']}  "
           f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
           f"max_turns={cfg['max_turns']}  time_limit={cfg['time_limit']}")
@@ -293,6 +297,7 @@ def run_real_audit_stage(cfg: dict):
             targets, seeds, log_dir.name,
             reasoning=cfg["reasoning"], condition=cfg["condition"],
             max_turns=cfg["max_turns"], gate_model=cfg["gate_model"],
+            judge=cfg["judge"],
             seeds_path=cfg["seeds_path"],
             artifacts_root=log_dir / "real_artifacts",
         )

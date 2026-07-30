@@ -163,6 +163,22 @@ class EnvViewerTests(unittest.TestCase):
         self.assertIn("none (real environment)", page)   # auditorless label
         self.assertIn("read 1/4 messages", page)         # annotation coverage note
 
+    def test_unreadable_run_dir_is_skipped_loudly_not_fatally(self):
+        # The error path must work precisely when something is wrong: an interrupted or
+        # in-progress run leaves a dir whose logs cannot be read. The build must finish
+        # and SAY so on the page.
+        env_viewer = load_env_viewer()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._point_at(env_viewer, root)
+            bad = root / "logs" / "real-v1-broken-allow-1ep-20260730-000000"
+            bad.mkdir(parents=True)
+            (bad / "not-a-real-log.eval").write_text("garbage")
+            asyncio.run(env_viewer.main())
+            html = (root / "viewer" / "index.html").read_text()
+        self.assertIn("real-v1-broken-allow-1ep-20260730-000000", html)
+        self.assertTrue(html.rstrip().endswith("</html>"))
+
     def _point_at(self, env_viewer, root: Path) -> None:
         """Repoint the viewer module (and the shared load layer) at a temp data root."""
         import viewer as pv

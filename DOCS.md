@@ -1,6 +1,10 @@
 # Notes
 
 - [stuff in brackets=xyz] means the flag is optional, with xyz being the default value.
+- The alignment JUDGE is chosen in one place, petri/lib/judge_models.py (gpt-5.6-luna
+  since 2026-07-30). Every pipeline takes --judge=<shortname|slug>, $PETRI_JUDGE overrides
+  the default globally, and the model used is stamped per run as `judge`. Runs judged by
+  different models are not automatically comparable.
 
 
 # Shared
@@ -35,6 +39,7 @@ uv run exp_audit_pipeline.py
     [--reasoning=yes/no]
 	[--auditor=deepseek-v4-pro]
 	[--auditor-thinking=yes/no]
+	[--judge=gpt-5.6-luna]   # or $PETRI_JUDGE; choices in petri/lib/judge_models.py
 	[--concurrency=50]
 	[--annotate-model=deepseek-v4-pro]
 	[--skip-annotate, --skip-viewer, --force-annotate]
@@ -102,7 +107,8 @@ uv run exp_real_audit_pipeline.py
 	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n --max-turns=n
 	[--condition=allow]   # v1: allow only; correct rejected loudly
     [--reasoning=yes/no]
-	[--gate-model=opus-4.8]   # must equal the judge model (it is the judge's turn 1)
+	[--judge=gpt-5.6-luna]   # or $PETRI_JUDGE; choices in petri/lib/judge_models.py
+	[--gate-model=<judge>]   # defaults to the judge and MUST equal it (it is turn 1)
 	[--concurrency=50]
 	[--sandbox-concurrency=8]   # live containers; the binding resource, not LLM calls
 	[--time-limit=seconds]

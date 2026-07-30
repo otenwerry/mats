@@ -46,6 +46,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from judge_models import resolve_judge
 from viewer import (
     LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, hack_category, _load_rejudge,
 )
@@ -54,7 +55,8 @@ from viewer import (
 TARGET_CATEGORIES = {"degenerate", "nudged"}
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
-MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
+MODEL = resolve_judge(next((a.split("=", 1)[1] for a in sys.argv
+                            if a.startswith("--model=")), None))
 CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 DRY_RUN = "--dry-run" in sys.argv

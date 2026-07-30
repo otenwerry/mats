@@ -50,12 +50,14 @@ from inspect_scout import TranscriptContent, transcripts_from
 
 # single source of truth for paths, the binary definition, and the merge key
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from judge_models import resolve_judge
 from viewer import (
     LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, binary_hack_eval,
 )
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
-MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
+MODEL = resolve_judge(next((a.split("=", 1)[1] for a in sys.argv
+                            if a.startswith("--model=")), None))
 CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 FORCE = "--force" in sys.argv

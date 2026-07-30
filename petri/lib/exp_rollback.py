@@ -107,6 +107,7 @@ _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
 # reuse viewer's loaders so transcript numbering matches the viewer exactly
 from viewer import DATA, LOGS, load_mode, page_name
 from petri_paths import ENV_FILE
+from judge_models import DEFAULT_JUDGE
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from prompt_caching import stable_key
 from exp_rh_audit import (
@@ -133,7 +134,7 @@ load_dotenv(ENV_FILE)
 # build_rollback_task), so these constants are only the fallback used when an original
 # log somehow doesn't record an auditor/judge role -- which for our runs it always does.
 AUDITOR = "anthropic/claude-sonnet-4-6"
-JUDGE = route("anthropic/claude-opus-4-8")
+JUDGE = DEFAULT_JUDGE   # see lib/judge_models.py
 # FALLBACK ONLY: max_turns (and turn_counter=False) are INHERITED from the original's
 # stamped metadata (TrajRef.max_turns / .turn_counter, read in _all_refs and applied in
 # resume_solver), so a rollback always runs under the same turn budget as the run it

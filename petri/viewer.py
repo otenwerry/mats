@@ -2380,6 +2380,7 @@ _PRETTY_MODELS = {
     "gpt-5.4-mini": "GPT 5.4 Mini",
     "gpt-5.5": "GPT 5.5",
     "gpt-5.6-sol": "GPT 5.6 Sol",
+    "gpt-5.6-luna": "GPT 5.6 Luna",
     "grok-4.20": "Grok 4.20",
     "kimi-k2.6": "Kimi K2.6",
     "mimo-v2.5-pro": "MiMo V2.5 Pro",

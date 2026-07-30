@@ -51,6 +51,7 @@ from dimension_routing import SEEDS_ROOT, audit_dimension_set  # noqa: E402
 import model_prices  # noqa: E402
 import openrouter_cost  # noqa: E402
 from petri_paths import DATA, ENV_FILE  # noqa: E402
+from judge_models import resolve_judge  # noqa: E402
 from viewer import (  # noqa: E402
     CONTINUATION_PREFIX,
     CURRENT_SWEEP,
@@ -90,7 +91,7 @@ def parse_requested_ids(raw: str | None) -> set[int] | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model", default="anthropic/claude-opus-4-8", help="judge model"
+        "--model", default=None, help="judge model (default: lib/judge_models.py)"
     )
     parser.add_argument(
         "--concurrency", type=int, default=50, help="parallel judge calls (default: 50)"

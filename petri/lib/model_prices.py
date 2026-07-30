@@ -67,14 +67,17 @@ PRICES: dict[str, dict] = {
     # direct_cost.install(), so direct GPT calls get an exact total_cost like Anthropic's.
     "openai/gpt-5.5-2026-04-23":           _p(5.00, 30.00, 0.50, source="openai-list"),
     "openai/gpt-5.4-mini-2026-03-17":      _p(0.75, 4.50, 0.075, source="openai-list"),
-    # gpt-5.6-sol (added 2026-07-16): id is undated on both OpenAI and OpenRouter, so this
-    # ONE entry covers direct and routed calls (canon() maps both to this key). Base list
-    # prices from OpenRouter's /models data. Unlike gpt-5.5, gpt-5.6 bills cache WRITES
+    # GPT-5.6 ids are undated on both OpenAI and OpenRouter, so each entry covers direct
+    # and routed calls (canon() maps both to this key). Base list prices are OpenAI's.
+    # Unlike gpt-5.5, gpt-5.6 bills cache WRITES
     # (1.25x input) -- recorded, though moot while targets run cache=False. CAVEAT: both
     # gpt-5.5 and gpt-5.6 carry a long-context tier OpenRouter reports as $10/$45 above
     # 272k prompt tokens; neither this flat table nor Inspect's cost path can represent
     # it, so >272k-context calls are UNDER-estimated (pre-existing for gpt-5.5).
     "openai/gpt-5.6-sol":                  _p(5.00, 30.00, 0.50, 6.25, "openai-list"),
+    # OpenAI cut Luna by 80% on 2026-07-30: $0.20 input / $1.20 output, with the
+    # normal GPT-5.6 cache ratios (0.1x read, 1.25x write).
+    "openai/gpt-5.6-luna":                 _p(0.20, 1.20, 0.02, 0.25, "openai-list"),
     # The EM judge (Betley et al. first_plot_questions.yaml pins this snapshot; see
     # lib/exp_em_judge.py). Judge calls are raw OpenAI, priced here, never billed-exact.
     "openai/gpt-4o-2024-08-06":            _p(2.50, 10.00, 1.25, source="openai-list"),
@@ -104,6 +107,7 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "openai/gpt-5.5-2026-04-23":                 1_050_000,
     "openai/gpt-5.5-20260423":                   1_050_000,   # historical OpenRouter slug
     "openai/gpt-5.6-sol":                        1_050_000,   # Inspect's DB is STALE (400k) -> model_window bumps it
+    "openai/gpt-5.6-luna":                       1_050_000,
     "openai/gpt-5.4-mini-2026-03-17":              400_000,
     "deepseek/deepseek-chat":                      131_072,
     "deepseek/deepseek-r1":                        163_840,

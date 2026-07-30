@@ -222,8 +222,9 @@ async def load_all() -> list[dict]:
         try:
             audits.extend(await viewer_load.load_mode(mode_dir))
         except Exception as e:      # a broken dir must not sink the whole build
-            pv._record_skipped_dir(mode_dir.name, f"{type(e).__name__}: {e}")
-            print(f"  !! SKIPPED {mode_dir.name}: {type(e).__name__}: {e}")
+            # _record_skipped_dir takes (Path, Exception) and prints its own warning;
+            # it also feeds skipped_run_banner(), so the skip shows on the page.
+            pv._record_skipped_dir(mode_dir, e)
     return audits
 
 

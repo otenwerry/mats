@@ -42,6 +42,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
+from judge_models import resolve_judge
 from viewer import LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key
 from viewer_load import parse_rh_category
 
@@ -54,7 +55,7 @@ def _arg(name: str, default=None):
 
 TARGET_ID = _arg("id")
 RUN_DIR = _arg("run-dir")  # optional: narrow the scan to one run dir (faster)
-MODEL = _arg("model", "anthropic/claude-opus-4-8")
+MODEL = resolve_judge(_arg("model", None))
 SKIP_VIEWER = "--skip-viewer" in sys.argv
 if TARGET_ID is None:
     raise SystemExit("usage: uv run tools/exp_rejudge_one.py --id=<viewer id> [--run-dir=<name>] [--skip-viewer]")

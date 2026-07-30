@@ -112,6 +112,7 @@ from inspect_petri.util import parse_markdown_file
 
 # all paths come from the single source of truth in petri_paths
 from petri_paths import PETRI_ROOT, DATA, ENV_FILE, DIMENSIONS_DIR
+from judge_models import DEFAULT_JUDGE, resolve_judge
 from dimension_routing import (
     AuditDimensionSet,
     dimension_provenance,
@@ -133,7 +134,9 @@ from model_routing import route  # single source of truth for provider routing
 load_dotenv(ENV_FILE)
 
 AUDITOR = "openrouter/deepseek/deepseek-v4-pro-20260423"
-JUDGE = route("anthropic/claude-opus-4-8")
+# The alignment judge. Single source of truth is lib/judge_models.py, so switching
+# it (or setting $PETRI_JUDGE) moves every experiment at once.
+JUDGE = DEFAULT_JUDGE
 
 # Inspect defaults tool outputs to 16 KiB when this field is None. Its explicit
 # max_tool_output=0 behavior disables truncation (truncate_string_to_bytes returns None
@@ -275,6 +278,10 @@ TARGET_CHOICES = {
     # model_routing's generic prefix-strip routes it direct with no explicit remap.
     # openai/* slug -> same reasoning_effort path in build_target_model as gpt-5.5.
     "gpt-5.6-sol": "openrouter/openai/gpt-5.6-sol",
+    # added 2026-07-30: the CHEAP tier of the same family, now our default judge
+    # (lib/judge_models.py). Slug verified live on OpenRouter that day; undated on both
+    # sides, so model_routing's generic prefix-strip routes it first-party.
+    "gpt-5.6-luna": "openrouter/openai/gpt-5.6-luna",
     # A larger qwen3 (between qwen3-32b and qwen3.7-max) would be the cleanest
     # capability rung -- add once you confirm the slug, e.g.:
     # "qwen3-72b": "openrouter/qwen/qwen3-72b-instruct",
@@ -949,6 +956,7 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
                 auditor_reasoning_effort: str | None = None,
                 seeds_path: str = SEEDS,
                 condition: str | None = None,
+                judge: str | None = None,
                 max_turns: int = MAX_TURNS) -> list:
     """Build one Inspect task per target (each over the selected seeds). For a COLLECTION
     seed dir (is_pinned_collection, e.g. ml_training_data_misuse/), one task per
@@ -1002,6 +1010,10 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
     if not fixed_system_prompt:
         raise SystemExit("fixed_system_prompt is required (always on); resolve it with "
                          "resolve_fixed_sp(seed_dir_arg, seeds_path)")
+    # Which model scores the transcripts. None -> the shared default (lib/judge_models.py,
+    # overridable with $PETRI_JUDGE); stamped per task so a run is self-describing and a
+    # mixed-judge comparison is visible in the viewer instead of silent.
+    judge_model = resolve_judge(judge)
     pinned = is_pinned_seed_dir(seeds_path)
     collection = is_pinned_collection(seeds_path)
     if (pinned or collection) and condition is None:
@@ -1130,7 +1142,8 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
                 task_name += f"_{unit_name}"
             task_kwargs = dict(
                     dataset=seed_subset,
-                    model_roles=dict(auditor=auditor_role, target=target_role, judge=JUDGE),
+                    model_roles=dict(auditor=auditor_role, target=target_role,
+                                     judge=judge_model),
                     name=task_name,
                     # self-describing run metadata -> log.eval.metadata (see DATA_GUIDE.md)
                     metadata={
@@ -1158,7 +1171,7 @@ def build_tasks(selected_targets: list[str], selected_seeds: list[str], run_labe
                         # resume result from splicing the target's tool-call arguments.
                         "auditor_max_tool_output": AUDITOR_MAX_TOOL_OUTPUT,
                         "auditor_tool_output_unlimited": True,
-                        "judge": JUDGE,
+                        "judge": judge_model,
                         "nudge": "no_nudge",
                         # Exact rubric routing for this task. A collection invocation may
                         # have different sets per member, so these are task-level fields.

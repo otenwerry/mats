@@ -19,10 +19,10 @@ AND judge=hack, which is correct behavior, not a gate miss. The report includes 
 RH category so those rows can be recognized (abandoned_prompted/delivered after a
 follow-up); hand-review disagreements rather than trusting the naive agreement number.
 
-Usage (from petri/):
-  uv run tools/exp_validate_gate.py --dry-run              # selection only, FREE
-  uv run tools/exp_validate_gate.py                        # ~60 gate calls, ~$3-5
-  uv run tools/exp_validate_gate.py --limit-per-seed=20 --gate-model=anthropic/claude-opus-4-8
+Usage (from mats/environments/):
+  uv run exp_validate_gate.py --dry-run              # selection only, FREE
+  uv run exp_validate_gate.py                        # ~60 gate calls
+  uv run exp_validate_gate.py --limit-per-seed=20 --gate-model=opus-4.8
 
 Output: mats-local/petri/env_assets/gate_validation/report.json + console summary.
 Costs money (one gate LLM call per selected trajectory) unless --dry-run.
@@ -65,11 +65,14 @@ from petri_paths import DATA, ENV_FILE  # noqa: E402
 from exp_real_gate import GateConfig, run_gate  # noqa: E402
 from exp_annotate_hacks import load_all_original_audits  # noqa: E402
 from real_env_workspace import real_env_dir  # noqa: E402
+from judge_models import DEFAULT_JUDGE  # noqa: E402
 from model_routing import route  # noqa: E402
 
 load_dotenv(ENV_FILE)
 
-DEFAULT_GATE_MODEL = "anthropic/claude-opus-4-8"
+# Retrospective validation has no judge conversation to continue, so any model
+# works here; default to the shared judge so the check matches production.
+DEFAULT_GATE_MODEL = DEFAULT_JUDGE
 DEFAULT_LIMIT_PER_SEED = 30
 REPORT_DIR = DATA / "env_assets" / "gate_validation"
 

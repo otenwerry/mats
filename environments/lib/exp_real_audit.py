@@ -18,8 +18,10 @@ Flags (mirroring exp_rh_audit.py, minus the auditor):
   --max-turns=<N>         REQUIRED. Cap on TARGET GENERATE CALLS per trajectory (the
                           real-mode analog of the auditor turn cap).
   --reasoning=yes|no      default yes (same semantics as simulated audits).
-  --gate-model=<m>        gate LLM (default anthropic/claude-opus-4-8); shortname or
-                          full provider/model string.
+  --judge=<m>             alignment judge (default: lib/judge_models.py, currently
+                          gpt-5.6-luna; or set $PETRI_JUDGE). Shortname or full slug.
+  --gate-model=<m>        gate LLM; defaults to the run's judge, and MUST equal it
+                          (the gate call is stage 1 of the judge's conversation).
   --concurrency=<N>       LLM parallelism (default 50, as everywhere).
   --sandbox-concurrency=<N>  max live Docker containers (default 8; containers, not
                           LLM calls, are the binding resource on a laptop).
@@ -116,6 +118,7 @@ from exp_rh_audit import (
     _pinned_sources,
 )
 from exp_real_gate import GateConfig, run_gate, target_authored_texts
+from judge_models import JUDGE_CHOICES, resolve_judge
 from fixed_target_tools import (
     fixed_target_tools_fingerprint,
     fixed_target_tools_metadata,
@@ -773,15 +776,19 @@ def real_audit_judge(dimensions=None, tags=None, model=None, instructions=None,
 # task construction
 # --------------------------------------------------------------------------- #
 
-def resolve_gate_model(gate_model_arg: str | None) -> str:
+def resolve_gate_model(gate_model_arg: str | None, judge: str | None = None) -> str:
+    """The gate model. None -> the run's judge (the gate call IS the judge's turn 1).
+    Accepts a JUDGE_CHOICES or TARGET_CHOICES shortname, or a full provider/model string."""
     if gate_model_arg is None:
-        return route(DEFAULT_GATE_MODEL)
+        return resolve_judge(judge)
     v = gate_model_arg.strip()
+    if v in JUDGE_CHOICES:
+        return route(JUDGE_CHOICES[v])
     if v in TARGET_CHOICES:
         return route(TARGET_CHOICES[v])
     if "/" in v:
         return route(v)
-    raise SystemExit(f"--gate-model={v!r} is neither a TARGET_CHOICES shortname nor a "
+    raise SystemExit(f"--gate-model={v!r} is not a known judge/target shortname nor a "
                      "full provider/model string")
 
 
@@ -795,7 +802,7 @@ def ported_members(seeds_path: str) -> list[str]:
 
 def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                      run_label: str, *, reasoning: bool, condition: str,
-                     max_turns: int, gate_model: str,
+                     max_turns: int, gate_model: str, judge: str | None = None,
                      seeds_path: str, artifacts_root: Path | None = None) -> list:
     """One plain Inspect Task per (target x ported member): docker sandbox, scripted
     solver, real judge. Mirrors exp_rh_audit.build_tasks' metadata contract."""
@@ -808,12 +815,14 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
     # Incremental judging replays the gate exchange as the judge's own first turn, so
     # one conversation must span both calls: same model, or the replayed assistant turn
     # would be another model's words.
-    if route(gate_model) != route(JUDGE):
+    judge_model = resolve_judge(judge)
+    if route(gate_model) != route(judge_model):
         raise SystemExit(
-            f"--gate-model must equal the judge model ({JUDGE}) because the gate call IS "
-            f"stage 1 of the judge's conversation (got {gate_model}). Pass "
-            f"--gate-model={JUDGE}, or set real_audit_judge(incremental=False) first if "
-            "you deliberately want a separate cheap gate model plus single-shot judging."
+            f"--gate-model must equal the judge model ({judge_model}) because the gate "
+            f"call IS stage 1 of the judge's conversation (got {gate_model}). Pass "
+            f"--gate-model={judge_model}, or set real_audit_judge(incremental=False) "
+            "first if you deliberately want a separate cheap gate model plus single-shot "
+            "judging."
         )
     root = Path(seeds_path)
     if is_pinned_seed_dir(root):
@@ -878,7 +887,8 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                 ),
                 scorer=real_audit_judge(list(dims.dimensions)),
                 sandbox=("docker", str(compose)),
-                model_roles=dict(target=target_role, judge=JUDGE, gate=gate_role),
+                model_roles=dict(target=target_role, judge=judge_model,
+                                 gate=gate_role),
                 name=task_name,
                 metadata={
                     "config_version": REAL_CONFIG_VERSION,
@@ -889,7 +899,7 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                     "reasoning_effort": REASONING_EFFORT if reasoning else None,
                     "reasoning_enabled": reasoning_enabled_meta,
                     "strict_tools": strict_tools_meta,
-                    "judge": JUDGE,
+                    "judge": judge_model,
                     "gate_model": gate_model,
                     "nudge": "no_nudge",
                     **dimension_provenance(unit_path, dims),
@@ -957,7 +967,8 @@ def main() -> None:
     concurrency = int(_flag("concurrency") or "50")
     sandbox_concurrency = int(_flag("sandbox-concurrency") or str(DEFAULT_SANDBOX_CONCURRENCY))
     time_limit = int(_flag("time-limit")) if _flag("time-limit") else None
-    gate_model = resolve_gate_model(_flag("gate-model"))
+    judge = _flag("judge")
+    gate_model = resolve_gate_model(_flag("gate-model"), judge)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     label = selected_targets[0] if len(selected_targets) == 1 else f"{len(selected_targets)}targets"
@@ -970,7 +981,7 @@ def main() -> None:
     tasks = build_real_tasks(
         selected_targets, selected_seeds, run_dir.name,
         reasoning=reasoning, condition=condition, max_turns=max_turns,
-        gate_model=gate_model, seeds_path=seeds_path,
+        gate_model=gate_model, judge=judge, seeds_path=seeds_path,
         artifacts_root=run_dir / "real_artifacts",
     )
     print(f"  built {len(tasks)} task(s); requires a running docker daemon")

@@ -47,6 +47,7 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from judge_models import resolve_judge
 from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, REJUDGE_FILE, traj_key, _rollback_treatment, _loc_cond, binary_hack_eval,
     cut_m_in_transcript, render_transcript, load_originals_by_id,
@@ -58,7 +59,8 @@ from exp_rollback import PROMPTS, rollback_judge_instructions
 _LOC_PROMPT_KEY = {"begin": "begin", "middle": "middle", "before": "prompt1", "after": "after"}
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
-MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
+MODEL = resolve_judge(next((a.split("=", 1)[1] for a in sys.argv
+                            if a.startswith("--model=")), None))
 CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 FORCE = "--force" in sys.argv

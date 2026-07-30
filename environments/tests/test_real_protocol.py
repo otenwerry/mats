@@ -24,6 +24,7 @@ from exp_real_audit import (  # noqa: E402
     real_dimensions_for_seed,
 )
 from exp_real_gate import GateConfig  # noqa: E402
+from judge_models import resolve_judge  # noqa: E402
 
 FRAUD = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
 BENCH = PETRI / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
@@ -172,7 +173,7 @@ class BuildRealTasksTests(unittest.TestCase):
         tasks = build_real_tasks(
             ["qwen3-32b"], ["fraud_detection"], "test-run",
             reasoning=True, condition="allow", max_turns=200,
-            gate_model="anthropic/claude-opus-4-8",
+            gate_model=resolve_judge(None),   # the gate must equal the judge
             seeds_path=str(FRAUD.parent),
         )
         self.assertEqual(len(tasks), 1)
@@ -195,7 +196,7 @@ class BuildRealTasksTests(unittest.TestCase):
             build_real_tasks(
                 ["qwen3-32b"], ["fraud_detection"], "x",
                 reasoning=True, condition="correct", max_turns=200,
-                gate_model="anthropic/claude-opus-4-8",
+                gate_model=resolve_judge(None),   # the gate must equal the judge
                 seeds_path=str(FRAUD.parent),
             )
 

@@ -45,13 +45,15 @@ from inspect_petri import audit_judge, judge_dimensions
 from inspect_scout import TranscriptContent, transcripts_from
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR, DATA
+from judge_models import resolve_judge
 import viewer
 from viewer import LOGS, traj_key, _load_rejudge
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 DIM = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--dim=")), None)
 RUN_DIR = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--run-dir=")), None)
-MODEL = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--model=")), "anthropic/claude-opus-4-8")
+MODEL = resolve_judge(next((a.split("=", 1)[1] for a in sys.argv
+                            if a.startswith("--model=")), None))
 CONCURRENCY = int(next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--concurrency=")), "50"))
 LIMIT = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--limit=")), None)
 SKIP_VIEWER = "--skip-viewer" in sys.argv

@@ -38,7 +38,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Rectangle
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from matplotlib.lines import Line2D
 from matplotlib.ticker import PercentFormatter
 
@@ -1835,6 +1835,68 @@ def fig_context_fullness_by_model(data: dict) -> str:
     return _fig_to_svg(fig)
 
 
+def _context_token_axis_max(peaks: list[int]) -> float:
+    """Absolute-token domain with a little headroom above the largest exact peak."""
+    return max(peaks, default=1) * 1.05
+
+
+def _format_token_axis(ax) -> None:
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _fmt_tokens(max(0, value))))
+
+
+def fig_context_tokens_aggregate(data: dict) -> str:
+    """Distribution of exact peak prompt tokens, one point per original audit."""
+    peaks = data.get("peaks") or []
+    if not peaks:
+        return _empty_fig("no complete target-context timelines", (6.4, 3.6))
+    upper = _context_token_axis_max(peaks)
+    bins = np.linspace(0, upper, 21)
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    ax.hist(peaks, bins=bins, color=CONTROL_C, edgecolor="white", linewidth=0.6)
+    ax.set_xlim(0, upper)
+    _format_token_axis(ax)
+    ax.set_xlabel("Peak target context (prompt tokens)")
+    ax.set_ylabel("Original audits")
+    ax.set_title(f"All target models (n={len(peaks)})")
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_context_tokens_by_model(data: dict) -> str:
+    """Same exact peak-token distribution, faceted by model on one shared token axis."""
+    rows = [r for r in (data.get("by_model") or []) if r.get("peaks")]
+    if not rows:
+        return _empty_fig("no complete target-context timelines", (6.4, 3.6))
+    all_peaks = [peak for row in rows for peak in row["peaks"]]
+    upper = _context_token_axis_max(all_peaks)
+    bins = np.linspace(0, upper, 21)
+    ncols = min(3, len(rows))
+    nrows = (len(rows) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.1 * ncols, 2.55 * nrows),
+                             squeeze=False, sharex=True, sharey=True)
+    for idx, row in enumerate(rows):
+        ax = axes[idx // ncols][idx % ncols]
+        ax.hist(row["peaks"], bins=bins,
+                color=MODEL_PALETTE[idx % len(MODEL_PALETTE)],
+                edgecolor="white", linewidth=0.5)
+        ax.set_xlim(0, upper)
+        _format_token_axis(ax)
+        window = _fmt_tokens(row["window"]) if row.get("window") else "?"
+        ax.set_title(f'{row["model"]} ({window})\n(n={len(row["peaks"])})', fontsize=9.5)
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.yaxis.grid(True, color="#e6e6ee", lw=0.7)
+        ax.set_axisbelow(True)
+    for idx in range(len(rows), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+    fig.supxlabel("Peak target context (prompt tokens)", fontsize=10)
+    fig.supylabel("Original audits", fontsize=10)
+    fig.tight_layout()
+    return _fig_to_svg(fig)
+
+
 def _context_fullness_section(data: dict) -> str:
     """Universal original-audit context coverage section."""
     labels = {
@@ -1844,20 +1906,37 @@ def _context_fullness_section(data: dict) -> str:
         "ambiguous_role": "ambiguous target-role match",
         "unknown_window": "unknown context window",
     }
-    excluded = [(labels[key], n) for key, n in (data.get("exclusions") or {}).items() if n]
+    exclusions = data.get("exclusions") or {}
+    excluded = [(labels[key], n) for key, n in exclusions.items() if n]
+    token_excluded = [(labels[key], n) for key, n in exclusions.items()
+                      if n and key != "unknown_window"]
     excluded_html = ""
     if excluded:
         excluded_html = " &middot; excluded: " + ", ".join(
             f"{n} {esc_loc(label)}" for label, n in excluded)
+    token_excluded_html = ""
+    if token_excluded:
+        token_excluded_html = " &middot; excluded: " + ", ".join(
+            f"{n} {esc_loc(label)}" for label, n in token_excluded)
     return (
         "<h2>Peak context-window fullness</h2>"
         f'<p class="vsub"><b>{data.get("n_included", 0)}/{data.get("n_total", 0)}</b> '
-        f'original audits have complete exact timelines{excluded_html}</p>'
+        f'original audits have complete exact timelines and known context windows'
+        f'{excluded_html}</p>'
         '<div class="figgrid">'
         + _figure(fig_context_fullness_aggregate(data))
         + "</div>"
         '<div class="figgrid">'
         + _figure(fig_context_fullness_by_model(data))
+        + "</div>"
+        "<h2>Peak target context tokens</h2>"
+        f'<p class="vsub"><b>{data.get("n_tokens_included", 0)}/{data.get("n_total", 0)}</b> '
+        f'original audits have complete exact timelines{token_excluded_html}</p>'
+        '<div class="figgrid">'
+        + _figure(fig_context_tokens_aggregate(data))
+        + "</div>"
+        '<div class="figgrid">'
+        + _figure(fig_context_tokens_by_model(data))
         + "</div>"
     )
 
