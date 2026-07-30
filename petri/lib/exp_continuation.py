@@ -82,7 +82,6 @@ for _p in (str(_PETRI), str(_PETRI / "lib")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from inspect_ai import task_with
@@ -141,7 +140,7 @@ from viewer import (
     page_name,
 )
 from petri_paths import DATA, LOGS, ENV_FILE
-from judge_models import SECONDARY_JUDGE
+from judge_models import DEFAULT_JUDGE
 from fixed_target_tools import fixed_target_auditor_tools
 from exp_rh_audit import (
     AUDITOR_MAX_TOOL_OUTPUT,
@@ -153,7 +152,8 @@ from exp_rh_audit import (
 )
 from dimension_routing import dimension_provenance
 from model_routing import route  # provider routing (see lib/model_routing.py)
-from prompt_caching import cached_system, cached_user_prefix, run_direct_cached, stable_key
+from prompt_caching import stable_key
+from exp_structured_judge import structured_judge
 from exp_resample import (
     OriginalRef,
     build_reference_blob,
@@ -163,6 +163,10 @@ from exp_resample import (
     _load_deviation_rubric,
     DeviationJudgment,
 )
+
+from inspect_ai.model import get_model
+import openrouter_cost
+import direct_cost
 
 load_dotenv(ENV_FILE)
 
@@ -1084,7 +1088,7 @@ _FAITHFUL_SETUP_NO_PREFIX = (
 )
 
 
-async def _judge_faithfulness(client, rubric, orig_tr, cont_tr, model, has_prefix):
+async def _judge_faithfulness(judge, rubric, orig_tr, cont_tr, has_prefix):
     """`has_prefix` selects the framing: a baseline (no prefix) is a plain re-roll of B (no prior
     task, no pivot); a prefixed run carries a prior task + pivot. Feeding the wrong framing is what
     confused the baseline judge."""
@@ -1108,23 +1112,15 @@ async def _judge_faithfulness(client, rubric, orig_tr, cont_tr, model, has_prefi
         "Cite [M#] for every specific divergence."
     )
 
-    async def _call():
-        return await client.messages.parse(
-            model=model, max_tokens=4000,
-            system=cached_system(system),
-            messages=[{"role": "user", "content": cached_user_prefix(
-                user_prefix, user_suffix)}],
-            output_format=DeviationJudgment,
-        )
-
-    resp = await run_direct_cached(
-        stable_key("continuation-faithfulness", model, system, user_prefix), _call
+    return await structured_judge(
+        judge, system=system, user=user_prefix + user_suffix,
+        output_format=DeviationJudgment, max_tokens=4000,
+        schema_name="continuation_faithfulness",
     )
-    return resp.parsed_output, resp.usage
 
 
 async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, OriginalRef],
-                                   model: str = SECONDARY_JUDGE, concurrency: int = 50,
+                                   model: str = DEFAULT_JUDGE, concurrency: int = 50,
                                    force: bool = False, conditions: set[str] | None = None) -> dict:
     """Judge auditor faithfulness for every continuation in run_dir against its B original.
     Writes run_dir/continuation_deviation_results.json keyed by viewer page name (a queryable
@@ -1138,7 +1134,9 @@ async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, Origin
     rubric = _load_deviation_rubric()
     out_file = run_dir / DEVIATION_RESULTS_FILENAME
     results: dict = json.loads(out_file.read_text()) if out_file.exists() else {}
-    client = AsyncAnthropic()
+    openrouter_cost.install()
+    direct_cost.install()
+    judge = get_model(route(model))
     sem = asyncio.Semaphore(concurrency)
     skipped_no_b = skipped_dead = 0
     coros = []
@@ -1155,7 +1153,8 @@ async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, Origin
                 if sliced is not None:
                     cont_tr = sliced
             try:
-                jm, usage = await _judge_faithfulness(client, rubric, b_ref.transcript, cont_tr, model, has_prefix)
+                jm, usage = await _judge_faithfulness(
+                    judge, rubric, b_ref.transcript, cont_tr, has_prefix)
             except Exception as e:  # never let one bad judgment kill the batch
                 print(f"  WARNING: faithfulness judge failed for {page} ({type(e).__name__}: {e})")
                 return
@@ -1167,19 +1166,13 @@ async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, Origin
                 "continuation_traj_id": bid,
                 "continuation_reward_hacking": (a.get("scores") or {}).get("reward_hacking"),
                 # raw token counts for this faithfulness call, stored so viewer can price it
-                # at DISPLAY time (like the hack-turn annotation judge — see model_prices.py and
-                # annotation_cost_data). Same key names as the annotation usage block; the
-                # Anthropic SDK's input_tokens already EXCLUDES the cache tokens. No total_cost
-                # (Anthropic doesn't bill one back), so it prices price×token (~estimate). Entries
-                # judged before this field existed simply lack "usage" and are surfaced as a
-                # "predate cost tracking" gap in the viewer, never silently zeroed.
-                "usage": {
-                    "model": model,
-                    "input": usage.input_tokens or 0,
-                    "output": usage.output_tokens or 0,
-                    "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
-                    "cache_write": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-                },
+                # at DISPLAY time (like the hack-turn annotation judge — see model_prices.py
+                # and annotation_cost_data). Since 2026-07-30 this judge runs through inspect's
+                # model layer, so the dict comes from exp_structured_judge.usage_dict and CAN
+                # carry a provider-billed total_cost (EXACT); when it is None the viewer prices
+                # price×token (~estimate). Entries judged before this field existed simply lack
+                # "usage" and are surfaced as a "predate cost tracking" gap, never zeroed.
+                "usage": usage,
             }
             print(f"  faithfulness[{page}] ({treatment}) = {jm.deviation_score}/10")
 

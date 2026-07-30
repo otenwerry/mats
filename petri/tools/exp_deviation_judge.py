@@ -61,22 +61,27 @@ _petri = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_petri / "lib"))
 sys.path.insert(0, str(_petri))
 
-from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
-from judge_models import SECONDARY_JUDGE
 from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX,
     load_rollback_run, load_originals_by_id, rb_page_name,
     cut_m_in_transcript, _orig_id_from_task, _rollback_treatment, _loc_cond,
 )
 
+from exp_structured_judge import structured_judge
+from judge_models import DEFAULT_JUDGE
+from model_routing import route
+from inspect_ai.model import get_model
+import openrouter_cost
+import direct_cost
+
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 
 # Secondary judge role: Anthropic SDK only -- see lib/judge_models.py
-DEFAULT_MODEL = SECONDARY_JUDGE
+DEFAULT_MODEL = DEFAULT_JUDGE
 DEFAULT_CONCURRENCY = 50
 PRICES = {"claude-opus-4-8": (5.0, 25.0), "claude-sonnet-4-6": (3.0, 15.0)}
 RUBRIC_FILE = DIMENSIONS_DIR / "rollback_only" / "deviations_from_original.md"
@@ -177,7 +182,7 @@ def _prompt_block(prompt: str | None) -> str:
     )
 
 
-async def judge_one(client: AsyncAnthropic, rubric: str, cand: dict, model: str):
+async def judge_one(judge, rubric: str, cand: dict):
     """One two-transcript deviation judgment. Returns (DeviationJudgment, usage)."""
     cut_block = _cut_block(cand["cut_m_original"], cand["cut_m_rollback"])
     prompt_block = _prompt_block(cand["prompt"])
@@ -185,13 +190,11 @@ async def judge_one(client: AsyncAnthropic, rubric: str, cand: dict, model: str)
         cut_block=cut_block, prompt_block=prompt_block,
         orig_transcript=cand["orig_transcript"], cont_transcript=cand["cont_transcript"],
     )
-    resp = await client.messages.parse(
-        model=model, max_tokens=4000,
-        system=SYSTEM_TMPL.format(rubric=rubric),
-        messages=[{"role": "user", "content": user}],
-        output_format=DeviationJudgment,
+    return await structured_judge(
+        judge, system=SYSTEM_TMPL.format(rubric=rubric), user=user,
+        output_format=DeviationJudgment, max_tokens=4000,
+        schema_name="rollback_deviation",
     )
-    return resp.parsed_output, resp.usage
 
 
 async def collect_candidates(originals_by_id: dict) -> tuple[list[dict], int, int]:
@@ -266,7 +269,7 @@ async def main() -> None:
         print("Nothing to do.")
         return
 
-    client = AsyncAnthropic()
+    judge = get_model(route(MODEL))
     sem = asyncio.Semaphore(CONCURRENCY)
     lock = asyncio.Lock()
     results = dict(existing)
@@ -283,14 +286,14 @@ async def main() -> None:
             print(f"  [{i}/{total}] judging {label} (cut orig@M{c['cut_m_original']} "
                   f"rb@M{c['cut_m_rollback']}) ...", flush=True)
             try:
-                judgment, usage = await judge_one(client, rubric, c, MODEL)
+                judgment, usage = await judge_one(judge, rubric, c)
             except Exception as e:
                 failed += 1
                 print(f"    [{i}/{total}] FAILED {label}: {type(e).__name__}: {e}", flush=True)
                 return
             if usage:
-                in_tok += usage.input_tokens or 0
-                out_tok += usage.output_tokens or 0
+                in_tok += usage["input"]
+                out_tok += usage["output"]
         results[c["page"]] = {
             "page": c["page"], "original_traj_id": c["oid"], "seed": c["seed"],
             "location": c["location"], "condition": c["condition"], "epoch": c["epoch"],

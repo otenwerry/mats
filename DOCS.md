@@ -5,11 +5,10 @@
   since 2026-07-30). Every pipeline takes --judge=<shortname|slug>, $PETRI_JUDGE overrides
   the default globally, and the model used is stamped per run as `judge`. Runs judged by
   different models are not automatically comparable.
-- The SECONDARY judges (auditor deviation/faithfulness, rollback follow-up, mechanism
-  similarity) call the Anthropic SDK directly, so they can only run Anthropic models.
-  Their shared default is SECONDARY_JUDGE in the same file (claude-sonnet-4-6 since
-  2026-07-30, down from opus). Using the primary judge there needs those files ported off
-  the Anthropic SDK first; resolve_secondary_judge() refuses a non-Anthropic model.
+- EVERY judge role now follows that one default, including the secondary ones (auditor
+  deviation/faithfulness, rollback follow-up annotation, mechanism similarity). Those five
+  were ported off the Anthropic SDK onto the shared model layer on 2026-07-30
+  (petri/lib/exp_structured_judge.py), so no judge is provider-locked.
 
 
 # Shared
@@ -70,7 +69,7 @@ uv run exp_new_judge.py
 uv run exp_continuation_pipeline.py
 	--treatment={full-hack,etc} --prefixes=x,y,z --continuations=x,y,z --n=n
 	[--concurrency=50]
-	[--deviation-model=opus-4.8, --annotate-model=opus-4.8]
+	[--deviation-model=gpt-5.6-luna, --annotate-model=deepseek-v4-pro]
 	[--dry-run, --faithfulness-judge, --skip-annotate, --skip-viewer, --force-judge, --force-annotate]
 
 ## Rollbacks
@@ -136,7 +135,7 @@ uv run exp_real_audit_pipeline.py
 ## Gate validation (retrospective, against stored simulated runs)
 uv run exp_validate_gate.py
 	[--limit-per-seed=30]
-	[--gate-model=anthropic/claude-opus-4-8]
+	[--gate-model=gpt-5.6-luna]
 	[--dry-run]   # selection only, free
     validates the gate LLM + rubrics against existing judged trajectories; cannot
         validate the mechanical detectors (old runs' answer keys were fictional)

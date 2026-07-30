@@ -83,10 +83,11 @@ directly comparable. Results render in THIS project's own viewer, from its own d
   assembly, and the build loop. Loaded BY PATH where needed (both projects have a
   top-level viewer.py — a plain `import viewer` gets petri's).
 - `lib/env_paths.py` — this project's DATA/LOGS/OUT/ANN_FILE (mats-local/environments/).
-- `lib/annotate_real_hacks.py` — annotate stage for this project's runs: petri's engine
-  (run_annotation already takes ann_file) + our log root.
-- `tests/` — the environments suite (267 tests incl. 2 real-container tests; they auto-skip
-  only when no Docker daemon is reachable).
+- `lib/exp_annotate_real_hacks.py` — annotate stage for this project's runs: petri's
+  engine (run_annotation already takes ann_file) + our log root. exp_-prefixed because it
+  makes paid calls.
+- `tests/` — the environments suite, incl. 2 real-container tests that auto-skip only
+  when no Docker daemon is reachable.
 - Still in petri, because petri owns them: `dimensions/real_env/environment_failure.md`
   + its entry in dimensions/judge_order.json (that order file must list every active
   rubric — adding one without updating it breaks EVERY pipeline at import), and the
@@ -110,6 +111,9 @@ conversation is built in stages:
    dimension scores.
 
 Consequences to respect:
+- Every judge in BOTH projects now runs on the shared default judge through inspect's
+  model layer; petri/lib/exp_structured_judge.py is the provider-agnostic replacement
+  for the old Anthropic-SDK `messages.parse` calls.
 - **The gate model MUST equal the judge model** — one conversation can't span two models.
   `build_real_tasks` rejects a mismatch loudly; DEFAULT_GATE_MODEL is JUDGE.
 - If the replay is missing (gate errored, run died before submitting) or the renders

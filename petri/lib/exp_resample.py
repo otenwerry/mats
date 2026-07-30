@@ -51,7 +51,6 @@ for _p in (str(_PETRI), str(_PETRI / "lib")):
 from dataclasses import dataclass
 from pathlib import Path
 
-from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -64,9 +63,10 @@ from inspect_petri import audit, audit_solver, auditor_agent, auditor_tools
 import viewer
 from viewer import RESAMPLE_PREFIX, load_originals_by_id, load_mode, page_name
 from petri_paths import DATA, LOGS, ENV_FILE, DIMENSIONS_DIR
-from judge_models import SECONDARY_JUDGE
+from judge_models import DEFAULT_JUDGE
 from model_routing import route  # provider routing (see lib/model_routing.py)
-from prompt_caching import cached_system, cached_user_prefix, run_direct_cached, stable_key
+from prompt_caching import stable_key
+from exp_structured_judge import structured_judge
 from exp_rh_audit import (
     AUDITOR_MAX_TOOL_OUTPUT, JUDGE, SEEDS_ROOT, REASONING_EFFORT,
     auditor_generate_config, build_target_model,
@@ -79,6 +79,9 @@ from dimension_routing import (
     dimensions_for_seed,
     resolve_seed_path,
 )
+
+import openrouter_cost
+import direct_cost
 
 load_dotenv(ENV_FILE)
 
@@ -445,23 +448,15 @@ async def _judge_deviation(client, rubric, orig_tr, cont_tr, model):
         "for every specific divergence you mention."
     )
 
-    async def _call():
-        return await client.messages.parse(
-            model=model, max_tokens=4000,
-            system=cached_system(system),
-            messages=[{"role": "user", "content": cached_user_prefix(
-                user_prefix, user_suffix)}],
-            output_format=DeviationJudgment,
-        )
-
-    resp = await run_direct_cached(
-        stable_key("resample-deviation", model, system, user_prefix), _call
+    return await structured_judge(
+        judge, system=system, user=user_prefix + user_suffix,
+        output_format=DeviationJudgment, max_tokens=4000,
+        schema_name="resample_deviation",
     )
-    return resp.parsed_output, resp.usage
 
 
 async def run_deviation_for_dir(run_dir: Path, refs_by_id: dict[int, OriginalRef],
-                                model: str = SECONDARY_JUDGE, concurrency: int = 50,
+                                model: str = DEFAULT_JUDGE, concurrency: int = 50,
                                 force: bool = False) -> dict:
     """Judge auditor deviation for every resample in run_dir against its original. Writes
     run_dir/resample_deviation_results.json keyed by the viewer page name. Incremental
@@ -471,7 +466,9 @@ async def run_deviation_for_dir(run_dir: Path, refs_by_id: dict[int, OriginalRef
     rubric = _load_deviation_rubric()
     out_file = run_dir / DEVIATION_RESULTS_FILENAME
     results: dict = json.loads(out_file.read_text()) if out_file.exists() else {}
-    client = AsyncAnthropic()
+    openrouter_cost.install()
+    direct_cost.install()
+    judge = get_model(route(model))
     sem = asyncio.Semaphore(concurrency)
     skipped_no_orig = skipped_dead = 0
     coros = []
@@ -479,7 +476,7 @@ async def run_deviation_for_dir(run_dir: Path, refs_by_id: dict[int, OriginalRef
     async def _one(a, ref, page, oid):
         async with sem:
             try:
-                jm, usage = await _judge_deviation(client, rubric, ref.transcript, a["transcript"], model)
+                jm, usage = await _judge_deviation(judge, rubric, ref.transcript, a["transcript"])
             except Exception as e:  # never let one bad judgment kill the batch
                 print(f"  WARNING: deviation judge failed for {page} ({type(e).__name__}: {e})")
                 return
@@ -488,13 +485,7 @@ async def run_deviation_for_dir(run_dir: Path, refs_by_id: dict[int, OriginalRef
                 "justification": jm.justification,
                 "original_traj_id": oid,
                 "resample_reward_hacking": (a.get("scores") or {}).get("reward_hacking"),
-                "usage": {
-                    "model": model,
-                    "input": usage.input_tokens or 0,
-                    "output": usage.output_tokens or 0,
-                    "cache_read": getattr(usage, "cache_read_input_tokens", 0) or 0,
-                    "cache_write": getattr(usage, "cache_creation_input_tokens", 0) or 0,
-                },
+                "usage": usage,
             }
             print(f"  deviation[{page}] = {jm.deviation_score}/10")
 

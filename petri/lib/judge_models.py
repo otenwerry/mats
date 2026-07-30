@@ -52,45 +52,14 @@ JUDGE_CHOICES: dict[str, str] = {
 DEFAULT_JUDGE_NAME = "gpt-5.6-luna"
 JUDGE_ENV_VAR = "PETRI_JUDGE"
 
-# ---- secondary judge roles ------------------------------------------------- #
-# The secondary judges (auditor deviation, auditor faithfulness, the rollback follow-up,
-# mechanism similarity) call the Anthropic SDK DIRECTLY -- client.messages.parse() with a
-# pydantic output_format -- rather than going through inspect's model layer. That client
-# can only reach Anthropic models, so pointing these at the default judge
-# (openai/gpt-5.6-luna) would fail at request time, not at startup.
-#
-# So they get their own centralized default: the cheapest priced Anthropic model. Owen
-# asked for Luna here too (2026-07-30); using it literally requires porting those five
-# files off the Anthropic SDK first, which is real work on code he does not expect to run
-# again -- so this is the cheap-and-safe version, and resolve_secondary_judge() REFUSES a
-# non-Anthropic model so the mistake cannot be made quietly later.
-SECONDARY_JUDGE_NAME = "sonnet-4.6"
-SECONDARY_JUDGE_SLUG = JUDGE_CHOICES[SECONDARY_JUDGE_NAME]      # anthropic/claude-sonnet-4-6
-# The Anthropic SDK wants a BARE model id, not a routed provider/model slug.
-SECONDARY_JUDGE = SECONDARY_JUDGE_SLUG.split("/", 1)[1]         # claude-sonnet-4-6
-
-
-def resolve_secondary_judge(judge: str | None = None) -> str:
-    """Bare Anthropic model id for a secondary judge role (SDK form, no provider prefix).
-
-    Rejects a non-Anthropic model loudly: those call sites use the Anthropic SDK, so an
-    OpenAI/OpenRouter model would fail mid-run instead of here.
-    """
-    value = (judge or SECONDARY_JUDGE_NAME).strip()
-    slug = JUDGE_CHOICES.get(value, value)
-    if "/" not in slug:
-        slug = f"anthropic/{slug}"          # a bare id, e.g. claude-sonnet-4-6
-    if not route(slug).startswith("anthropic/"):
-        raise SystemExit(
-            f"secondary judge {value!r} is not an Anthropic model. These roles call the "
-            "Anthropic SDK directly, so only Anthropic models work; port them to the "
-            "inspect model layer first if you want a different provider."
-        )
-    return slug.split("/", 1)[1]
-
 # The incumbent through 2026-07-29. Kept as a name so a re-judge that deliberately
 # reproduces the old judge can ask for it explicitly.
 PREVIOUS_JUDGE_NAME = "opus-4.8"
+
+# EVERY judge role uses this one default, including the secondary ones (auditor deviation,
+# auditor faithfulness, the rollback follow-up annotation, mechanism similarity). Those
+# five were Anthropic-SDK-only until 2026-07-30; they now go through inspect's model layer
+# via lib/exp_structured_judge.py, so there is no provider-restricted judge left.
 
 
 def resolve_judge(judge: str | None = None) -> str:

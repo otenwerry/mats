@@ -82,43 +82,52 @@ class RegistrationTests(unittest.TestCase):
 
 class SecondaryJudgeTests(unittest.TestCase):
     """The secondary roles (auditor deviation / faithfulness / rollback follow-up /
-    mechanism similarity) call the Anthropic SDK directly, so they can only run Anthropic
-    models -- and they take a BARE model id, not a routed slug."""
+    mechanism similarity) used to be Anthropic-SDK-only. Since 2026-07-30 they go through
+    inspect's model layer (lib/exp_structured_judge.py), so they follow the SAME default
+    judge as everything else -- and no judge call site may reach for the Anthropic SDK."""
 
-    def test_default_is_a_bare_anthropic_id(self):
-        from judge_models import SECONDARY_JUDGE, SECONDARY_JUDGE_SLUG
+    JUDGE_FILES = [
+        "lib/exp_rollback_judge.py", "lib/exp_resample.py", "lib/exp_continuation.py",
+        "tools/exp_deviation_judge.py", "tools/exp_mechanism_similarity.py",
+    ]
 
-        self.assertNotIn("/", SECONDARY_JUDGE)          # SDK form
-        self.assertTrue(SECONDARY_JUDGE_SLUG.startswith("anthropic/"))
-        self.assertEqual(SECONDARY_JUDGE, "claude-sonnet-4-6")
-        # cheaper than the Opus it replaced, and priced so cost is reported
-        self.assertIsNotNone(price_for(SECONDARY_JUDGE_SLUG))
-        self.assertLess(price_for(SECONDARY_JUDGE_SLUG)["input"],
-                        price_for("anthropic/claude-opus-4-8")["input"])
+    def test_no_judge_file_uses_the_anthropic_sdk(self):
+        offenders = [f for f in self.JUDGE_FILES
+                     if "AsyncAnthropic" in (PETRI / f).read_text()]
+        self.assertEqual(offenders, [], "provider-locked judge call site(s)")
 
-    def test_non_anthropic_secondary_judge_is_refused(self):
-        from judge_models import resolve_secondary_judge
-
-        # the whole point: pointing these at the primary judge would fail mid-run
-        with self.assertRaises(SystemExit):
-            resolve_secondary_judge("gpt-5.6-luna")
-        with self.assertRaises(SystemExit):
-            resolve_secondary_judge("openrouter/deepseek/deepseek-v4-pro-20260423")
-
-    def test_accepts_shortname_and_bare_id(self):
-        from judge_models import resolve_secondary_judge
-
-        self.assertEqual(resolve_secondary_judge("opus-4.8"), "claude-opus-4-8")
-        self.assertEqual(resolve_secondary_judge("claude-opus-4-6"), "claude-opus-4-6")
-
-    def test_sdk_call_sites_use_the_shared_secondary_default(self):
-        from judge_models import SECONDARY_JUDGE
+    def test_secondary_roles_default_to_the_shared_judge(self):
         import exp_rollback_judge
+        import importlib.util
 
-        self.assertEqual(exp_rollback_judge.DEFAULT_MODEL, SECONDARY_JUDGE)
-        # this module was broken by the annotator rewrite; keep it importable and whole
+        self.assertEqual(exp_rollback_judge.DEFAULT_MODEL, DEFAULT_JUDGE)
+        # the rollback judge keeps its own copy of the pre-agentic annotation schema
         self.assertIn("hack_turns", exp_rollback_judge.HackAnnotation.model_fields)
         self.assertNotIn("{environment_note}", exp_rollback_judge.ANNOTATE_SYSTEM)
+        for tool in ("exp_deviation_judge", "exp_mechanism_similarity"):
+            spec = importlib.util.spec_from_file_location(
+                tool, PETRI / "tools" / f"{tool}.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(module.DEFAULT_MODEL, DEFAULT_JUDGE, tool)
+
+    def test_function_signature_defaults_follow_the_shared_judge(self):
+        import inspect as py_inspect
+
+        import exp_continuation
+        import exp_resample
+
+        for fn in (exp_resample.run_deviation_for_dir,
+                   exp_continuation.run_faithfulness_for_dir):
+            default = py_inspect.signature(fn).parameters["model"].default
+            self.assertEqual(default, DEFAULT_JUDGE, fn.__name__)
+
+    def test_no_provider_restricted_judge_helper_remains(self):
+        import judge_models
+
+        for gone in ("SECONDARY_JUDGE", "resolve_secondary_judge"):
+            self.assertFalse(hasattr(judge_models, gone),
+                             f"{gone} is dead code now that no judge is provider-locked")
 
 
 class CallSiteTests(unittest.TestCase):
@@ -131,10 +140,8 @@ class CallSiteTests(unittest.TestCase):
         "tools/exp_judge_model_compare.py", "exp_new_judge.py",
         "exp_check_rate_limits.py",          # a rate-limit probe, not a judge
     }
-    # Secondary judge ROLES now resolve through judge_models too (SECONDARY_JUDGE), so
-    # they are no longer exempt from the no-hard-coding check. Only exp_rollback_pipeline
-    # stays listed: it passes "judge" as a literal CLI default meaning "reuse the run's
-    # judge", not a model name.
+    # exp_rollback_pipeline passes "judge" as a literal CLI default meaning "reuse the
+    # run's judge", not a model name.
     SECONDARY = {"exp_rollback_pipeline.py"}
 
     def test_no_stray_hardcoded_judge_defaults(self):

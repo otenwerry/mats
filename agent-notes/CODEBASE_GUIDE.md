@@ -2,7 +2,7 @@
 
 > **Covers:** how the Petri reward-hacking code and experiments are laid out — the `petri/` entry points (`exp_*_pipeline.py`), the importable core in `petri/lib/`, the viewer builder, the run-dir types under `mats-local/petri/logs/`, the binary reward-hack definition, re-judging, and the rollback pipeline split.
 > **Read when:** starting any Petri work, or reading Petri run data and wanting to know where it can mislead you.
-> **Last updated:** 2026-07-29
+> **Last updated:** 2026-07-30
 > **Original path:** petri/docs/CODEBASE_GUIDE.md
 
 ## Fixed target tools for new audits
@@ -201,12 +201,13 @@ which lives next to the data.
     `viewer._annotations_for_viewer` strips it from historical entries without mutating the
     costly raw JSON. Regression tests guard both that boundary and the shared renderer so the
     prose cannot quietly return on originals, continuations, rollbacks, or ask pages.
-    Every original-audit visuals page also contains two peak-fullness distributions: one
-    pooled across target models and one faceted by model. A run enters these figures only
-    when all target calls have provider-reported token usage, event-role attribution is
-    explicit, and the model context window is known. The visible coverage line counts every
-    excluded dead, partial, unavailable, ambiguous-role, or unknown-window run; nothing is
-    estimated or clipped.
+    Every original-audit visuals page also contains four peak-context distributions:
+    context-window percentage and absolute prompt tokens, each both pooled across target
+    models and faceted by model. All four require provider-reported token usage for every
+    target call and explicit event-role attribution. The percentage figures additionally
+    require a known model context window; the absolute-token figures retain exact timelines
+    when that denominator is unknown. Separate visible coverage lines count every exclusion;
+    nothing is estimated or clipped.
     Within each current audit experiment, the next row selects a data context (original audits /
     EM / propensity) and the last row switches that context between
     trajectories and visuals. `index.html` is the catch-all `training data misuse` audit
@@ -463,6 +464,13 @@ judge) — re-run the relevant judge over EXISTING transcripts and write fresh s
 sidecar JSON; no new trajectories are generated. `viewer.load_mode` merges those in (a full
 replacement of the audit's scores + summary/justification/highlights) and marks the audit
 `rejudged=True`, so the viewer / annotate / selection all read one consistent judge pass.
+
+`petri/exp_new_judge.py` is separate from those replacement tools. It takes a balanced
+diagnostic sample from the Current ML and p-hacking viewer windows, runs a candidate judge
+with the current family-routed rubrics, and writes checkpointed comparison data plus an HTML
+report under `mats-local/petri/new_judge/`. It never changes `rejudge_scores.json`, dimension
+sidecars, or viewer verdicts. `--n` is per family × source-outcome cell (six cells total), and
+`--dry-run` previews the exact sample without API calls or writes.
 
 ## The rollback pipeline (two parts, on purpose)
 
