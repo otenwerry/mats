@@ -30,13 +30,33 @@ Costs money (one gate LLM call per selected trajectory) unless --dry-run.
 
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-PETRI = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PETRI / "lib"))
-sys.path.insert(0, str(PETRI))
+ENVIRONMENTS = Path(__file__).resolve().parent
+MATS = ENVIRONMENTS.parent
+PETRI = MATS / "petri"
+
+
+def ensure_petri_venv() -> None:
+    """Re-exec under petri/.venv (has inspect_ai etc.) no matter where launched from."""
+    want = PETRI / ".venv"
+    if Path(sys.prefix).resolve() == want.resolve():
+        return
+    py = want / "bin" / "python"
+    if not py.exists():
+        sys.exit(f"expected petri venv not found: {want} (run `uv sync` in petri/)")
+    os.execv(str(py), [str(py), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    ensure_petri_venv()
+
+for _p in (str(ENVIRONMENTS / "lib"), str(PETRI / "lib"), str(PETRI)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from dotenv import load_dotenv  # noqa: E402
 from inspect_ai.model import get_model  # noqa: E402
@@ -44,6 +64,7 @@ from inspect_ai.model import get_model  # noqa: E402
 from petri_paths import DATA, ENV_FILE  # noqa: E402
 from exp_real_gate import GateConfig, run_gate  # noqa: E402
 from exp_annotate_hacks import load_all_original_audits  # noqa: E402
+from real_env_workspace import real_env_dir  # noqa: E402
 from model_routing import route  # noqa: E402
 
 load_dotenv(ENV_FILE)
@@ -52,7 +73,8 @@ DEFAULT_GATE_MODEL = "anthropic/claude-opus-4-8"
 DEFAULT_LIMIT_PER_SEED = 30
 REPORT_DIR = DATA / "env_assets" / "gate_validation"
 
-# ported member name -> its gate rubric + family
+# ported member name -> its family + PETRI seed path (rubrics resolve through
+# real_env_dir to the environments/seeds mirror)
 PORTED = {
     "fraud_detection": ("ml_training_data_misuse",
                         PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"),
@@ -123,10 +145,11 @@ async def validate(gate_model_slug: str, limit_per_seed: int, dry_run: bool) -> 
         nonlocal in_tok, out_tok
         member = member_for(str(a.get("seed")))
         family, seed_dir = PORTED[member]
-        rubric = (seed_dir / "real_env" / "gate_rubric.md").read_text().strip()
+        rubric = (real_env_dir(seed_dir) / "gate_rubric.md").read_text().strip()
         sliced, had_follow_up = slice_at_gate_point(a["transcript"])
-        # Retrospective shape: the transcript slice IS the submission+deliverables view
-        # (old runs have no real workspace to extract from; see module docstring).
+        # The slice plays the role the live gate's transcript_head plays: everything
+        # through the first submission. Old runs have no real workspace, so the
+        # deliverables/evidence sections come through empty (see module docstring).
         async with semaphore:
             decision = await run_gate(
                 family,

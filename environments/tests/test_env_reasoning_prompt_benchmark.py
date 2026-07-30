@@ -14,8 +14,9 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-PETRI = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PETRI / "envgen"))
+ENVIRONMENTS = Path(__file__).resolve().parents[1]
+PETRI = ENVIRONMENTS.parent / "petri"
+sys.path.insert(0, str(ENVIRONMENTS / "envgen"))
 
 from common import (  # noqa: E402
     bh_adjusted,
@@ -28,7 +29,7 @@ from common import (  # noqa: E402
 from gen_reasoning_prompt_benchmark import CELLS, REQUIREMENTS  # noqa: E402
 
 SEED_DIR = PETRI / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
-REAL_ENV = SEED_DIR / "real_env"
+REAL_ENV = ENVIRONMENTS / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
 CSV_PATH = REAL_ENV / "workspace" / "data" / "prompt_benchmark.csv"
 
 FIELDS = ("domain", "difficulty", "response_format", "item_source")

@@ -24,9 +24,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import write_csv, write_manifest  # noqa: E402
 
-PETRI = Path(__file__).resolve().parents[1]
-SEED_DIR = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
-REAL_ENV = SEED_DIR / "real_env"
+ENVIRONMENTS = Path(__file__).resolve().parents[1]
+PETRI = ENVIRONMENTS.parent / "petri"
+SEED_DIR = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"   # pinned texts
+REAL_ENV = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "fraud_detection"
 
 GENERATOR_VERSION = "v1"
 SEED = 20260729

@@ -1,11 +1,16 @@
 """Real-environment workspace plumbing: host-side trees -> sandbox /workspace, plus
 in-sandbox snapshots and end-of-run artifact extraction.
 
-Each real-env seed keeps its materialized tree at seeds/<family>/<member>/real_env/:
+Each ported seed keeps its materialized tree at environments/seeds/<family>/<member>/
+(a MIRROR of the petri seed path, kept outside petri/ so real-env assets never mix
+into the simulated-audit tree):
   workspace/    exactly what lands in the sandbox at /workspace (committed bytes)
   answers/      host-side canon (e.g. the test-label key) for the grader/gate; NEVER
                 shipped into the sandbox beyond what workspace/ itself contains
   manifest.json sha256 provenance written by the envgen generator
+
+real_env_dir() takes the PETRI seed path (seeds/<family>/<member>) and resolves the
+matching environments tree, so callers keep speaking in petri seed paths.
 
 Artifact extraction is capped per file (ARTIFACT_CAP_BYTES) with explicit truncated
 flags stored alongside — capped copies go into sample metadata, full-fidelity copies to
@@ -19,6 +24,9 @@ from pathlib import Path
 
 from inspect_ai.util import sandbox
 
+ENVIRONMENTS_ROOT = Path(__file__).resolve().parents[1]
+ENVIRONMENTS_SEEDS = ENVIRONMENTS_ROOT / "seeds"
+
 WORKSPACE_DIR = "/workspace"
 MODELS_SUBDIR = "models"
 # Per-file cap for artifact copies stored in sample metadata. Full copies go to the
@@ -29,7 +37,9 @@ ARTIFACT_SUFFIXES = {".py", ".md", ".csv", ".txt", ".json"}
 
 
 def real_env_dir(seed_path: str | Path) -> Path:
-    return Path(seed_path) / "real_env"
+    """environments/seeds/<family>/<member>/ for a petri seed path seeds/<family>/<member>."""
+    seed = Path(seed_path).resolve()
+    return ENVIRONMENTS_SEEDS / seed.parent.name / seed.name
 
 
 def has_real_env(seed_path: str | Path) -> bool:

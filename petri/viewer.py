@@ -1267,10 +1267,11 @@ SEED_FAMILY = _scan_seed_families()
 # listed here (e.g. ml_training_data_misuse, or any unknown seed) falls through to the
 # current catch-all sweep. Values are validated against SWEEPS below.
 SEED_FAMILY_TO_SWEEP = {"p_hacking": "current_p_hacking"}
-# REAL-environment run dirs (exp_real_audit_pipeline.py names them real-v1-...). Unlike
-# rollback-/resample-/continuation- dirs these ARE original audits (they flow through the
-# ID scan, annotation, and integrity gates normally); the prefix only routes them to
-# their own viewer window in sweep_key, ahead of seed-family routing.
+# REAL-environment run dirs (mats/environments/, named real-v1-...). They live in their
+# OWN data root with their own viewer (environments/viewer.py), so they should never
+# appear under mats-local/petri/logs/. If one does -- copied by hand, or written by a
+# pre-2026-07-30 build -- it is skipped LOUDLY rather than rendered here with the wrong
+# nav and half-applicable definitions.
 REAL_ENV_PREFIX = "real-"
 
 
@@ -1786,7 +1787,6 @@ def is_v7_audit(a: dict) -> bool:
 _FORCED_V7_LAYOUT_SWEEPS = {
     "current_training_data_misuse",
     "current_p_hacking",
-    "current_real_env",
     "round1_p_hacking",
     "round1_p_hacking_past",
     "round1_perf_gaming",
@@ -1907,10 +1907,6 @@ SWEEPS = [
     # one dirs=None catch-all; new p-hacking runs auto-route via SEED_FAMILY_TO_SWEEP.
     ("current_training_data_misuse", "training data misuse", "index.html", None),
     ("current_p_hacking", "p-hacking", "sweep_current_p_hacking.html", set()),
-    # REAL-environment runs (docker sandbox + scripted controller, no auditor). Routed
-    # by run-dir prefix (REAL_ENV_PREFIX in sweep_key), which beats seed-family routing
-    # so real fraud_detection/benchmark runs never mix into the simulated windows.
-    ("current_real_env", "real environments", "sweep_current_real_env.html", set()),
 
     # Round 1 is the populated pre-uncapped-resume experiment, frozen by explicit run
     # membership so future audit directories continue to flow into Current.
@@ -2010,7 +2006,6 @@ SWEEPS = [
 SWEEP_WINDOW_NUMBERS = {
     "current_training_data_misuse": 8,
     "current_p_hacking": 8,
-    "current_real_env": 9,
     "round1_training_data_misuse": 7,
     "round1_p_hacking": 6.6,
     "round1_p_hacking_past": 6.6,
@@ -2052,7 +2047,6 @@ SWEEP_PAGE_ALIASES: dict[str, dict[str, str]] = {
 _CURRENT_OWNED_SWEEPS = (
     "current_training_data_misuse",
     "current_p_hacking",
-    "current_real_env",
 )
 _ROUND1_OWNED_SWEEPS = (
     "round1_training_data_misuse",
@@ -2076,7 +2070,6 @@ VIEWER_SCOPES = {
         "nav_sweeps": (
             "current_training_data_misuse",
             "current_p_hacking",
-            "current_real_env",
             "current_p_hacking_past",
             "current_perf_gaming_past",
         ),
@@ -2228,8 +2221,6 @@ def sweep_key(a: dict) -> str:
     mode = a.get("mode") or ""
     if mode in _SWEEP_DIR_TO_KEY:
         return _SWEEP_DIR_TO_KEY[mode]
-    if mode.startswith(REAL_ENV_PREFIX):
-        return "current_real_env"
     fam = SEED_FAMILY.get(a.get("seed") or "")
     return SEED_FAMILY_TO_SWEEP.get(fam, CURRENT_SWEEP)
 
@@ -2751,6 +2742,100 @@ def auditor_protocol_warning(a: dict) -> str:
     )
 
 
+def _fmt_bytes(n) -> str:
+    if not isinstance(n, int):
+        return "?"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f} MB"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f} KB"
+    return f"{n} B"
+
+
+def truncation_summary(a: dict) -> list[dict]:
+    """Stored per-trajectory list of tool calls whose output was cut (viewer_load)."""
+    return list(a.get("tool_truncations") or [])
+
+
+def truncation_warning(a: dict) -> str:
+    """LOUD trajectory-page banner when the target acted on truncated tool output.
+
+    This is a fact about what the target could see, so it sits outside the collapsed
+    Metadata box alongside DEAD/CRASHED: some of its own command output never reached it.
+    """
+    cuts = truncation_summary(a)
+    if not cuts:
+        return ""
+    limit = next((c.get("limit_bytes") for c in cuts if c.get("limit_bytes")), None)
+    by_tool: dict[str, int] = {}
+    for c in cuts:
+        by_tool[str(c.get("tool") or "?")] = by_tool.get(str(c.get("tool") or "?"), 0) + 1
+    biggest = max((c.get("original_bytes") or 0) for c in cuts)
+    detail = ", ".join(f"{name} &times;{n}" for name, n in sorted(by_tool.items()))
+    return (
+        '<div class="deadbanner">&#9888; <b>TRUNCATED TOOL OUTPUT</b> &mdash; '
+        f"{len(cuts)} tool call(s) returned more output than the "
+        f"{_fmt_bytes(limit)} per-call limit, so the target saw only the first "
+        f"{_fmt_bytes(limit)} of it ({detail}; largest raw output "
+        f"{_fmt_bytes(biggest)}). The target acted on a PARTIAL view of its own command "
+        "output: read any conclusion about what it &ldquo;knew&rdquo; with that in mind."
+        "</div>"
+    )
+
+
+def truncation_flag(a: dict) -> str:
+    """Compact index-table badge mirroring the same stored record."""
+    cuts = truncation_summary(a)
+    if not cuts:
+        return ""
+    limit = next((c.get("limit_bytes") for c in cuts if c.get("limit_bytes")), None)
+    return (
+        f' <span class="hacktag" title="{len(cuts)} tool call(s) exceeded the '
+        f'{_fmt_bytes(limit)} per-call output limit; the target saw a partial view">'
+        f"&#9888; TRUNCATED &times;{len(cuts)}</span>"
+    )
+
+
+def annotation_coverage_warning(ann: dict | None) -> str:
+    """Banner describing how much of the transcript the AGENTIC annotator actually read.
+
+    Since 2026-07-30 the hack-turn annotator starts from the judge's findings plus a
+    content-free index and pulls only the turns it wants, so its coverage is part of the
+    record. Loud when it annotated a turn it never read (its quotes cannot be verbatim)
+    or ended without a clean submission; a quiet note otherwise.
+    """
+    if not ann:
+        return ""
+    cov = ann.get("coverage") or {}
+    error = ann.get("annotator_error")
+    total, read = cov.get("messages_total"), cov.get("messages_read")
+    unread = cov.get("annotated_without_reading") or []
+    if not cov and not error:
+        return ""      # pre-agentic entry: read the whole transcript by construction
+    frac = cov.get("read_fraction")
+    read_note = (
+        f"read {read}/{total} messages"
+        + (f" ({frac:.0%})" if isinstance(frac, float) else "")
+        + f" in {cov.get('tool_turns', '?')} tool turn(s)"
+    ) if total is not None else "coverage not recorded"
+    if unread or error:
+        parts = [f"&#9888; <b>ANNOTATION CAVEAT</b> &mdash; the hack-turn annotator {read_note}."]
+        if unread:
+            parts.append(
+                "It labeled "
+                + ", ".join(f"[M{m}]" for m in unread)
+                + " WITHOUT reading those messages, so those quotes may not be verbatim."
+            )
+        if error:
+            parts.append(f"The annotation loop ended abnormally: {esc(str(error))}.")
+        return f'<div class="hackcaveat">{" ".join(parts)}</div>'
+    return (
+        f'<div class="note meta">Hack-turn annotator ({esc(str(ann.get("model") or "?"))}) '
+        f"{read_note}; it selects turns from the judge&rsquo;s findings rather than "
+        "reading the whole transcript.</div>"
+    )
+
+
 def _context_timeline_svg(calls: list, context_window: int,
                           prefix_end: int | None = None) -> str:
     """Small inline-SVG counterpart of PTB's per-trajectory context timeline.
@@ -3051,7 +3136,9 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {head}
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {integrity_warning(a)}
+{truncation_warning(a)}
 {auditor_protocol_warning(a)}
+{annotation_coverage_warning(ann)}
 {banners}
 {metadata_section(a, extra_cells=meta_cells,
                   context_graph=context_graph)}
@@ -3305,6 +3392,8 @@ def write_table(title: str, definition: str, count: str, audits: list[dict],
             flag += ' <span class="hacktag">&#9888; CRASHED</span>'
         flag += integrity_flag(a)
         flag += auditor_protocol_flag(a)
+        # truncated tool output: the target saw a partial view of its own command output
+        flag += truncation_flag(a)
         comp_flag = ' <span class="comptag">&#9888; COMPACTED</span>' if a.get("compactions") else ""
         # (The old CUTOFF badge -- which flagged audits that ran to the max-turns cap -- was
         # removed in favor of the `incompleteness` judge dimension, a more fine-grained measure
@@ -3542,14 +3631,15 @@ _ML_SEED_FAMILY = {"youtube_comments", "clinical_notes", "fraud_detection", "rev
 
 
 def context_fullness_data(audits: list[dict]) -> dict | None:
-    """Exact peak target-context percentages for original-audit visuals.
+    """Exact peak target-context tokens and percentages for original-audit visuals.
 
-    One complete original audit contributes one point: the maximum provider-reported
-    target prompt (ordinary input + cache read + cache write) divided by that target
-    model's context window. Incomplete timelines are excluded rather than allowing an
-    observed lower bound to masquerade as the run's true peak. Older model-name-matched
-    timelines are also excluded because role attribution can be ambiguous when two roles
-    use the same model. Every exclusion remains counted for the visible data-coverage line.
+    One complete original audit contributes its maximum provider-reported target prompt
+    (ordinary input + cache read + cache write). When the target model's context window is
+    known, it also contributes that peak divided by the window. Incomplete timelines are
+    excluded rather than allowing an observed lower bound to masquerade as the run's true
+    peak. Older model-name-matched timelines are also excluded because role attribution can
+    be ambiguous when two roles use the same model. Every exclusion remains counted for the
+    visible data-coverage lines.
     """
     if not audits:
         return None
@@ -3560,7 +3650,8 @@ def context_fullness_data(audits: list[dict]) -> dict | None:
         "ambiguous_role": 0,
         "unknown_window": 0,
     }
-    points: list[dict] = []
+    token_points: list[dict] = []
+    pct_points: list[dict] = []
     for a in audits:
         if a.get("dead"):
             exclusions["dead"] += 1
@@ -3573,33 +3664,41 @@ def context_fullness_data(audits: list[dict]) -> dict | None:
         if usage.get("role_matching") != "event_role":
             exclusions["ambiguous_role"] += 1
             continue
-        window = model_prices.context_window(a.get("target") or "")
-        if not window:
-            exclusions["unknown_window"] += 1
-            continue
         calls = usage.get("calls") or []
         if not calls or any(not isinstance(v, int) or v <= 0 for v in calls):
             # A claimed-complete series that cannot support an exact peak is unavailable.
             exclusions["unavailable"] += 1
             continue
         peak = max(calls)
-        points.append({
+        token_points.append({
+            "model": target_short(a),
+            "peak": peak,
+        })
+        window = model_prices.context_window(a.get("target") or "")
+        if not window:
+            exclusions["unknown_window"] += 1
+            continue
+        pct_points.append({
             "model": target_short(a),
             "pct": 100.0 * peak / window,
-            "peak": peak,
             "window": window,
         })
 
     by_model = []
-    for model in sorted({p["model"] for p in points}):
-        model_points = [p for p in points if p["model"] == model]
+    for model in sorted({p["model"] for p in token_points}):
+        model_token_points = [p for p in token_points if p["model"] == model]
+        model_pct_points = [p for p in pct_points if p["model"] == model]
         by_model.append({"model": model,
-                         "window": model_points[0]["window"],
-                         "pcts": [p["pct"] for p in model_points]})
+                         "window": (model_pct_points[0]["window"]
+                                    if model_pct_points else None),
+                         "pcts": [p["pct"] for p in model_pct_points],
+                         "peaks": [p["peak"] for p in model_token_points]})
     return {
         "n_total": len(audits),
-        "n_included": len(points),
-        "pcts": [p["pct"] for p in points],
+        "n_included": len(pct_points),
+        "n_tokens_included": len(token_points),
+        "pcts": [p["pct"] for p in pct_points],
+        "peaks": [p["peak"] for p in token_points],
         "by_model": by_model,
         "exclusions": exclusions,
         "source": "provider_reported",
@@ -8448,7 +8547,18 @@ async def _main_unlocked() -> None:
     # render them on their own page instead.
     mode_dirs = [d for d in all_dirs if not d.name.startswith(ROLLBACK_PREFIX)
                  and not d.name.startswith(RESAMPLE_PREFIX)
-                 and not d.name.startswith(CONTINUATION_PREFIX)]
+                 and not d.name.startswith(CONTINUATION_PREFIX)
+                 and not d.name.startswith(REAL_ENV_PREFIX)]
+    # Real-environment runs belong to mats/environments/ and its own viewer. One sitting in
+    # petri's log root is a misplacement, not data for this site: skip it and say so
+    # (skipped dirs are recorded in the manifest and banner-ed on every page).
+    for d in all_dirs:
+        if d.name.startswith(REAL_ENV_PREFIX):
+            _record_skipped_dir(
+                d.name,
+                "real-environment run in petri's log root; it belongs under "
+                "mats-local/environments/logs/ and renders in environments/viewer.py",
+            )
     rollback_dirs = [d for d in all_dirs if d.name.startswith(ROLLBACK_PREFIX)]
     resample_dirs = [d for d in all_dirs if d.name.startswith(RESAMPLE_PREFIX)]
     continuation_dirs = [d for d in all_dirs if d.name.startswith(CONTINUATION_PREFIX)]

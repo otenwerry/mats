@@ -1,13 +1,14 @@
 """End-to-end REAL-environment audit pipeline: audit -> annotate -> viewer, in one run.
 
-The real-mode sibling of exp_audit_pipeline.py: the same three stages, but stage 1 runs
-targets inside real Docker sandboxes (petri/sandbox/<family>/) with a deterministic
-scripted controller instead of an auditor LLM (see lib/exp_real_audit.py). Stages 2-3
-reuse the simulated pipeline's code verbatim (annotation + viewer are mode-agnostic).
+The real-mode sibling of petri's exp_audit_pipeline.py: the same three stages, but
+stage 1 runs targets inside real Docker sandboxes (environments/sandbox/<family>/) with
+a deterministic scripted controller instead of an auditor LLM (see lib/exp_real_audit.py).
+Stages 2-3 reuse the simulated pipeline's code verbatim (annotation + viewer are
+mode-agnostic; results flow into the normal petri viewer).
 
 v1 scope: fraud_detection + reasoning_prompt_benchmark, --condition=allow only.
 
-Usage:
+Usage (from mats/environments/; re-execs into petri/.venv automatically):
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
       --seeds=fraud_detection --condition=allow --epochs=3 --max-turns=200
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
@@ -35,6 +36,7 @@ Costs money (target + judge + gate LLM calls; annotation). The viewer stage is f
 """
 
 import asyncio
+import os
 import pathlib
 import shutil
 import subprocess
@@ -42,10 +44,32 @@ import sys
 import traceback
 from datetime import datetime
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+_ENVIRONMENTS = pathlib.Path(__file__).resolve().parent
+_MATS = _ENVIRONMENTS.parent
+_PETRI = _MATS / "petri"
+
+
+def ensure_petri_venv() -> None:
+    """environments/ has no venv of its own; everything runs in petri/.venv (which has
+    inspect_ai etc.). Re-exec under that interpreter so this endpoint works no matter
+    which directory/venv it was launched from (same pattern as shared/exp_ask_questions)."""
+    want = _PETRI / ".venv"
+    if pathlib.Path(sys.prefix).resolve() == want.resolve():
+        return
+    py = want / "bin" / "python"
+    if not py.exists():
+        sys.exit(f"expected petri venv not found: {want} (run `uv sync` in petri/)")
+    os.execv(str(py), [str(py), str(pathlib.Path(__file__).resolve()), *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    ensure_petri_venv()
+
+for _p in (str(_ENVIRONMENTS / "lib"), str(_PETRI / "lib"), str(_PETRI)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from exp_rh_audit import (
-    DATA,
     JUDGE,
     REASONING_EFFORT,
     TARGET_CHOICES,
@@ -62,14 +86,34 @@ from exp_real_audit import (
     ported_members,
     resolve_gate_model,
 )
+# Petri's integrity guards are mode-agnostic and reused verbatim. Its
+# run_post_audit_stages is NOT: it annotates petri's log root and builds petri's viewer,
+# so this project runs its own annotate + viewer stages against its own data root.
 from exp_audit_pipeline import (
     DEFAULT_ANNOTATE_MODEL,
     DEFAULT_CONCURRENCY,
     audit_integrity_failures,
-    run_post_audit_stages,
     unrecovered_dead_targets,
 )
+from annotate_real_hacks import annotate_real_hacks
+from env_paths import DATA, OUT
 from model_routing import route
+
+
+def env_viewer():
+    """This project's viewer module, loaded BY PATH.
+
+    Both projects have a top-level viewer.py, and petri/ is on sys.path (its lib is what
+    everything here builds on), so a plain `import viewer` would resolve to petri's and
+    silently build the wrong site into the wrong root.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "environments_viewer", _ENVIRONMENTS / "viewer.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 _VALUE_FLAGS = {
     "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--condition",
@@ -299,17 +343,56 @@ def run_real_audit_stage(cfg: dict):
     return logs, log_dir, expected_n, integrity_ok
 
 
+async def run_env_post_stages(cfg: dict) -> bool:
+    """Stages 2 (annotate) and 3 (viewer) against THIS project's data root. Mirrors
+    petri's run_post_audit_stages: each stage is wrapped so one failing doesn't stop the
+    other, and the viewer always runs last so a failed annotation is still inspectable."""
+    ok = True
+    if not cfg["skip_annotate"]:
+        print("\n" + "=" * 72)
+        print("STAGE 2/3  ANNOTATE  (agentic hack-turn localization on the reward hacks)")
+        print("=" * 72)
+        try:
+            stats = await annotate_real_hacks(
+                model=cfg["annotate_model"],
+                concurrency=cfg["concurrency"],
+                force=cfg["force_annotate"],
+            )
+            if stats.get("failed"):
+                ok = False
+        except Exception as e:
+            ok = False
+            print(f"\n!! ANNOTATE STAGE FAILED (continuing to viewer): {type(e).__name__}: {e}")
+            traceback.print_exc()
+    else:
+        print("\n(skipping STAGE 2 annotate: --skip-annotate)")
+
+    if not cfg["skip_viewer"]:
+        print("\n" + "=" * 72)
+        print("STAGE 3/3  VIEWER  (rebuild this project's static viewer, free)")
+        print("=" * 72)
+        try:
+            await env_viewer().main()
+        except Exception as e:
+            ok = False
+            print(f"\n!! VIEWER STAGE FAILED: {type(e).__name__}: {e}")
+            traceback.print_exc()
+    else:
+        print("\n(skipping STAGE 3 viewer: --skip-viewer)")
+    return ok
+
+
 def main() -> None:
     cfg = _parse_args()
     require_docker()
     _logs, _log_dir, _expected_n, audit_ok = run_real_audit_stage(cfg)
-    post_ok = asyncio.run(run_post_audit_stages(cfg))
+    post_ok = asyncio.run(run_env_post_stages(cfg))
     print("\n" + "=" * 72)
     if audit_ok and post_ok:
-        print(f"PIPELINE DONE.  open {DATA / 'viewer' / 'index.html'}")
+        print(f"PIPELINE DONE.  open {OUT / 'index.html'}")
     else:
         print("PIPELINE FINISHED WITH INTEGRITY FAILURES. "
-              f"Inspect {DATA / 'viewer' / 'index.html'} and the warnings above.")
+              f"Inspect {OUT / 'index.html'} and the warnings above.")
     print("=" * 72)
     if not (audit_ok and post_ok):
         raise SystemExit(1)

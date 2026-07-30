@@ -137,12 +137,17 @@ class RealViewerLoadTests(unittest.TestCase):
         self.assertEqual(a["auditor_protocol_check"]["status"], "passed",
                          a["auditor_protocol_check"])
 
-    def test_sweep_routing_and_labels(self):
+    def test_real_env_labels_and_no_petri_window(self):
         import viewer
 
         a = self.by_seed["finished_sample"]
-        self.assertEqual(viewer.sweep_key(a), "current_real_env")
+        # The load layer still understands real runs (environments/viewer.py imports it),
+        # and labels them as auditorless...
         self.assertEqual(viewer.auditor_label(a), "none (real environment)")
+        # ...but petri no longer HOSTS a real-environment window: those runs live in
+        # mats-local/environments/ with their own viewer, so no sweep claims them.
+        self.assertNotIn("current_real_env", {key for key, _, _, _ in viewer.SWEEPS})
+        self.assertEqual(viewer.REAL_ENV_PREFIX, "real-")
 
     def test_binary_criteria_skip_auditor_dims_for_real_runs(self):
         import viewer

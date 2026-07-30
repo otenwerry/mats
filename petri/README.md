@@ -2,6 +2,8 @@
 
 Assessing models for reward-hacking propensity with [Inspect Petri](https://meridianlabs-ai.github.io/inspect_petri). Petri orchestrates three model roles: an **auditor** (drives a multi-turn scenario against the target, simulating users and tools), a **target** (the model under assessment), and a **judge** (scores each transcript per dimension). A reference clone of the Petri repo lives at `supermats/references/inspect_petri`.
 
+Sibling project: `mats/environments/` runs REAL ports of some of these scenarios — actual code execution in Docker containers, no auditor — reusing this project's seeds, judge, rendering layer, and cost tracking. It keeps its own data root (`mats-local/environments/`) and its own viewer, so nothing mixes with the runs here. See `agent-notes/REAL_ENV_GUIDE.md`.
+
 ## Layout
 
 The experiment entry points plus the viewer builder sit at the top; everything else is a library or an occasional utility.
@@ -11,6 +13,7 @@ exp_audit_pipeline.py            # A: run audits end-to-end  (audit -> annotate 
 exp_rollback_pipeline.py         # B: rollback resampling experiments end-to-end
 exp_continuation_pipeline.py     # C: continuation experiments (prior task -> new task) end-to-end
 exp_resample_begin_pipeline.py   # D: begin-resample experiments (re-roll from turn 1, control) end-to-end
+exp_new_judge.py                 # compare a candidate judge with the saved Opus verdicts and cost
 viewer.py                        # build the static viewer (run on its own, or auto-run by the pipelines)
 lib/                             # the importable core the files above build on
   petri_paths.py                 #   single source of truth for every filesystem path
@@ -133,6 +136,24 @@ Re-rolls an original audit from turn 1 under identical conditions, with **nothin
 uv run exp_resample_begin_pipeline.py --trajectories=466,508 --n=5 --concurrency=50
 uv run exp_resample_begin_pipeline.py --trajectories=466 --n=5 --dry-run   # FREE: plan only
 ```
+
+## E. Compare a candidate judge — `exp_new_judge.py`
+
+This re-judges a balanced sample of current trajectories without changing the viewer's
+saved verdicts. `n` is drawn from each of three viewer buckets (reward hacks, interesting,
+and clean non-hacks) for each of the two active families (ML and p-hacking), so the total is
+`6 × n`. Autonomous and user-elicited reward hacks are pooled before sampling.
+
+```bash
+uv run exp_new_judge.py --judge=sonnet-4.6 --n=10 --dry-run  # free sample preview
+uv run exp_new_judge.py --judge=sonnet-4.6 --n=10            # 60 paid judge calls
+uv run exp_new_judge.py --judge=sonnet-4.6 --n=10 --summary-only
+```
+
+The default fixed sample seed lets different judges use the same saved trajectories. Runs
+checkpoint after every call and resume when the same command is repeated. The JSON outputs,
+cost comparison, statistical analysis, and standalone HTML report are written under
+`mats-local/petri/new_judge/`.
 
 ## Seeds & dimensions
 

@@ -95,6 +95,37 @@ def judge_score_status(score) -> tuple[str, str | None]:
     return "usable", None
 
 
+def tool_output_truncations(sample) -> list[dict]:
+    """Every tool call whose output was TRUNCATED before the target saw it.
+
+    Inspect records this structurally on the tool event (`ToolEvent.truncated =
+    (original_bytes, limit_bytes)`), so this works for any run shape without the solver
+    having to stamp anything. Real-environment runs cap tool output (see
+    real_target_tools.REAL_MAX_TOOL_OUTPUT) because a single `cat` of a data file could
+    otherwise flood the target's context; simulated audits run the auditor channel
+    uncapped, so they normally return []. A truncated call means the target acted on a
+    PARTIAL view of its own command output — that changes what the trajectory is evidence
+    about, so it is stored per trajectory and flagged loudly in the viewer.
+    """
+    out: list[dict] = []
+    for ev in (getattr(sample, "events", None) or []):
+        if getattr(ev, "event", None) != "tool":
+            continue
+        truncated = getattr(ev, "truncated", None)
+        if not truncated:
+            continue
+        try:
+            original_bytes, limit_bytes = int(truncated[0]), int(truncated[1])
+        except (TypeError, ValueError, IndexError):
+            original_bytes, limit_bytes = None, None
+        out.append({
+            "tool": getattr(ev, "function", None),
+            "original_bytes": original_bytes,
+            "limit_bytes": limit_bytes,
+        })
+    return out
+
+
 def target_output_tokens(sample, target_model: str) -> int:
     """Target output-token total, using role usage before the legacy model-name fallback."""
     target_usage = (getattr(sample, "role_usage", None) or {}).get("target")
@@ -331,6 +362,28 @@ def peak_context_by_role(sample) -> dict:
 _CACHE_DIR = DATA / ".viewer_cache"
 _CACHE_ENABLED = (os.environ.get("MAKE_VIEWER_NO_CACHE") != "1") and ("--no-cache" not in sys.argv)
 _VIEWER_BUILD_LOCK = DATA / ".viewer_build.lock"
+
+
+def set_data_root(root) -> None:
+    """Repoint every data-root-derived path in THIS module at `root`.
+
+    The load layer is shared by two projects with separate data roots (petri and
+    mats/environments). All five paths below are derived from DATA at import, so a second
+    project cannot just rebind petri_paths.DATA -- it calls this instead, once, before
+    loading anything. Keeping them together matters: the load cache is keyed on the run
+    DIRECTORY NAME (see _cache_key), and _cache_put evicts same-named stale siblings, so
+    two roots sharing one cache dir would evict each other's entries on every build and
+    never go warm. The overlay sidecars (rejudge / dim_scores) are keyed on traj_key,
+    which is also only unique within a root.
+    """
+    global DATA, _CACHE_DIR, _VIEWER_BUILD_LOCK, REJUDGE_FILE, DIM_SCORES_DIR
+    from pathlib import Path as _Path
+
+    DATA = _Path(root)
+    _CACHE_DIR = DATA / ".viewer_cache"
+    _VIEWER_BUILD_LOCK = DATA / ".viewer_build.lock"
+    REJUDGE_FILE = DATA / "rejudge_scores.json"
+    DIM_SCORES_DIR = DATA / "dim_scores"
 
 
 @contextmanager
@@ -1400,6 +1453,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                     else:
                         break
             crashed = not ended_via_end_conv and tail_errs >= 5
+            tool_truncations = tool_output_truncations(s)
             # REAL-environment runs (exp_real_audit) have no auditor and no
             # end_conversation tool, and a tail of failing bash calls is TARGET behavior
             # (its own buggy code), not a harness crash -- the tail-errors heuristic
@@ -1503,6 +1557,11 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         msg_turns=(msg_turns_by_anchor(s, auditor_model, transcript)
                                    if transcript else {}),
                         compactions=compactions,
+                        # Tool calls whose output was cut before the target saw it (see
+                        # tool_output_truncations). Empty on every simulated audit; a
+                        # non-empty list gets a loud viewer banner + an index flag,
+                        # because the target then acted on a partial view.
+                        tool_truncations=tool_truncations,
                         dead=target_dead,
                         crashed=crashed,
                         fork=bool(fork_calls),

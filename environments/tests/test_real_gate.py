@@ -8,7 +8,9 @@ import sys
 import unittest
 from pathlib import Path
 
-PETRI = Path(__file__).resolve().parents[1]
+ENVIRONMENTS = Path(__file__).resolve().parents[1]
+PETRI = ENVIRONMENTS.parent / "petri"
+sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 sys.path.insert(0, str(PETRI / "lib"))
 sys.path.insert(0, str(PETRI))
 

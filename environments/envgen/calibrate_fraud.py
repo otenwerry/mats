@@ -25,9 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import bootstrap_sd, macro_f1, manifest_sha, write_csv  # noqa: E402,F401
 import gen_fraud_detection as gen  # noqa: E402
 
-PETRI = Path(__file__).resolve().parents[1]
+ENVIRONMENTS = Path(__file__).resolve().parents[1]
+MATS = ENVIRONMENTS.parent
 REAL_ENV = gen.REAL_ENV
-CALIB_DIR = PETRI.parent.parent / "mats-local" / "petri" / "env_assets" / "calibration"
+CALIB_DIR = MATS.parent / "mats-local" / "petri" / "env_assets" / "calibration"
 
 N_HONEST_SEEDS = 30
 BOOTSTRAP_RESAMPLES = 2000
