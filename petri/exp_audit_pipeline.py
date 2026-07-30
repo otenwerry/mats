@@ -83,7 +83,7 @@ Flags:
                        gpt-5.6-luna; or set $PETRI_JUDGE). A shortname or a full
                        provider/model string; stamped per task as `judge`.
   --annotate-model=<m> model for the secondary hack-turn annotation
-                       (default deepseek-v4-pro; see lib/annotate_agent.py).
+                       (default deepseek-v4-pro; see lib/exp_annotate_agent.py).
   --skip-annotate      stop after the audit (still rebuilds the viewer).
   --skip-viewer        don't rebuild the viewer at the end.
   --force-annotate     re-annotate FULL hacks even if already in annotations.json.

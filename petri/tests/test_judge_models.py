@@ -80,6 +80,47 @@ class RegistrationTests(unittest.TestCase):
             self.assertNotIn("/", pretty, f"{name} falls back to a raw slug: {pretty}")
 
 
+class SecondaryJudgeTests(unittest.TestCase):
+    """The secondary roles (auditor deviation / faithfulness / rollback follow-up /
+    mechanism similarity) call the Anthropic SDK directly, so they can only run Anthropic
+    models -- and they take a BARE model id, not a routed slug."""
+
+    def test_default_is_a_bare_anthropic_id(self):
+        from judge_models import SECONDARY_JUDGE, SECONDARY_JUDGE_SLUG
+
+        self.assertNotIn("/", SECONDARY_JUDGE)          # SDK form
+        self.assertTrue(SECONDARY_JUDGE_SLUG.startswith("anthropic/"))
+        self.assertEqual(SECONDARY_JUDGE, "claude-sonnet-4-6")
+        # cheaper than the Opus it replaced, and priced so cost is reported
+        self.assertIsNotNone(price_for(SECONDARY_JUDGE_SLUG))
+        self.assertLess(price_for(SECONDARY_JUDGE_SLUG)["input"],
+                        price_for("anthropic/claude-opus-4-8")["input"])
+
+    def test_non_anthropic_secondary_judge_is_refused(self):
+        from judge_models import resolve_secondary_judge
+
+        # the whole point: pointing these at the primary judge would fail mid-run
+        with self.assertRaises(SystemExit):
+            resolve_secondary_judge("gpt-5.6-luna")
+        with self.assertRaises(SystemExit):
+            resolve_secondary_judge("openrouter/deepseek/deepseek-v4-pro-20260423")
+
+    def test_accepts_shortname_and_bare_id(self):
+        from judge_models import resolve_secondary_judge
+
+        self.assertEqual(resolve_secondary_judge("opus-4.8"), "claude-opus-4-8")
+        self.assertEqual(resolve_secondary_judge("claude-opus-4-6"), "claude-opus-4-6")
+
+    def test_sdk_call_sites_use_the_shared_secondary_default(self):
+        from judge_models import SECONDARY_JUDGE
+        import exp_rollback_judge
+
+        self.assertEqual(exp_rollback_judge.DEFAULT_MODEL, SECONDARY_JUDGE)
+        # this module was broken by the annotator rewrite; keep it importable and whole
+        self.assertIn("hack_turns", exp_rollback_judge.HackAnnotation.model_fields)
+        self.assertNotIn("{environment_note}", exp_rollback_judge.ANNOTATE_SYSTEM)
+
+
 class CallSiteTests(unittest.TestCase):
     """No alignment-judge call site may hard-code a model."""
 
@@ -90,17 +131,11 @@ class CallSiteTests(unittest.TestCase):
         "tools/exp_judge_model_compare.py", "exp_new_judge.py",
         "exp_check_rate_limits.py",          # a rate-limit probe, not a judge
     }
-    # Secondary judge ROLES, deliberately still on their own defaults: these score how
-    # faithfully the AUDITOR reproduced an environment (deviation / faithfulness), the
-    # rollback follow-up, or mechanism similarity -- not the alignment dimensions. Switching
-    # the alignment judge should not silently move them; that is Owen's separate call.
-    SECONDARY = {
-        "lib/exp_rollback_judge.py", "tools/exp_deviation_judge.py",
-        "tools/exp_rejudge_continuation_faithfulness.py", "tools/exp_mechanism_similarity.py",
-        "exp_continuation_pipeline.py", "exp_rollback_pipeline.py",
-        "lib/exp_resample.py",        # run_deviation_for_dir: auditor deviation
-        "lib/exp_continuation.py",    # run_faithfulness_for_dir: auditor faithfulness
-    }
+    # Secondary judge ROLES now resolve through judge_models too (SECONDARY_JUDGE), so
+    # they are no longer exempt from the no-hard-coding check. Only exp_rollback_pipeline
+    # stays listed: it passes "judge" as a literal CLI default meaning "reuse the run's
+    # judge", not a model name.
+    SECONDARY = {"exp_rollback_pipeline.py"}
 
     def test_no_stray_hardcoded_judge_defaults(self):
         pattern = re.compile(r'=\s*"(?:anthropic/)?claude-opus-4-8"')

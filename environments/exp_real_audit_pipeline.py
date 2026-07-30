@@ -97,7 +97,7 @@ from exp_audit_pipeline import (
     audit_integrity_failures,
     unrecovered_dead_targets,
 )
-from annotate_real_hacks import annotate_real_hacks
+from exp_annotate_real_hacks import annotate_real_hacks
 from judge_models import resolve_judge
 from env_paths import DATA, OUT
 from model_routing import route

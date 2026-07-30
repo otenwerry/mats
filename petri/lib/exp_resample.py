@@ -64,6 +64,7 @@ from inspect_petri import audit, audit_solver, auditor_agent, auditor_tools
 import viewer
 from viewer import RESAMPLE_PREFIX, load_originals_by_id, load_mode, page_name
 from petri_paths import DATA, LOGS, ENV_FILE, DIMENSIONS_DIR
+from judge_models import SECONDARY_JUDGE
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from prompt_caching import cached_system, cached_user_prefix, run_direct_cached, stable_key
 from exp_rh_audit import (
@@ -460,7 +461,7 @@ async def _judge_deviation(client, rubric, orig_tr, cont_tr, model):
 
 
 async def run_deviation_for_dir(run_dir: Path, refs_by_id: dict[int, OriginalRef],
-                                model: str = "claude-opus-4-8", concurrency: int = 50,
+                                model: str = SECONDARY_JUDGE, concurrency: int = 50,
                                 force: bool = False) -> dict:
     """Judge auditor deviation for every resample in run_dir against its original. Writes
     run_dir/resample_deviation_results.json keyed by the viewer page name. Incremental

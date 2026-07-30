@@ -16,7 +16,7 @@ sys.path.insert(0, str(PETRI))
 
 from inspect_ai.model import ModelOutput, get_model  # noqa: E402
 
-from annotate_agent import (  # noqa: E402
+from exp_annotate_agent import (  # noqa: E402
     MAX_TOOL_TURNS,
     TranscriptIndex,
     annotate_agentic,
@@ -96,16 +96,16 @@ class TranscriptIndexTests(unittest.TestCase):
         self.assertIn("no messages in range", text)
 
     def test_read_cap_is_marked_inline(self):
-        import annotate_agent
+        import exp_annotate_agent
 
-        original = annotate_agent.READ_CHARS_CAP
-        annotate_agent.READ_CHARS_CAP = 40
+        original = exp_annotate_agent.READ_CHARS_CAP
+        exp_annotate_agent.READ_CHARS_CAP = 40
         try:
             text, used = TranscriptIndex.build(TRANSCRIPT).read(1, 7)
             self.assertIn("cut off here", text)
             self.assertLess(len(used), 7)
         finally:
-            annotate_agent.READ_CHARS_CAP = original
+            exp_annotate_agent.READ_CHARS_CAP = original
 
     def test_search_finds_messages(self):
         hits = self.index.search("test_labels")

@@ -5,6 +5,11 @@
   since 2026-07-30). Every pipeline takes --judge=<shortname|slug>, $PETRI_JUDGE overrides
   the default globally, and the model used is stamped per run as `judge`. Runs judged by
   different models are not automatically comparable.
+- The SECONDARY judges (auditor deviation/faithfulness, rollback follow-up, mechanism
+  similarity) call the Anthropic SDK directly, so they can only run Anthropic models.
+  Their shared default is SECONDARY_JUDGE in the same file (claude-sonnet-4-6 since
+  2026-07-30, down from opus). Using the primary judge there needs those files ported off
+  the Anthropic SDK first; resolve_secondary_judge() refuses a non-Anthropic model.
 
 
 # Shared

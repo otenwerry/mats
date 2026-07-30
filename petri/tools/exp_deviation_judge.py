@@ -66,6 +66,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from petri_paths import ENV_FILE, DIMENSIONS_DIR
+from judge_models import SECONDARY_JUDGE
 from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX,
     load_rollback_run, load_originals_by_id, rb_page_name,
@@ -74,7 +75,8 @@ from viewer import (
 
 load_dotenv(ENV_FILE)  # mats/.env (ANTHROPIC_API_KEY)
 
-DEFAULT_MODEL = "claude-opus-4-8"
+# Secondary judge role: Anthropic SDK only -- see lib/judge_models.py
+DEFAULT_MODEL = SECONDARY_JUDGE
 DEFAULT_CONCURRENCY = 50
 PRICES = {"claude-opus-4-8": (5.0, 25.0), "claude-sonnet-4-6": (3.0, 15.0)}
 RUBRIC_FILE = DIMENSIONS_DIR / "rollback_only" / "deviations_from_original.md"

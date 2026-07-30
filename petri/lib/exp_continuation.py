@@ -141,6 +141,7 @@ from viewer import (
     page_name,
 )
 from petri_paths import DATA, LOGS, ENV_FILE
+from judge_models import SECONDARY_JUDGE
 from fixed_target_tools import fixed_target_auditor_tools
 from exp_rh_audit import (
     AUDITOR_MAX_TOOL_OUTPUT,
@@ -1123,7 +1124,7 @@ async def _judge_faithfulness(client, rubric, orig_tr, cont_tr, model, has_prefi
 
 
 async def run_faithfulness_for_dir(run_dir: Path, b_refs_by_id: dict[int, OriginalRef],
-                                   model: str = "claude-opus-4-8", concurrency: int = 50,
+                                   model: str = SECONDARY_JUDGE, concurrency: int = 50,
                                    force: bool = False, conditions: set[str] | None = None) -> dict:
     """Judge auditor faithfulness for every continuation in run_dir against its B original.
     Writes run_dir/continuation_deviation_results.json keyed by viewer page name (a queryable
@@ -1219,7 +1220,7 @@ def _transcript_from_m(transcript: str, m: int) -> str:
     return transcript[mt.start():] if mt else transcript
 
 
-async def run_continuation_annotation(run_dir, model: str = JUDGE.split("/")[-1],
+async def run_continuation_annotation(run_dir, model: str | None = None,
                                       concurrency: int = 50, force: bool = False) -> dict:
     """Localize + annotate the reward-hack turns of every FULL-hack continuation in run_dir,
     exactly the way the original audit pipeline does (exp_annotate_hacks.run_annotation): the
@@ -1231,7 +1232,8 @@ async def run_continuation_annotation(run_dir, model: str = JUDGE.split("/")[-1]
     rather than the prior task the target was merely conditioned on. no_prefix has no pivot, so
     it's annotated in full (it is just B). The [M#] numbers are preserved by the slice, so the
     marks line up with the full transcript the viewer renders."""
-    from exp_annotate_hacks import run_annotation
+    # model=None -> the annotator's own default (agentic, cheap, any provider).
+    from exp_annotate_hacks import DEFAULT_MODEL as ANNOTATE_DEFAULT, run_annotation
     audits = await load_mode(Path(run_dir))
     scoped: list[dict] = []
     for a in audits:
@@ -1240,4 +1242,5 @@ async def run_continuation_annotation(run_dir, model: str = JUDGE.split("/")[-1]
         if pivot is not None:
             b["transcript"] = _transcript_from_m(a["transcript"], pivot)
         scoped.append(b)
-    return await run_annotation(scoped, model=model, concurrency=concurrency, force=force)
+    return await run_annotation(scoped, model=model or ANNOTATE_DEFAULT,
+                                concurrency=concurrency, force=force)

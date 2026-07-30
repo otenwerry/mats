@@ -41,8 +41,10 @@ import exp_continuation as C
 from exp_continuation import parse_continuation_task, run_faithfulness_for_dir
 from viewer import load_mode
 from petri_paths import LOGS
+from judge_models import DEFAULT_JUDGE
 
-DEFAULT_MODEL = "claude-opus-4-8"
+# This one goes through inspect's model layer, so it CAN use the primary judge.
+DEFAULT_MODEL = DEFAULT_JUDGE
 DEFAULT_CONCURRENCY = 50
 
 

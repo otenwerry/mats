@@ -28,7 +28,7 @@ This module is ALSO importable: exp_audit_pipeline.py calls
 load_all_original_audits() + run_annotation() so the gate and the parallel
 annotation loop have a single source of truth. Importing it has no side effects.
 
-Since 2026-07-30 this is AGENTIC and runs on a cheap model (see lib/annotate_agent.py):
+Since 2026-07-30 this is AGENTIC and runs on a cheap model (see lib/exp_annotate_agent.py):
 the model gets the judge's findings plus a content-free transcript index, then pulls the
 turns it wants with read_turns / search_transcript and finishes with submit_annotation.
 Read coverage is recorded per annotation and surfaced in the viewer.
@@ -59,7 +59,7 @@ from viewer import (
     DATA, LOGS, ROLLBACK_PREFIX, RESAMPLE_PREFIX, CONTINUATION_PREFIX,
     load_mode, page_name, binary_hack_eval, BINARY_HACK_CRITERIA,
 )
-from annotate_agent import annotate_agentic
+from exp_annotate_agent import annotate_agentic
 from model_routing import route
 import openrouter_cost   # real billed cost for OpenRouter calls (installed in run_annotation)
 import direct_cost       # list-price cost for direct anthropic/openai calls
@@ -75,7 +75,7 @@ ANN_FILE = DATA / "annotations.json"
 
 
 # The prompt, tool schema, agentic loop, and read-coverage accounting all live in
-# lib/annotate_agent.py so the environments project reuses them unchanged.
+# lib/exp_annotate_agent.py so the environments project reuses them unchanged.
 
 
 

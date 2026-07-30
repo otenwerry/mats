@@ -101,10 +101,15 @@ from inspect_ai import eval_set
 
 import viewer
 import exp_continuation as C
+from judge_models import SECONDARY_JUDGE
+from exp_annotate_hacks import DEFAULT_MODEL as ANNOTATE_DEFAULT_MODEL
 
 DEFAULT_CONCURRENCY = 50
-DEFAULT_DEVIATION_MODEL = "claude-opus-4-8"
-DEFAULT_ANNOTATE_MODEL = "claude-opus-4-8"
+# Secondary judge role (Anthropic SDK only) -- see lib/judge_models.py
+DEFAULT_DEVIATION_MODEL = SECONDARY_JUDGE
+# The continuation annotate stage delegates to the AGENTIC annotator, so it follows that
+# default (any provider). Only the FAITHFULNESS judge here is Anthropic-SDK bound.
+DEFAULT_ANNOTATE_MODEL = ANNOTATE_DEFAULT_MODEL
 
 
 def _arg(name, default=None):
