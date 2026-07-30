@@ -227,7 +227,18 @@ class ContextUsageTests(unittest.TestCase):
             data = viewer.context_fullness_data(audits)
 
         self.assertEqual(data["pcts"], [25.0])
+        self.assertEqual(data["peaks"], [25_000, 5_000])
+        self.assertEqual(data["by_model"][0], {
+            "model": "model-a",
+            "window": 100_000,
+            "pcts": [25.0],
+            "peaks": [25_000],
+        })
+        self.assertEqual(data["by_model"][1]["window"], None)
+        self.assertEqual(data["by_model"][1]["pcts"], [])
+        self.assertEqual(data["by_model"][1]["peaks"], [5_000])
         self.assertEqual(data["n_included"], 1)
+        self.assertEqual(data["n_tokens_included"], 2)
         self.assertEqual(data["n_total"], 6)
         self.assertEqual(data["exclusions"], {
             "dead": 1,
@@ -241,20 +252,28 @@ class ContextUsageTests(unittest.TestCase):
         data = {
             "n_total": 3,
             "n_included": 3,
+            "n_tokens_included": 3,
             "pcts": [10.0, 20.0, 30.0],
+            "peaks": [105_000, 210_000, 78_643],
             "by_model": [
-                {"model": "model-a", "window": 1_050_000, "pcts": [10.0, 20.0]},
-                {"model": "model-b", "window": 262_144, "pcts": [30.0]},
+                {"model": "model-a", "window": 1_050_000, "pcts": [10.0, 20.0],
+                 "peaks": [105_000, 210_000]},
+                {"model": "model-b", "window": 262_144, "pcts": [30.0],
+                 "peaks": [78_643]},
             ],
             "exclusions": {},
         }
 
         html = viewer_visuals._context_fullness_section(data)
 
-        self.assertEqual(html.count("<figure"), 2)
+        self.assertEqual(html.count("<figure"), 4)
         self.assertIn("All target models", html)
         self.assertIn("model-a (1.05M)", html)
         self.assertIn("model-b (262K)", html)
+        self.assertIn("Peak target context tokens", html)
+        self.assertIn("Peak target context (prompt tokens)", html)
+        self.assertIn("Context window filled at peak (%)", html)
+        self.assertIn("complete exact timelines and known context windows", html)
         self.assertNotIn("One point per original audit", html)
 
     def test_trajectory_renderer_never_restores_annotation_summary_prose(self):
