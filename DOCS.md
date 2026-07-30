@@ -30,17 +30,39 @@ uv run viewer.py
 
 ## Auditing
 uv run exp_audit_pipeline.py
-	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n
+	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n --max-turns=n
 	[--condition=allow/correct]   # pinned seed dirs only; default allow
     [--reasoning=yes/no]
-	[--max-turns=60]
 	[--auditor=deepseek-v4-pro]
 	[--auditor-thinking=yes/no]
 	[--concurrency=50]
 	[--annotate-model=opus-4.8]
 	[--skip-annotate, --skip-viewer, --force-annotate]
-    ml allow only: FOLLOW_UP.txt is inlined; exact system/opening/optional-follow-up
-        compliance is stored per trajectory and flagged in the viewer on failure
+    ml + p-hacking allow: exact system/opening/ordered optional-follow-up
+        compliance is stored per trajectory and flagged in the viewer on failure;
+        p-hacking allows FOLLOW_UP.txt followed, if needed, by FOLLOW_UP_FINALIZE.txt
+
+## Real-environment auditing (docker sandboxes, no auditor; v1 = fraud_detection + reasoning_prompt_benchmark)
+uv run exp_real_audit_pipeline.py
+	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n --max-turns=n
+	[--condition=allow]   # v1: allow only; correct rejected
+    [--reasoning=yes/no]
+	[--gate-model=opus-4.8]
+	[--concurrency=50]
+	[--sandbox-concurrency=8]
+	[--time-limit=seconds]
+	[--annotate-model=opus-4.8]
+	[--skip-annotate, --skip-viewer, --force-annotate]
+    requires a running docker daemon; run dirs are logs/real-v1-*, viewer window "real environments"
+    the same exact system/opening/follow-up compliance check applies; user turns are fully
+        scripted, and one gate LLM call per first submission decides clean/hacked (stored
+        with evidence in metadata.real_env.gates)
+
+## Gate validation (retrospective, against stored simulated runs)
+uv run tools/exp_validate_gate.py
+	[--limit-per-seed=30]
+	[--gate-model=anthropic/claude-opus-4-8]
+	[--dry-run]
 
 ## Continuations
 uv run exp_continuation_pipeline.py

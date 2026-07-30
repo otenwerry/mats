@@ -19,7 +19,10 @@ Profiling context (measured at cache introduction): ~97% of a cold viewer build 
 the .eval archives; writing the HTML is ~3%. `load_mode` is the single chokepoint for that
 reading (load_rollback_run calls it too), and `rollback_grid` re-reads the rollback evals
 on top (twice per dir per build). Both are pure dir -> data functions, so we memoize their
-output to mats-local/petri/.viewer_cache/ (pure derived data, never committed).
+output to mats-local/petri/.viewer_cache/ (pure derived data, never committed). Cache files
+are written to per-process temporary files and atomically replaced. `viewer_build_lock`
+serializes complete viewer builds so two experiment pipelines that finish together cannot
+race while generating or pruning HTML.
 
 IF THE CACHE EVER CAUSES PROBLEMS, escape hatches in increasing permanence:
   1. One-off bypass:  uv run viewer.py --no-cache   (or MAKE_VIEWER_NO_CACHE=1)
@@ -41,6 +44,9 @@ import os
 import pickle
 import re
 import sys
+import tempfile
+from contextlib import contextmanager
+import fcntl
 from pathlib import Path
 
 from inspect_ai.log import list_eval_logs, read_eval_log
@@ -53,6 +59,13 @@ from inspect_scout import (
 )
 
 from petri_paths import DATA
+
+
+BLOCKING_TARGET_PROVIDER_EVENT_KINDS = frozenset({
+    "content_filter",
+    "provider_error",
+    "empty_response",
+})
 
 
 def usage_to_dict(model_usage: dict) -> dict:
@@ -70,6 +83,76 @@ def usage_to_dict(model_usage: dict) -> dict:
             "total_cost": getattr(u, "total_cost", None),
         }
     return out
+
+
+def judge_score_status(score) -> tuple[str, str | None]:
+    """Machine-readable usability of one sample's primary ``audit_judge`` score."""
+    if score is None:
+        return "missing", "no audit_judge score"
+    value = getattr(score, "value", None)
+    if not isinstance(value, dict) or not value:
+        return "unusable", f"unusable judge score ({value!r})"
+    return "usable", None
+
+
+def target_output_tokens(sample, target_model: str) -> int:
+    """Target output-token total, using role usage before the legacy model-name fallback."""
+    target_usage = (getattr(sample, "role_usage", None) or {}).get("target")
+    if target_usage is not None:
+        return target_usage.output_tokens or 0
+    target_short = target_model.split("/")[-1]
+    return sum(
+        (usage.output_tokens or 0)
+        for model, usage in (getattr(sample, "model_usage", None) or {}).items()
+        if model.split("/")[-1] == target_short
+    )
+
+
+def blocking_target_provider_events(target_context_usage: dict | None) -> list[dict]:
+    """Unrecovered target-provider events that changed the recorded trajectory."""
+    return [
+        event
+        for event in (target_context_usage or {}).get("provider_events") or []
+        if event.get("kind") in BLOCKING_TARGET_PROVIDER_EVENT_KINDS
+    ]
+
+
+def finalize_audit_integrity(audit: dict) -> dict:
+    """Store the complete, queryable data-integrity verdict on one loaded audit.
+
+    A successful rejudge repairs an absent/unusable primary judge result. Provider
+    failures, empty target responses, missing declared dimensions, and a missing
+    rendered transcript remain invalid. The concrete provider events and raw judge
+    status stay in their dedicated fields; ``integrity_issues`` is the compact list
+    used by filtering and the manifest.
+    """
+    issues: list[str] = []
+    raw_judge_status = audit.get("judge_score_status")
+    if raw_judge_status in {"missing", "unusable"} and not audit.get("rejudged"):
+        issues.append(f"judge_score_{raw_judge_status}")
+
+    declared = list(audit.get("judge_dimensions") or [])
+    scores = audit.get("scores") or {}
+    missing_dimensions = [
+        dimension
+        for dimension in declared
+        if not isinstance(scores.get(dimension), (int, float))
+    ]
+    audit["judge_missing_dimensions"] = missing_dimensions
+    if missing_dimensions:
+        issues.append("judge_dimensions_missing")
+
+    if audit.get("dead"):
+        issues.append("target_no_output")
+    if not audit.get("transcript") and not audit.get("dead"):
+        issues.append("transcript_unavailable")
+
+    for event in blocking_target_provider_events(audit.get("target_context_usage")):
+        issues.append(f"target_provider_{event['kind']}")
+
+    audit["integrity_issues"] = list(dict.fromkeys(issues))
+    audit["integrity_status"] = "invalid" if audit["integrity_issues"] else "valid"
+    return audit
 
 
 def context_calls_for_role(sample, role: str, model: str) -> dict:
@@ -114,8 +197,35 @@ def context_calls_for_role(sample, role: str, model: str) -> dict:
 
     calls: list[int | None] = []
     provider_events: list[dict] = []
+    visible_responses = 0
     for i, ev in enumerate(events):
-        u = getattr(getattr(ev, "output", None), "usage", None)
+        output = getattr(ev, "output", None)
+        choices = getattr(output, "choices", None) or []
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None)
+        tool_calls = getattr(message, "tool_calls", None) or []
+
+        visible_text = ""
+        if isinstance(content, str):
+            visible_text = content
+        else:
+            visible_text = "".join(
+                block if isinstance(block, str) else (
+                    (getattr(block, "text", None) or "")
+                    if getattr(block, "type", None) != "reasoning"
+                    else ""
+                )
+                for block in (content or [])
+            )
+        refusal = getattr(message, "refusal", None) or ""
+        has_visible_response = bool(
+            visible_text.strip() or str(refusal).strip() or tool_calls
+        )
+        if has_visible_response:
+            visible_responses += 1
+
+        u = getattr(output, "usage", None)
         if u is None:
             error = getattr(ev, "error", None)
             next_ev = events[i + 1] if i + 1 < len(events) else None
@@ -129,8 +239,7 @@ def context_calls_for_role(sample, role: str, model: str) -> dict:
                 })
                 continue
 
-            choices = getattr(getattr(ev, "output", None), "choices", None) or []
-            stop_reason = getattr(choices[0], "stop_reason", None) if choices else None
+            stop_reason = getattr(choice, "stop_reason", None)
             if str(stop_reason or "").lower() == "content_filter":
                 provider_events.append({
                     "kind": "content_filter",
@@ -143,10 +252,16 @@ def context_calls_for_role(sample, role: str, model: str) -> dict:
                     "attempt": i + 1,
                     "error": type(error).__name__,
                 })
-            else:
+            elif has_visible_response:
                 provider_events.append({
                     "kind": "missing_usage",
                     "attempt": i + 1,
+                })
+            else:
+                provider_events.append({
+                    "kind": "empty_response",
+                    "attempt": i + 1,
+                    "stop_reason": str(stop_reason or "unknown"),
                 })
             calls.append(None)
             continue
@@ -154,6 +269,18 @@ def context_calls_for_role(sample, role: str, model: str) -> dict:
                   + (getattr(u, "input_tokens_cache_read", None) or 0)
                   + (getattr(u, "input_tokens_cache_write", None) or 0))
         calls.append(prompt if prompt > 0 else None)
+        if str(getattr(choice, "stop_reason", None) or "").lower() == "content_filter":
+            provider_events.append({
+                "kind": "content_filter",
+                "attempt": i + 1,
+                "stop_reason": "content_filter",
+            })
+        elif not has_visible_response:
+            provider_events.append({
+                "kind": "empty_response",
+                "attempt": i + 1,
+                "stop_reason": str(getattr(choice, "stop_reason", None) or "unknown"),
+            })
 
     missing = sum(v is None for v in calls)
     status = ("unavailable" if not calls or missing == len(calls)
@@ -172,6 +299,7 @@ def context_calls_for_role(sample, role: str, model: str) -> dict:
         "role_matching": "model_fallback" if used_model_fallback else "event_role",
         "recorded_attempts": len(events),
         "logical_calls": len(calls),
+        "visible_responses": visible_responses,
         "provider_events": provider_events,
     }
 
@@ -202,6 +330,30 @@ def peak_context_by_role(sample) -> dict:
 
 _CACHE_DIR = DATA / ".viewer_cache"
 _CACHE_ENABLED = (os.environ.get("MAKE_VIEWER_NO_CACHE") != "1") and ("--no-cache" not in sys.argv)
+_VIEWER_BUILD_LOCK = DATA / ".viewer_build.lock"
+
+
+@contextmanager
+def viewer_build_lock():
+    """Serialize complete viewer builds across processes.
+
+    Audit pipelines can finish seconds apart and each call ``viewer.main()``. Without a
+    process lock, those builds can simultaneously replace cache files, write the same HTML,
+    and prune pages the other process is still producing. ``flock`` is released by the OS
+    if a process exits or crashes, so a failed build cannot leave a stale lock behind.
+    """
+    _VIEWER_BUILD_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with _VIEWER_BUILD_LOCK.open("a+b") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("another viewer build is running; waiting for it to finish ...", flush=True)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            print("previous viewer build finished; continuing ...", flush=True)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _code_sig() -> str:
@@ -270,12 +422,34 @@ def _cache_put(d: Path, kind: str, obj) -> None:
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     key = _cache_key(d, kind)
     current = f"{kind}__{d.name}__{key}.pkl"
-    # one live entry per (dir, kind): drop stale-keyed siblings so the cache can't grow unbounded
+    # Never expose a partial pickle: write beside the destination, then atomically replace it.
+    # The unique temp name also makes direct load_mode users safe even when they run outside
+    # the whole-viewer build lock.
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=_CACHE_DIR,
+            prefix=f".{current}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = Path(fh.name)
+            pickle.dump(obj, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, _CACHE_DIR / current)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+    # One live entry per (dir, kind): drop stale-keyed siblings so the cache can't grow
+    # unbounded. Another process may have observed the same stale sibling, so disappearance
+    # between glob() and unlink() is normal rather than a build-failing error.
     for old in _CACHE_DIR.glob(f"{kind}__{d.name}__*.pkl"):
         if old.name != current:
-            old.unlink()
-    with (_CACHE_DIR / current).open("wb") as fh:
-        pickle.dump(obj, fh)
+            old.unlink(missing_ok=True)
 
 
 _ATTACHMENT_RE = re.compile(r"attachment://([0-9a-fA-F]+)")
@@ -321,20 +495,28 @@ def check_auditor_protocol(transcript: str, protocol: dict | None) -> dict:
     """Exact, no-LLM check of an opt-in original audit's target-facing script.
 
     ``protocol`` is stored in Sample.metadata by ``assemble_pinned_seed`` and contains
-    the exact system prompt actually applied, opening user message, and one optional
-    follow-up. Absence means the sample did not opt in (historical audits, p-hacking,
-    continuations, and the ML ``correct`` condition). Every result is stored on the
-    loaded audit as a queryable status; only confirmed failures get a viewer badge.
+    the exact system prompt actually applied, opening user message, and an ordered list
+    of optional follow-ups. The v1 single-follow-up field remains supported. Absence
+    means the sample did not opt in (historical audits,
+    continuations, performance gaming, and the ML/p-hacking ``correct`` conditions).
+    Every result is stored on the loaded audit as a queryable status; only confirmed
+    failures get a viewer badge.
     """
     if not isinstance(protocol, dict):
         return {"status": "not_applicable", "version": None, "issues": []}
     version = protocol.get("version")
     expected_system = protocol.get("system_prompt")
     expected_opening = protocol.get("opening_user_message")
-    expected_follow_up = protocol.get("follow_up_user_message")
-    if not all(isinstance(value, str) for value in (
-        expected_system, expected_opening, expected_follow_up
-    )):
+    expected_follow_ups = protocol.get("follow_up_user_messages")
+    if expected_follow_ups is None:
+        expected_follow_ups = [protocol.get("follow_up_user_message")]
+    if (
+        not isinstance(expected_system, str)
+        or not isinstance(expected_opening, str)
+        or not isinstance(expected_follow_ups, list)
+        or not expected_follow_ups
+        or not all(isinstance(value, str) for value in expected_follow_ups)
+    ):
         return {
             "status": "unavailable",
             "version": version,
@@ -348,7 +530,7 @@ def check_auditor_protocol(transcript: str, protocol: dict | None) -> dict:
     # renderer behavior; internal spacing and wording remain byte-sensitive.
     expected_system = expected_system.strip()
     expected_opening = expected_opening.strip()
-    expected_follow_up = expected_follow_up.strip()
+    expected_follow_ups = [value.strip() for value in expected_follow_ups]
     if not transcript:
         return {
             "status": "unavailable",
@@ -390,17 +572,23 @@ def check_auditor_protocol(transcript: str, protocol: dict | None) -> dict:
                 "problem": "text differs",
             })
         later = users[1:]
-        if later and later[0]["content"] != expected_follow_up:
-            issues.append({
-                "turn": later[0]["turn"],
-                "part": "follow-up",
-                "problem": "text differs",
-            })
-        issues.extend({
-            "turn": message["turn"],
-            "part": "user",
-            "problem": "extra user message",
-        } for message in later[1:])
+        for index, message in enumerate(later):
+            if index >= len(expected_follow_ups):
+                issues.append({
+                    "turn": message["turn"],
+                    "part": "user",
+                    "problem": "extra user message",
+                })
+            elif message["content"] != expected_follow_ups[index]:
+                issues.append({
+                    "turn": message["turn"],
+                    "part": (
+                        "follow-up"
+                        if len(expected_follow_ups) == 1
+                        else f"follow-up {index + 1}"
+                    ),
+                    "problem": "text differs",
+                })
 
     return {
         "status": "failed" if issues else "passed",
@@ -763,8 +951,9 @@ def _load_rejudge() -> dict:
 def _apply_rejudge(a: dict, rejudge: dict) -> dict:
     """Merge a re-judged entry into an audit dict in place (full replacement). When an
     entry is present it supersedes the eval-log scores + summary/justification/highlights;
-    when absent the audit keeps its eval-log values. Whether the merge happened is not
-    recorded on the dict (use binary_hack_eval to tell whether the 5 dims are present)."""
+    when absent the audit keeps its eval-log values. ``rejudged=True`` records a successful
+    replacement so it can repair a missing/unusable primary judge result without erasing
+    that raw status."""
     e = rejudge.get(traj_key(a))
     if e is None:
         return a
@@ -772,6 +961,7 @@ def _apply_rejudge(a: dict, rejudge: dict) -> dict:
     a["summary"] = e.get("summary") or a.get("summary", "")
     a["justification"] = e.get("justification") or a.get("justification", "")
     a["highlights"] = e.get("highlights") or a.get("highlights", "")
+    a["rejudged"] = True
     return a
 
 
@@ -1105,15 +1295,13 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
         judge_model = getattr(roles.get("judge"), "model", None) or str(roles.get("judge", "?"))
         for s in log.samples or []:
             sc = (s.scores or {}).get("audit_judge")
-            # Skip samples with no usable judge score: either no audit_judge score at all,
-            # or a non-dict value (e.g. NaN) meaning the judge errored out. Both render as
-            # an empty, confusing page (this is what made #74 look "empty"); excluding them
-            # here means no page is written and the stale page is pruned at the end of main().
-            if sc is None or not isinstance(sc.value, dict):
-                why = "no audit_judge score" if sc is None else f"unusable judge score ({sc.value!r})"
-                print(f"  WARNING: {why} for {s.id} epoch {s.epoch} — skipping (no page)")
-                continue
-            md = sc.metadata or {}
+            raw_judge_status, raw_judge_issue = judge_score_status(sc)
+            if raw_judge_status != "usable":
+                print(
+                    f"  WARNING: {raw_judge_issue} for {s.id} epoch {s.epoch} — "
+                    "keeping a visible integrity-invalid trajectory"
+                )
+            md = (getattr(sc, "metadata", None) or {}) if sc is not None else {}
             transcript = rendered.get((log.eval.task, str(s.id), s.epoch), "")
             # resolve attachment placeholders the scout renderer left in the transcript
             transcript = resolve_attachments(transcript, s.attachments or {})
@@ -1139,16 +1327,15 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
             # both roles under one model-string key, so summing by model string would credit
             # the auditor's tokens to the target and never flag a genuinely dead target. Fall
             # back to the model-string sum only if role_usage has no target entry.
-            tgt_usage = (s.role_usage or {}).get("target")
-            if tgt_usage is not None:
-                tgt_out = tgt_usage.output_tokens or 0
-            else:
-                tgt_short = target_model.split("/")[-1]
-                tgt_out = sum(
-                    (u.output_tokens or 0)
-                    for m, u in (s.model_usage or {}).items()
-                    if m.split("/")[-1] == tgt_short
-                )
+            target_context_usage = context_calls_for_role(s, "target", target_model)
+            tgt_out = target_output_tokens(s, target_model)
+            # A provider can omit usage metadata even though it returned a complete
+            # visible response. Do not turn that context-accounting gap into a false
+            # DEAD behavioral verdict.
+            target_dead = (
+                tgt_out == 0
+                and not target_context_usage.get("visible_responses")
+            )
             # auditor scratchpad, aligned to the rendered transcript's message numbers.
             # For rollback continuations this run's events only cover the LIVE turns
             # (replayed prefix turns produced no ModelEvent), so the dict it returns
@@ -1213,6 +1400,18 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                     else:
                         break
             crashed = not ended_via_end_conv and tail_errs >= 5
+            # REAL-environment runs (exp_real_audit) have no auditor and no
+            # end_conversation tool, and a tail of failing bash calls is TARGET behavior
+            # (its own buggy code), not a harness crash -- the tail-errors heuristic
+            # would false-positive. The solver stamps how the run actually ended
+            # (metadata.real_env.protocol.ended_reason); a missing stamp means the
+            # finalizer never ran (cancelled/killed), which IS a truncated record.
+            target_tools_mode = (log.eval.metadata or {}).get("target_tools_mode")
+            real_env_meta = (getattr(s, "metadata", None) or {}).get("real_env")
+            if target_tools_mode == "real":
+                real_ended = ((real_env_meta or {}).get("protocol") or {}).get("ended_reason")
+                ended_via_end_conv = real_ended in ("protocol_end", "gate_error_end")
+                crashed = real_ended is None
             audits.append(
                 _apply_rejudge(
                     dict(
@@ -1264,13 +1463,32 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # False/absent on everything else. Used to hold these out of / mark them
                         # distinctly in the continuation visuals.
                         cross_seed_family=bool((log.eval.metadata or {}).get("cross_seed_family")),
+                        # REAL-environment runs (exp_real_audit): "real" vs the
+                        # simulated audits' "fixed"/None. Drives the auditor label,
+                        # the crashed/ended handling above, and any real-only display.
+                        target_tools_mode=target_tools_mode,
+                        # The solver-stamped record of everything real: scripted-protocol
+                        # summary, gate decisions + evidence, the genuine grade, and
+                        # capped artifact copies (full copies in the run dir's
+                        # real_artifacts/ sidecar). None on simulated runs. Stored whole
+                        # so future viewer display work stays a warm rebuild.
+                        real_env=real_env_meta,
                         judge=judge_model,
                         seed=str(s.id),
                         epoch=s.epoch,
-                        scores=sc.value if isinstance(sc.value, dict) else {},
+                        scores=(
+                            sc.value
+                            if sc is not None and isinstance(getattr(sc, "value", None), dict)
+                            else {}
+                        ),
                         summary=md.get("summary", ""),
-                        justification=getattr(sc, "explanation", None) or "",
+                        justification=(getattr(sc, "explanation", None) or "") if sc is not None else "",
                         highlights=md.get("highlights", ""),
+                        # Never drop a sample because its primary judge failed. These raw
+                        # fields remain queryable even when a later rejudge repairs it.
+                        judge_score_status=raw_judge_status,
+                        judge_score_issue=raw_judge_issue,
+                        rejudged=False,
                         transcript=transcript,
                         scratchpad=scratch,
                         auditor_calls=auditor_calls_by_anchor(s, transcript),
@@ -1285,7 +1503,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         msg_turns=(msg_turns_by_anchor(s, auditor_model, transcript)
                                    if transcript else {}),
                         compactions=compactions,
-                        dead=tgt_out == 0,
+                        dead=target_dead,
                         crashed=crashed,
                         fork=bool(fork_calls),
                         fork_restart=fork_calls.count("restart_conversation"),
@@ -1307,9 +1525,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # Exact provider-reported prompt size for EVERY target call. Missing
                         # usage stays as a None slot, with a queryable coverage status, so the
                         # metadata timeline never shifts later calls left or interpolates.
-                        target_context_usage=context_calls_for_role(
-                            s, "target", target_model
-                        ),
+                        target_context_usage=target_context_usage,
                     ),
                     rejudge,
                 )
@@ -1321,6 +1537,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
     cat_err: dict[int, bool] = {}
     for i, a in enumerate(audits):
         _apply_dim_scores(a, sidecars)
+        finalize_audit_integrity(a)
         # parse the judge's tag lines AFTER scores/justification are final (rejudge + dim
         # sidecars can both change the reward_hacking score used here). Two schemes coexist:
         just = a.get("justification", "")
@@ -1378,8 +1595,8 @@ def _rollback_grid_impl(rb_dir: Path) -> dict[int, dict[int, bool]]:
 
     Returns {original_traj_id: {epoch: has_usable_judge_score}}. A sample that ran
     but whose audit_judge score is missing/non-dict (judge errored) is recorded as
-    False here and is silently dropped by load_mode -- so comparing this grid to
-    what the viewer surfaces tells us exactly which rollbacks are missing and why.
+    False here. ``load_mode`` now keeps that sample as a visible integrity-invalid
+    trajectory; the grid retains the raw primary-judge status for rollback coverage.
     """
     grid: dict[int, dict[int, bool]] = {}
     for li in list_eval_logs(str(rb_dir)):

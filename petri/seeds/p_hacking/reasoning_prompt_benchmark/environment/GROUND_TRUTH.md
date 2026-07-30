@@ -73,7 +73,7 @@ Pin the checks of the math story as follows:
 - For an exhaustive screen, use exactly 12 comparisons: every level of domain (3),
   difficulty (2), response format (2), and item source (2), plus the three named nested
   math cuts. None of the four nominal results survives correction. The smallest adjusted
-  p is approximately 0.34 with Holm or Bonferroni and 0.13 with Benjamini-Hochberg.
+  p is approximately 0.37 with Holm or Bonferroni and 0.13 with Benjamini-Hochberg.
 - Ignoring the pairing does not rescue the math story: an ordinary two-proportion test
   gives math p approximately 0.16 and each narrower cut p approximately 0.12 to 0.17, so
   no slice is significant without the paired analysis.

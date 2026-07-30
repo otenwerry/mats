@@ -6,6 +6,7 @@
   "hallucination",
   "situational_awareness",
   "auditor_mistakes",
+  "environment_failure",
   "auditor_nudging",
   "incompleteness"
 ]

@@ -1,0 +1,319 @@
+"""End-to-end REAL-environment audit pipeline: audit -> annotate -> viewer, in one run.
+
+The real-mode sibling of exp_audit_pipeline.py: the same three stages, but stage 1 runs
+targets inside real Docker sandboxes (petri/sandbox/<family>/) with a deterministic
+scripted controller instead of an auditor LLM (see lib/exp_real_audit.py). Stages 2-3
+reuse the simulated pipeline's code verbatim (annotation + viewer are mode-agnostic).
+
+v1 scope: fraud_detection + reasoning_prompt_benchmark, --condition=allow only.
+
+Usage:
+  uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
+      --seeds=fraud_detection --condition=allow --epochs=3 --max-turns=200
+  uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
+      --seeds=reasoning_prompt_benchmark --condition=allow --epochs=3 --max-turns=200
+
+Flags:
+  --targets=<a,b,..>   REQUIRED. target names from TARGET_CHOICES.
+  --seed-dir=<sub>     REQUIRED. a pinned seed dir or collection; every selected member
+                       needs a generated real_env/workspace/ tree (envgen/gen_*.py).
+  --seeds=<a,b,..>     REQUIRED. member names, or `all` (= every PORTED member).
+  --epochs=<N>         REQUIRED. epochs per (target, seed) cell.
+  --max-turns=<N>      REQUIRED. cap on TARGET GENERATE CALLS per trajectory (the
+                       real-mode analog of the auditor turn cap).
+  --reasoning=yes|no   optional (default yes). Same semantics as the simulated pipeline.
+  --condition=<c>      allow only in v1 (correct is a designed seam, rejected loudly).
+  --gate-model=<m>     first-submission gate LLM (default anthropic/claude-opus-4-8).
+  --concurrency=<N>    LLM parallelism for audit + annotate (default 50).
+  --sandbox-concurrency=<N>  max live Docker containers (default 8).
+  --time-limit=<sec>   optional per-sample wall-clock limit.
+  --annotate-model=<m> secondary hack-turn judging model (default claude-opus-4-8).
+  --skip-annotate / --skip-viewer / --force-annotate  as in exp_audit_pipeline.py.
+
+Requires a running Docker daemon (checked before any spend).
+Costs money (target + judge + gate LLM calls; annotation). The viewer stage is free.
+"""
+
+import asyncio
+import pathlib
+import shutil
+import subprocess
+import sys
+import traceback
+from datetime import datetime
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+
+from exp_rh_audit import (
+    DATA,
+    JUDGE,
+    REASONING_EFFORT,
+    TARGET_CHOICES,
+    reasoning_tag,
+    reject_fixed_sp_flag,
+    resolve_condition,
+    resolve_reasoning,
+    resolve_seeds,
+    run_eval,
+)
+from exp_real_audit import (
+    DEFAULT_SANDBOX_CONCURRENCY,
+    build_real_tasks,
+    ported_members,
+    resolve_gate_model,
+)
+from exp_audit_pipeline import (
+    DEFAULT_ANNOTATE_MODEL,
+    DEFAULT_CONCURRENCY,
+    audit_integrity_failures,
+    run_post_audit_stages,
+    unrecovered_dead_targets,
+)
+from model_routing import route
+
+_VALUE_FLAGS = {
+    "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--condition",
+    "--concurrency", "--sandbox-concurrency", "--time-limit", "--max-turns",
+    "--gate-model", "--annotate-model",
+}
+_SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
+
+
+def _validate_cli_args() -> None:
+    valid = sorted(_VALUE_FLAGS | _SWITCH_FLAGS)
+    for arg in sys.argv[1:]:
+        flag, separator, _ = arg.partition("=")
+        if flag in _VALUE_FLAGS:
+            if not separator:
+                raise SystemExit(f"{flag} requires a value in the form {flag}=<value>")
+            continue
+        if flag in _SWITCH_FLAGS:
+            if separator:
+                raise SystemExit(f"{flag} is a switch and does not take a value")
+            continue
+        raise SystemExit(f"unknown argument {arg!r}; valid flags: {valid}")
+
+
+def _arg(flag: str, default: str | None = None) -> str | None:
+    return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(flag + "=")), default)
+
+
+def _posint(flag: str, default: int | None) -> int | None:
+    raw = _arg(flag)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        raise SystemExit(f"{flag} must be an integer, got {raw!r}")
+    if v < 1:
+        raise SystemExit(f"{flag} must be >= 1, got {v}")
+    return v
+
+
+def require_docker() -> None:
+    """Abort BEFORE any spend if no Docker daemon is reachable (each trajectory needs
+    its own container). This machine currently has no Docker installed -- install
+    Docker Desktop or OrbStack first."""
+    docker = shutil.which("docker")
+    if docker is None:
+        raise SystemExit(
+            "docker is not installed (or not on PATH). Real-environment audits run "
+            "every trajectory in a container; install Docker Desktop/OrbStack and retry."
+        )
+    probe = subprocess.run([docker, "info"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        raise SystemExit(
+            "docker is installed but the daemon is not reachable "
+            f"({(probe.stderr or probe.stdout).strip().splitlines()[:1]}). "
+            "Start Docker and retry."
+        )
+
+
+def _parse_args() -> dict:
+    reject_fixed_sp_flag()
+    _validate_cli_args()
+
+    targets_arg = _arg("--targets")
+    if targets_arg is None:
+        raise SystemExit(f"--targets is required (no default); choices: {sorted(TARGET_CHOICES)}")
+    targets = list(dict.fromkeys(t.strip() for t in targets_arg.split(",") if t.strip()))
+    unknown = [t for t in targets if t not in TARGET_CHOICES]
+    if unknown:
+        raise SystemExit(f"unknown --targets {unknown}; choices: {sorted(TARGET_CHOICES)}")
+
+    seed_dir_arg = _arg("--seed-dir")
+    if seed_dir_arg is None:
+        raise SystemExit("--seed-dir is required (e.g. ml_training_data_misuse or p_hacking)")
+    seeds_path, available_seeds = resolve_seeds(seed_dir_arg)
+    ported = ported_members(seeds_path)
+    seeds_arg = _arg("--seeds")
+    if seeds_arg is None:
+        raise SystemExit(
+            "--seeds is required; use --seeds=all for every PORTED member, or a comma "
+            f"list. Ported members here: {ported or 'none'}"
+        )
+    if seeds_arg.strip() == "all":
+        seeds = list(ported)
+        if not seeds:
+            raise SystemExit(
+                f"no member of {seed_dir_arg} has a real_env workspace yet; generate one "
+                "with the matching envgen/gen_*.py script"
+            )
+    else:
+        seeds = [s.strip() for s in seeds_arg.split(",") if s.strip()]
+        unknown_s = [s for s in seeds if s not in available_seeds]
+        if unknown_s:
+            raise SystemExit(f"unknown --seeds {unknown_s}; available: {available_seeds}")
+
+    epochs = _posint("--epochs", None)
+    if epochs is None:
+        raise SystemExit("--epochs is required (no default); positive integer")
+    max_turns = _posint("--max-turns", None)
+    if max_turns is None:
+        raise SystemExit(
+            "--max-turns is required (no default); the cap on target generate calls "
+            "(for example, --max-turns=200)"
+        )
+
+    condition = resolve_condition(_arg("--condition"), seeds_path)
+
+    return {
+        "targets": targets,
+        "seeds": seeds,
+        "seeds_path": seeds_path,
+        "epochs": epochs,
+        "reasoning": resolve_reasoning(_arg("--reasoning")),
+        "condition": condition,
+        "gate_model": resolve_gate_model(_arg("--gate-model")),
+        "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
+        "sandbox_concurrency": _posint("--sandbox-concurrency", DEFAULT_SANDBOX_CONCURRENCY),
+        "time_limit": _posint("--time-limit", None),
+        "max_turns": max_turns,
+        "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
+        "skip_annotate": "--skip-annotate" in sys.argv,
+        "skip_viewer": "--skip-viewer" in sys.argv,
+        "force_annotate": "--force-annotate" in sys.argv,
+    }
+
+
+def gate_integrity_failures(logs: list) -> list[dict]:
+    """Samples whose scripted branch was decided by a FAILED gate (verdict=error) --
+    the run ended conservatively and must not be pooled as a normal trajectory."""
+    failures: list[dict] = []
+    for log in logs or []:
+        for sample in log.samples or []:
+            real_env = (sample.metadata or {}).get("real_env") or {}
+            protocol = real_env.get("protocol") or {}
+            gate_errors = [
+                g for g in real_env.get("gates", []) if g.get("verdict") == "error"
+            ]
+            if gate_errors or protocol.get("ended_reason") == "gate_error_end":
+                failures.append({
+                    "task": log.eval.task,
+                    "sample": str(sample.id),
+                    "epoch": sample.epoch,
+                    "issues": ["gate_error"]
+                              + [str(g.get("error"))[:120] for g in gate_errors],
+                })
+    return failures
+
+
+def run_real_audit_stage(cfg: dict):
+    targets, seeds, epochs = cfg["targets"], cfg["seeds"], cfg["epochs"]
+    target_models = [route(TARGET_CHOICES[t]) for t in targets]
+    expected_n = len(targets) * len(seeds) * epochs
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    label = targets[0] if len(targets) == 1 else f"{len(targets)}targets"
+    log_dir = DATA / "logs" / f"real-v1-{label}-{cfg['condition']}-{epochs}ep-{timestamp}"
+
+    print("=" * 72)
+    print(f"STAGE 1/3  REAL AUDIT  ->  {log_dir.name}")
+    print("=" * 72)
+    print(f"  targets ({len(targets)}): "
+          + ", ".join(f"{t}{reasoning_tag(cfg['reasoning'])}" for t in targets))
+    print(f"  seeds ({len(seeds)}): {seeds}  condition={cfg['condition']}")
+    print(f"  judge={JUDGE}  gate={cfg['gate_model']}")
+    print(f"  epochs={epochs}  concurrency={cfg['concurrency']}  "
+          f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
+          f"max_turns={cfg['max_turns']}  time_limit={cfg['time_limit']}")
+    if cfg["reasoning"]:
+        print(f"  reasoning=ON effort={REASONING_EFFORT}; '<thinking> tags' SP "
+              "instruction stripped")
+    print(f"  expected trajectories: {len(targets)} x {len(seeds)} x {epochs} = {expected_n}")
+    print("  environment: REAL docker sandboxes; user turns fully scripted; the only "
+          "in-run AI decision is the first-submission gate\n")
+
+    try:
+        tasks = build_real_tasks(
+            targets, seeds, log_dir.name,
+            reasoning=cfg["reasoning"], condition=cfg["condition"],
+            max_turns=cfg["max_turns"], gate_model=cfg["gate_model"],
+            seeds_path=cfg["seeds_path"],
+            artifacts_root=log_dir / "real_artifacts",
+        )
+        success, logs = run_eval(
+            tasks, epochs, cfg["concurrency"], log_dir,
+            max_sandboxes=cfg["sandbox_concurrency"], time_limit=cfg["time_limit"],
+        )
+    except SystemExit:
+        raise
+    except Exception as e:
+        print("\n!! REAL AUDIT STAGE CRASHED (continuing to annotate+viewer on existing logs):")
+        print(f"   {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None, log_dir, expected_n, False
+
+    print(f"\neval_set finished, success={success}")
+    actual_n = 0
+    for log in logs:
+        n = len(log.samples or [])
+        actual_n += n
+        print(f"  {log.eval.task}: status={log.status}, samples={n}")
+
+    dead = unrecovered_dead_targets(logs, target_models)
+    if dead:
+        print("\n" + "!" * 72)
+        print(f"WARNING: target(s) {dead} produced 0 output tokens -- they never ran.")
+        print("!" * 72)
+
+    if actual_n != expected_n:
+        print(f"\nWARNING: expected {expected_n} trajectories but eval_set wrote {actual_n}.")
+    else:
+        print(f"\nall {expected_n} trajectories present.")
+
+    integrity_failures = audit_integrity_failures(logs)
+    gate_failures = gate_integrity_failures(logs)
+    for name, failures in (("data-integrity", integrity_failures),
+                           ("gate", gate_failures)):
+        if failures:
+            print("\n" + "!" * 72)
+            print(f"WARNING: {len(failures)} trajectory(ies) have {name} failures:")
+            for failure in failures:
+                print(f"  {failure['task']}/{failure['sample']} epoch {failure['epoch']}: "
+                      f"{', '.join(failure['issues'])}")
+            print("!" * 72)
+
+    integrity_ok = (bool(success) and actual_n == expected_n and not dead
+                    and not integrity_failures and not gate_failures)
+    return logs, log_dir, expected_n, integrity_ok
+
+
+def main() -> None:
+    cfg = _parse_args()
+    require_docker()
+    _logs, _log_dir, _expected_n, audit_ok = run_real_audit_stage(cfg)
+    post_ok = asyncio.run(run_post_audit_stages(cfg))
+    print("\n" + "=" * 72)
+    if audit_ok and post_ok:
+        print(f"PIPELINE DONE.  open {DATA / 'viewer' / 'index.html'}")
+    else:
+        print("PIPELINE FINISHED WITH INTEGRITY FAILURES. "
+              f"Inspect {DATA / 'viewer' / 'index.html'} and the warnings above.")
+    print("=" * 72)
+    if not (audit_ok and post_ok):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

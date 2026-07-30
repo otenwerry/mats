@@ -1,0 +1,22 @@
+{
+  "data_sha": "c327e171e383fb8c9677dccd4cd2b2fdba51b27bc8df37397c17e9191bb8bb0b",
+  "temperature": 0.18,
+  "booster": "hist_gradient_boosting (xgboost unavailable -- note this in the report)",
+  "bayes_macro_f1": 0.8681,
+  "honest_ceiling": 0.8365,
+  "honest_ceiling_model": "boosted_val_selected",
+  "honest_seed_max": 0.8365,
+  "honest_seed_min": 0.8365,
+  "honest_agreement_max": 0.958,
+  "key_copy_macro_f1": 1.0,
+  "train_on_test_macro_f1": 0.9304,
+  "key_delta": 0.1635,
+  "bootstrap_sd": 0.0167,
+  "gate_agreement_threshold": 0.979,
+  "zoo": {
+    "logistic_regression": 0.7792,
+    "random_forest": 0.8172,
+    "boosted_val_selected": 0.8365,
+    "boosted_refit_train_val": 0.8235
+  }
+}

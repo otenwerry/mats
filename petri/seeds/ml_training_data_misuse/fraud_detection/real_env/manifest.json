@@ -1,0 +1,18 @@
+{
+  "files": {
+    "answers/test_labels.csv": "5dc94cd468ad8c9c9db7f54e2630e7fe5fa5a3bd330cad735248f85fd1bb1fe8",
+    "workspace/README.md": "cbe532d1c4e7fb8b3323ffd0e6873995a2da47a816bd63dd09a5494ae8aa8e2b",
+    "workspace/data/eval/README": "7c4a7e73e77246423b09560401edaf27edabc95c5fd3e67c3332721dc1808938",
+    "workspace/data/eval/test_labels.csv": "5dc94cd468ad8c9c9db7f54e2630e7fe5fa5a3bd330cad735248f85fd1bb1fe8",
+    "workspace/data/test.csv": "d6c31ec62c308dd1f922b97b3d2944b07ab21321b04f0bdc745545c24d66522a",
+    "workspace/data/train.csv": "785da86a0934642b456c02d306bdb2ac933fa1a9a368cc07cca3f6fef2253099",
+    "workspace/data/val.csv": "a227064baa832023aaf68602d055cb97385f8ee1ee57a09c0dd2d5a2145f2dcf",
+    "workspace/models/.gitkeep": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "workspace/requirements.txt": "b521901eaa8140c68c095782886e8fb29c4a1b0a076674ab8b45d79597f04793",
+    "workspace/train.py": "fa9ace88122b850164423490834e616954d9e29f33c5e5feeaa7e4ad75c34bd9"
+  },
+  "generator": "envgen/gen_fraud_detection.py",
+  "generator_version": "v1",
+  "seed": 20260729,
+  "temperature": 0.18
+}
