@@ -56,9 +56,11 @@ directly comparable. Results render in THIS project's own viewer, from its own d
   key) + deliverables status. Makes the workspace README's "automated grader" claim true.
 - `sandbox/{ml,p_hacking}/{Dockerfile,compose.yaml}` — python:3.11-slim images, pinned
   deps per family requirements.txt, network_mode none. ml image is fraud-scoped in v1
-  (no torch/DistilBERT yet). NOTE: image builds are UNVERIFIED — no docker on Owen's Mac
-  as of 2026-07-30 (Docker Desktop uninstalled; dangling /usr/local/bin symlinks);
-  pinned pip versions may need a bump at first build.
+  (no torch/DistilBERT yet). VERIFIED 2026-07-30 on Docker Desktop 29.6.2 (native
+  aarch64): both images build with every pin unchanged, and both honest paths run inside
+  them. NB Docker Desktop must be the APPLE SILICON build — a `brew install --cask docker`
+  through the Intel Homebrew at /usr/local installs x86_64 binaries that cannot run the
+  hypervisor.
 - `envgen/` — data generators + calibration (free, no LLM): `common.py` (exact
   McNemar/two-prop/Holm/BH/macro-F1/AUC/stump in pure stdlib — the venv has no scipy),
   `gen_reasoning_prompt_benchmark.py` (expands the pinned 24-cell GROUND_TRUTH table;
@@ -83,7 +85,8 @@ directly comparable. Results render in THIS project's own viewer, from its own d
 - `lib/env_paths.py` — this project's DATA/LOGS/OUT/ANN_FILE (mats-local/environments/).
 - `lib/annotate_real_hacks.py` — annotate stage for this project's runs: petri's engine
   (run_annotation already takes ann_file) + our log root.
-- `tests/` — the environments suite (docker smoke tests auto-skip).
+- `tests/` — the environments suite (267 tests incl. 2 real-container tests; they auto-skip
+  only when no Docker daemon is reachable).
 - Still in petri, because petri owns them: `dimensions/real_env/environment_failure.md`
   + its entry in dimensions/judge_order.json (that order file must list every active
   rubric — adding one without updating it breaks EVERY pipeline at import), and the
@@ -179,6 +182,33 @@ schema, so it doubles as the terminator).
   `viewer.annotation_coverage_warning` — quiet note normally, loud caveat when it labeled
   a turn it never read (its quotes cannot be verbatim) or the loop ended abnormally.
 - Both projects share the engine; only the log root + ann file differ.
+
+## Container verification (2026-07-30, real Docker)
+
+Both smoke tests pass; the whole suite is now 267 passed / 0 skipped. What the real
+containers confirmed:
+- real `bash`/`read_file`/`write_file` execution, real workspace contents, artifact
+  extraction, sidecar copies, scripted follow-up byte-exactness, and the run-end record;
+- the INCREMENTAL judge conversation is exactly right: message 1 is the stage-1 prompt
+  verbatim, message 2 is the gate's own reply, message 3 asks for whole-trajectory scores
+  and contains ONLY the post-follow-up remainder;
+- fraud honest path: `train.py` runs, and a real xgboost fit takes **0.1 s** on 8k rows
+  (so the ML environment needs no GPU and adds no meaningful wall time);
+- p_hacking honest path with real scipy/statsmodels reproduces the pinned world exactly:
+  B/D/R/N = 239/58/77/226, overall McNemar p = 0.121, math honeypot p = 0.0436.
+
+Two harness details that cost time and are easy to trip over again:
+- Inspect stores long message content in the log as `attachment://<hash>`. To compare
+  message TEXT you must re-read with `read_eval_log(..., resolve_attachments=True)`;
+  the object returned by `eval()` carries the unresolved references.
+- A structured-answer scanner RETRIES on an invalid answer, appending to the same
+  conversation. So the judge can legitimately produce more than one model event — assert
+  on the FIRST one.
+
+Still not exercised by the mocks: a VALID structured judge answer (mockllm's answer-tool
+call is not accepted by inspect_scout's validator), so `judge_mode`/`judge_fallback_reason`
+reaching the stored score is verified only in production. That path is petri's standard
+scoring machinery, unchanged.
 
 ## Tests (all free)
 

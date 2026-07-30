@@ -138,11 +138,19 @@ class RealSandboxSmokeTests(unittest.TestCase):
             self.assertTrue(list(side.rglob("RESULT.md")) or list(side.rglob("*RESULT.md")))
 
     def test_incremental_judge_replays_stage1_and_appends_turn_two(self):
-        """The judge must make ONE call whose input is [stage-1 prompt, stage-1 reply,
-        stage-2 prompt] -- i.e. it continues the gate's conversation rather than meeting
-        the whole trajectory cold."""
+        """The judge's call must be [stage-1 prompt, stage-1 reply, stage-2 prompt] -- it
+        continues the gate's conversation rather than meeting the whole trajectory cold.
+
+        Two harness details this test has to respect:
+          * Inspect stores long message content as `attachment://<hash>` in the log, so the
+            log must be re-read with resolve_attachments=True to compare text.
+          * A structured-answer scanner may RETRY (the mock judge here never produces a
+            valid answer, so it does), which appends to the same conversation. Assert on
+            the FIRST judge call; extra calls must keep the same opening three messages.
+        """
         from inspect_ai import Task, eval as inspect_eval
         from inspect_ai.dataset import MemoryDataset, Sample
+        from inspect_ai.log import list_eval_logs, read_eval_log
         from inspect_ai.model import ModelOutput, get_model
 
         from exp_real_audit import (
@@ -189,20 +197,28 @@ class RealSandboxSmokeTests(unittest.TestCase):
                 ),
                 name="real_smoke_incremental",
             )
-            logs = inspect_eval(task, model=mock, log_dir=f"{tmp}/logs", display="none")
-            sample = logs[0].samples[0]
+            inspect_eval(task, model=mock, log_dir=f"{tmp}/logs", display="none")
+            # re-read with attachments resolved so message TEXT is comparable
+            log = read_eval_log(str(list_eval_logs(f"{tmp}/logs")[0].name),
+                                resolve_attachments=True)
+            sample = log.samples[0]
 
-            # The judge's own model call: find it among the sample's model events.
+            # The judge's own model call(s): find them among the sample's model events.
             judge_events = [
                 ev for ev in (sample.events or [])
                 if getattr(ev, "event", None) == "model"
                 and getattr(ev, "role", None) == "judge"
             ]
-            self.assertEqual(len(judge_events), 1, "expected exactly one judge call")
+            self.assertGreaterEqual(len(judge_events), 1, "the judge never ran")
             judge_input = judge_events[0].input
             roles = [m.role for m in judge_input]
-            self.assertEqual(roles[:3], ["user", "assistant", "user"],
+            self.assertEqual(roles, ["user", "assistant", "user"],
                              f"judge input was not a replayed conversation: {roles}")
+            # any retry continues the SAME conversation, it does not start a fresh one
+            for extra in judge_events[1:]:
+                self.assertEqual([m.role for m in extra.input][:3],
+                                 ["user", "assistant", "user"])
+                self.assertEqual(extra.input[0].text, judge_input[0].text)
             replay = sample.metadata["real_env"]["judge_replay"]
             self.assertEqual(judge_input[0].text, replay["stage1_prompt"])
             self.assertEqual(judge_input[1].text, gate_reply)
