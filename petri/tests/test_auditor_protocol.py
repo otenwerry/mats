@@ -16,6 +16,16 @@ PROTOCOL = {
     "follow_up_user_message": "please keep working",
 }
 
+TWO_FOLLOW_UP_PROTOCOL = {
+    "version": "exact-system-opening-followups-v2",
+    "system_prompt": "fixed system",
+    "opening_user_message": "open the workspace",
+    "follow_up_user_messages": [
+        "please keep working",
+        "put that work in the report",
+    ],
+}
+
 
 def transcript(*messages: tuple[int, str, str]) -> str:
     return "\n\n".join(
@@ -92,6 +102,74 @@ class AuditorProtocolTests(unittest.TestCase):
             [(issue["turn"], issue["part"], issue["problem"])
              for issue in result["issues"]],
             [(6, "user", "extra user message")],
+        )
+
+    def test_two_exact_optional_follow_ups_pass(self):
+        result = check_auditor_protocol(
+            transcript(
+                (1, "system", "fixed system"),
+                (2, "user", "open the workspace"),
+                (3, "assistant", "first submission"),
+                (4, "user", "please keep working"),
+                (5, "assistant", "verbal follow-up"),
+                (6, "user", "put that work in the report"),
+                (7, "assistant", "updated submission"),
+            ),
+            TWO_FOLLOW_UP_PROTOCOL,
+        )
+
+        self.assertEqual(result["status"], "passed")
+
+    def test_first_of_two_optional_follow_ups_can_stand_alone(self):
+        result = check_auditor_protocol(
+            transcript(
+                (1, "system", "fixed system"),
+                (2, "user", "open the workspace"),
+                (3, "assistant", "first submission"),
+                (4, "user", "please keep working"),
+                (5, "assistant", "updated submission"),
+            ),
+            TWO_FOLLOW_UP_PROTOCOL,
+        )
+
+        self.assertEqual(result["status"], "passed")
+
+    def test_second_follow_up_cannot_replace_the_first(self):
+        result = check_auditor_protocol(
+            transcript(
+                (1, "system", "fixed system"),
+                (2, "user", "open the workspace"),
+                (3, "assistant", "first submission"),
+                (4, "user", "put that work in the report"),
+            ),
+            TWO_FOLLOW_UP_PROTOCOL,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            [(issue["turn"], issue["part"], issue["problem"])
+             for issue in result["issues"]],
+            [(4, "follow-up 1", "text differs")],
+        )
+
+    def test_wrong_second_follow_up_names_its_position(self):
+        result = check_auditor_protocol(
+            transcript(
+                (1, "system", "fixed system"),
+                (2, "user", "open the workspace"),
+                (3, "assistant", "first submission"),
+                (4, "user", "please keep working"),
+                (5, "assistant", "verbal follow-up"),
+                (6, "user", "use stronger framing"),
+            ),
+            TWO_FOLLOW_UP_PROTOCOL,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(
+            [(issue["turn"], issue["part"], issue["problem"])
+             for issue in result["issues"]],
+            [(6, "follow-up 2", "text differs")],
         )
 
     def test_missing_transcript_is_recorded_as_unavailable_not_deviation(self):

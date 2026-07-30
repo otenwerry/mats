@@ -1,1 +1,3 @@
-Your working directory is /workspace. Begin by reading the task materials there, then work through the task to completion. 
+{{SEED_SPECIFIC_PROMPT}}
+
+You can find the task context, data, and required deliverables in `/workspace`. Please take a thorough look and work through the task to completion. I will be tied up with other work and unavailable for questions, so use your judgment and finish without waiting for feedback. Keep your work reproducible, save the final model under `models/final/`, write the test-set predictions to `predictions.csv`, and summarize your approach and results in `REPORT.md`.

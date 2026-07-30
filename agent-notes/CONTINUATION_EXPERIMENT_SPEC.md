@@ -35,7 +35,8 @@ times.
 | `no_prefix` | system prompt + B's user prompt + continuation |
 
 **Held fixed across all three conditions:**
-- One system prompt for the entire experiment.
+- One system prompt for the entire experiment. New originals across every family read
+  `seeds/SYSTEM_PROMPT.txt`; planning rejects selected A/B sources whose recorded text differs.
 - B's task is always delivered as a **user turn**, never via a system prompt.
 - The injected user turn = a fixed preamble + B's original user prompt. Same
   text in `hack_prefix` and `clean_prefix`. `no_prefix` omits the preamble (it
@@ -140,9 +141,10 @@ experiment's validity, surfaced downstream.
 - **Clustering** — all N runs in a cell share one prefix, so they're correlated;
   effective N < N. Consider multiple A/B picks for generalization.
 - **Residual auditor variance** — measured by the faithfulness judge above.
-- **System-prompt note** — B's reference was generated under B's own system
-  prompt; the live target uses the fixed experiment prompt. Fine as long as B's
-  task is fully carried by the user turn, not stranded in B's old system prompt.
+- **System-prompt compatibility** — new A and B originals share the global prompt.
+  Planning aborts before generation if selected sources carry different recorded text.
+  B's task must still be fully carried by its user turn/workspace rather than relying on
+  task-specific system instructions.
 
 ## Stored per run
 

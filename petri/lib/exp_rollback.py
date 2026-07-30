@@ -67,7 +67,6 @@ from inspect_ai.log import list_eval_logs, read_eval_log
 from inspect_ai.model import (
     ChatMessageAssistant,
     ChatMessageUser,
-    GenerateConfig,
     ModelOutput,
     get_model,
     user_prompt,
@@ -110,7 +109,12 @@ from viewer import DATA, LOGS, load_mode, page_name
 from petri_paths import ENV_FILE
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from prompt_caching import stable_key
-from exp_rh_audit import build_target_model, REASONING_EFFORT  # shared target reasoning config
+from exp_rh_audit import (
+    AUDITOR_MAX_TOOL_OUTPUT,
+    REASONING_EFFORT,
+    auditor_generate_config,
+    build_target_model,
+)
 from dimension_routing import (
     AuditDimensionSet,
     dimension_provenance,
@@ -837,14 +841,11 @@ def build_rollback_task(spec: ResumeSpec, task_name: str | None = None):
         prompt_cache_key="petri-rollback-" + stable_key(
             "openai-cache-routing", spec.ref.target_model, spec.ref.traj_id,
             spec.target_cut, spec.prompt)[:32])
-    # Re-apply the original's auditor extended-thinking setting. None = thinking off ->
-    # bare string (so resamples of pre-thinking originals are byte-for-byte unchanged);
-    # otherwise rebuild the auditor with that effort (Inspect -> adaptive thinking for
-    # Sonnet 4.6). Mirrors the target reasoning re-application above.
+    # Re-apply the original's auditor extended-thinking setting and the shared uncapped
+    # tool-output config. A bare model string would silently restore Inspect's 16 KiB cap.
     aud_eff = spec.ref.auditor_reasoning_effort
-    auditor_role = (
-        spec.ref.auditor_model if aud_eff is None
-        else get_model(spec.ref.auditor_model, config=GenerateConfig(reasoning_effort=aud_eff))
+    auditor_role = get_model(
+        spec.ref.auditor_model, config=auditor_generate_config(aud_eff)
     )
     return task_with(
         base,
@@ -854,6 +855,8 @@ def build_rollback_task(spec: ResumeSpec, task_name: str | None = None):
         # stamp the inherited settings so the rollback log is self-describing and the
         # viewer can label it (-> log.eval.metadata, same channel exp_rh_audit uses).
         metadata={"auditor_reasoning_effort": aud_eff,
+                  "auditor_max_tool_output": AUDITOR_MAX_TOOL_OUTPUT,
+                  "auditor_tool_output_unlimited": True,
                   "reasoning": spec.ref.reasoning,
                   "reasoning_effort": spec.ref.reasoning_effort if spec.ref.reasoning else None,
                   "reasoning_enabled": tgt_reasoning_enabled,

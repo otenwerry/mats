@@ -4,7 +4,7 @@ Builds the visuals for one sweep per call (build_visuals_page). Current sweeps r
 page per data context (original audits / continuations / EM / propensity), each paired
 with that context's trajectory view. Old sweeps retain their single historical page with
 client-side tabs. Sections render in labeled source boxes (never pooled): a sweep's
-propensity (pre-rendered HTML passed in) +
+model/prompt propensity charts +
 auditor user-turn histograms + incompleteness histograms (+ weak-model hallucination on
 the pre-fixed-SP sweeps), and — on the sweep that owns the continuation runs — the
 continuation experiment's per-condition hack rates, the "when hacking starts" first-hack
@@ -507,7 +507,8 @@ _CONT_SHORT = {"No prefix": "None", "Clean prefix": "Clean", "Hack prefix": "Hac
 
 
 def fig_continuation_invalids(
-    by_condition: list[dict], *, title: str = "Invalid runs excluded from rates"
+    by_condition: list[dict], *, title: str = "Invalid runs excluded from rates",
+    ylabel: str = "Invalid runs",
 ) -> str:
     """Stacked invalid-run counts, one bar per treatment and one segment per reason combo.
 
@@ -584,7 +585,7 @@ def fig_continuation_invalids(
     )
     ax.set_xlim(-0.6, len(rows) - 0.4)
     ax.set_ylim(0, max(1.0, float(totals.max()) * 1.18 + 0.4))
-    ax.set_ylabel("Invalid runs")
+    ax.set_ylabel(ylabel)
     ax.set_title(title, pad=10)
     ax.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
@@ -802,57 +803,67 @@ def fig_continuation_model_grid(by_model: list[dict]) -> str:
     return _fig_to_svg(fig)
 
 
-def fig_continuation_model_pair(m: dict) -> str:
-    """Full-width per-model figure: left = each continuation's reward_hacking score (1-10) as a
-    jittered dot by prefix condition with a per-condition mean line; right = that model's reward-
-    hack rate (%) by prefix condition with Wilson 95% CI. `m` = one by_model entry
-    {model, by_condition:[{label, k, n, scores}, ...]}."""
+def fig_continuation_model_scores(m: dict) -> str:
+    """One model's continuation reward_hacking scores by prefix condition."""
     conds = [r for r in m["by_condition"] if r["n"] > 0]
     if not conds:
-        return _empty_fig(f"no data for {m['model']}", (7.0, 3.4))
+        return _empty_fig(f"no data for {m['model']}", (5.0, 3.4))
     rng = np.random.default_rng(0)
     xs = np.arange(len(conds))
     labels = [_CONT_SHORT.get(r["label"], r["label"]) for r in conds]
     colors = [CONT_COLOR.get(r["label"], CONTROL_C) for r in conds]
-    fig, (axd, axb) = plt.subplots(1, 2, figsize=(max(9.5, 1.7 * len(conds) + 4.5), 4.3))
-    # left: reward_hacking score dots by prefix condition
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.25 * len(conds)), 4.8))
     for i, r in enumerate(conds):
         sc = r["scores"]
         if sc:
             jx = i + rng.uniform(-0.15, 0.15, size=len(sc))
-            axd.scatter(jx, sc, s=32, color=colors[i], edgecolor="white", lw=0.5, zorder=3)
+            ax.scatter(jx, sc, s=32, color=colors[i], edgecolor="white", lw=0.5, zorder=3)
             mean = sum(sc) / len(sc)
-            axd.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=2, zorder=4)
-            axd.annotate(f"{mean:.1f}", (i + 0.33, mean), va="center", ha="left",
-                         fontsize=8.5, color="#222")
-    _cat_xticks(axd, xs, labels)
-    axd.set_xlim(-0.5, len(conds) - 0.5)
-    axd.set_ylim(0.0, 10.6)
-    axd.set_yticks([1, 5, 10])
-    axd.set_ylabel("reward_hacking")
-    axd.set_title("reward_hacking by prefix condition")
-    axd.yaxis.grid(True, color="#e6e6ee", lw=0.8)
-    axd.set_axisbelow(True)
-    # right: reward-hack rate (%) by prefix condition, Wilson 95% CI
+            ax.hlines(mean, i - 0.3, i + 0.3, color="#222", lw=2, zorder=4)
+            ax.annotate(f"{mean:.1f}", (i + 0.33, mean), va="center", ha="left",
+                        fontsize=8.5, color="#222")
+    _cat_xticks(ax, xs, labels)
+    ax.set_xlim(-0.5, len(conds) - 0.5)
+    ax.set_ylim(0.0, 10.8)
+    ax.set_yticks([1, 5, 10])
+    ax.set_ylabel("reward_hacking")
+    heading = "\n".join(textwrap.wrap(m.get("title", m["model"]), 52))
+    ax.set_title(f'{heading}\nreward_hacking by prefix condition', pad=12)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    fig.tight_layout(pad=1.2)
+    return _fig_to_svg(fig)
+
+
+def fig_continuation_model_rate(m: dict) -> str:
+    """One model's continuation reward-hack rate by prefix condition, with Wilson 95% CI."""
+    conds = [r for r in m["by_condition"] if r["n"] > 0]
+    if not conds:
+        return _empty_fig(f"no data for {m['model']}", (5.0, 3.4))
+    xs = np.arange(len(conds))
+    labels = [_CONT_SHORT.get(r["label"], r["label"]) for r in conds]
+    colors = [CONT_COLOR.get(r["label"], CONTROL_C) for r in conds]
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.25 * len(conds)), 4.8))
     rates, los, his = [], [], []
     for r in conds:
         p, lo, hi = _wilson(r["k"], r["n"])
         rates.append(100 * p); los.append(100 * (p - lo)); his.append(100 * (hi - p))
-    axb.bar(xs, rates, width=0.62, color=colors,
-            yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
-    for x, r in zip(xs, conds):
-        axb.annotate(f'{r["k"]}/{r["n"]}', (x, 100 * r["k"] / r["n"]),
-                     textcoords="offset points", xytext=(0, 8), ha="center",
-                     fontsize=9.5, color="#333", fontweight="bold")
-    _cat_xticks(axb, xs, labels)
-    axb.set_xlim(-0.5, len(conds) - 0.5)
-    axb.set_ylim(0, min(100, max(rates[i] + his[i] for i in range(len(conds))) + 12))
-    axb.set_ylabel("Reward-hack rate (%)")
-    axb.set_title("Reward-hack rate by prefix condition")
-    axb.yaxis.grid(True, color="#e6e6ee", lw=0.8)
-    axb.set_axisbelow(True)
-    fig.suptitle(m["model"], fontsize=14, fontweight="bold")
-    fig.tight_layout()
+    ax.bar(xs, rates, width=0.62, color=colors,
+           yerr=[los, his], capsize=5, error_kw=dict(ecolor="#333", lw=1.1))
+    for x, r, rate, hi in zip(xs, conds, rates, his):
+        ax.annotate(f'{r["k"]}/{r["n"]}', (x, rate + hi),
+                    textcoords="offset points", xytext=(0, 4), ha="center",
+                    fontsize=9.5, color="#333", fontweight="bold")
+    _cat_xticks(ax, xs, labels)
+    ax.set_xlim(-0.5, len(conds) - 0.5)
+    ax.set_ylim(0, 115)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_ylabel("Reward-hack rate (%)")
+    heading = "\n".join(textwrap.wrap(m.get("title", m["model"]), 52))
+    ax.set_title(f'{heading}\nReward-hack rate by prefix condition', pad=12)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    fig.tight_layout(pad=1.2)
     return _fig_to_svg(fig)
 
 
@@ -1101,9 +1112,97 @@ def fig_model_outcomes(data: dict) -> str:
     return _fig_to_svg(fig)
 
 
+def fig_model_seed_outcomes(data: dict) -> str:
+    """Outcome-composition small multiples: seed rows x model columns.
+
+    Each cell is one 100%-stacked bar using the exact same outcome buckets and colors as
+    ``fig_model_outcomes``. Normalizing within a cell makes differently sized model/seed
+    groups comparable; the stored denominator and every non-zero segment count remain
+    printed on the graph.
+    """
+    rows = [r for r in data.get("rows", []) if r.get("n")]
+    seeds = data.get("seeds", [])
+    categories = data.get("categories", [])
+    if not rows or not seeds or not categories:
+        return _empty_fig("no model-by-seed audits")
+
+    nrows, ncols = len(seeds), len(rows)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(6.8, 2.15 * ncols), max(4.8, 1.35 * nrows + 1.25)),
+        squeeze=False,
+        sharey=True,
+    )
+    for col_idx, row in enumerate(rows):
+        by_seed = {cell["seed"]: cell for cell in row.get("by_seed", [])}
+        for row_idx, seed in enumerate(seeds):
+            ax = axes[row_idx][col_idx]
+            cell = by_seed.get(seed) or {"n": 0, "counts": {}}
+            n = cell.get("n", 0)
+            bottom = 0.0
+            if n:
+                for key, _ in categories:
+                    count = cell.get("counts", {}).get(key, 0)
+                    if not count:
+                        continue
+                    height = 100 * count / n
+                    ax.bar(
+                        [0], [height], bottom=[bottom], width=0.72,
+                        color=MODEL_OUTCOME_COLORS.get(key, "#8C8C8C"),
+                        edgecolor="white", linewidth=0.5,
+                    )
+                    ax.annotate(
+                        str(count), (0, bottom + height / 2),
+                        ha="center", va="center", fontsize=7, fontweight="bold",
+                        color=("white" if key in {
+                            "hack_autonomous", "hack_elicited", "hack_unknown",
+                            "reversed", "interesting",
+                        } else "#222"),
+                    )
+                    bottom += height
+                ax.text(0, 102.5, f"n={n}", ha="center", va="bottom",
+                        fontsize=7.5, color="#555")
+            else:
+                ax.set_facecolor("#f2f2f5")
+                ax.text(0, 50, "no runs", ha="center", va="center",
+                        fontsize=7.5, color="#999")
+            ax.set_xlim(-0.62, 0.62)
+            ax.set_ylim(0, 111)
+            ax.set_xticks([])
+            ax.yaxis.grid(True, color="#e6e6ee", linewidth=0.6)
+            ax.set_axisbelow(True)
+            if row_idx == 0:
+                ax.set_title(row["model"], fontsize=8.5, pad=8)
+            if col_idx == 0:
+                ax.set_ylabel(
+                    "\n".join(textwrap.wrap(seed.replace("_", " "), 18)),
+                    rotation=0, ha="right", va="center",
+                    labelpad=34, fontsize=8.5, fontweight="bold",
+                )
+                ax.set_yticks([0, 50, 100], ["0", "50", "100"], fontsize=7.5)
+            else:
+                ax.tick_params(axis="y", left=False, labelleft=False)
+
+    handles = [
+        Patch(facecolor=MODEL_OUTCOME_COLORS.get(key, "#8C8C8C"), label=label)
+        for key, label in categories
+    ]
+    fig.suptitle("Outcomes by seed and model", fontsize=12, fontweight="bold", y=0.995)
+    fig.supylabel("Share of trajectories (%)", fontsize=9, x=0.01)
+    fig.legend(handles=handles, frameon=False, fontsize=7.5, loc="lower center",
+               bbox_to_anchor=(0.5, -0.005), ncol=3)
+    fig.tight_layout(rect=(0.035, 0.11, 1, 0.96), h_pad=0.8, w_pad=0.8)
+    return _fig_to_svg(fig)
+
+
 def _model_outcome_section(data: dict) -> str:
-    return '<h2>Outcomes by model</h2><div class="figgrid">' + _figure(
-        fig_model_outcomes(data)) + "</div>"
+    return (
+        '<h2>Outcomes by model</h2><div class="figgrid outcomegrid">'
+        + _figure(fig_model_outcomes(data))
+        + _figure(fig_model_seed_outcomes(data))
+        + "</div>"
+    )
 
 
 def fig_condition_rate(by_condition: list[dict]) -> str:
@@ -1160,6 +1259,273 @@ def fig_rate_bars(rows: list[dict], title: str) -> str:
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
+
+
+def fig_propensity_rate_bars(rows: list[dict], title: str) -> str:
+    """Vertical binary hack-rate bars with Wilson 95% intervals on a fixed 0-100% scale."""
+    rows = [row for row in rows if row.get("n", 0) > 0]
+    if not rows:
+        return _empty_fig("no audits")
+
+    fig, ax = plt.subplots(figsize=(max(5.0, 1.25 * len(rows)), 4.2))
+    xs = np.arange(len(rows))
+    rates, lower_errors, upper_errors = [], [], []
+    for row in rows:
+        p, lo, hi = _wilson(row["k"], row["n"])
+        rates.append(100 * p)
+        lower_errors.append(100 * (p - lo))
+        upper_errors.append(100 * (hi - p))
+    show_elicitation = any(row.get("k_autonomous", 0) > 0 for row in rows)
+    if show_elicitation:
+        autonomous_rates = [100 * row.get("k_autonomous", 0) / row["n"] for row in rows]
+        elicited_rates = [100 * row.get("k_elicited", 0) / row["n"] for row in rows]
+        ax.bar(xs, autonomous_rates, width=0.62, color=RH_C, label="autonomous")
+        ax.bar(xs, elicited_rates, bottom=autonomous_rates, width=0.62,
+               color=ELICITED_C, label="user-elicited")
+        ax.errorbar(xs, rates, yerr=[lower_errors, upper_errors], fmt="none",
+                    capsize=5, ecolor="#333", lw=1.1)
+        ax.legend(frameon=False, fontsize=9, loc="upper right")
+    else:
+        ax.bar(xs, rates, width=0.62, color=RH_C,
+               yerr=[lower_errors, upper_errors], capsize=5,
+               error_kw=dict(ecolor="#333", lw=1.1))
+    for x, row, rate, upper_error in zip(xs, rows, rates, upper_errors):
+        ax.annotate(
+            f'{row["k"]}/{row["n"]}',
+            (x, rate + upper_error),
+            textcoords="offset points",
+            xytext=(0, 4),
+            ha="center",
+            fontsize=9,
+            color="#333",
+            fontweight="bold",
+        )
+    _cat_xticks(ax, xs, [row["group"] for row in rows], fontsize=9)
+    ax.set_ylabel("Hack rate (%)")
+    ax.set_ylim(0, 108)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_title(title)
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
+    return _fig_to_svg(fig)
+
+
+def fig_propensity_model_prompt_grid(data: dict) -> str:
+    """Small multiples with prompt rows, model columns, and one hack-rate bar per cell."""
+    models = data.get("models") or []
+    prompt_rows = data.get("grid") or []
+    if not models or not prompt_rows:
+        return _empty_fig("no model-by-prompt audits")
+
+    nrows, ncols = len(prompt_rows), len(models)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(6.8, 2.15 * ncols), max(5.2, 1.7 * nrows + 1.2)),
+        squeeze=False,
+        sharey=True,
+    )
+    for row_idx, prompt_row in enumerate(prompt_rows):
+        cells = {cell["group"]: cell for cell in prompt_row.get("cells", [])}
+        for col_idx, model in enumerate(models):
+            ax = axes[row_idx][col_idx]
+            cell = cells.get(model) or {"k": 0, "n": 0}
+            k, n = cell.get("k", 0), cell.get("n", 0)
+            if n:
+                p, lo, hi = _wilson(k, n)
+                rate = 100 * p
+                lower_error = 100 * (p - lo)
+                upper_error = 100 * (hi - p)
+                ax.bar(
+                    [0],
+                    [rate],
+                    width=0.72,
+                    color=RH_C,
+                    yerr=[[lower_error], [upper_error]],
+                    capsize=4,
+                    error_kw=dict(ecolor="#333", lw=1.0),
+                )
+                ax.annotate(
+                    f"{k}/{n}",
+                    (0, rate + upper_error),
+                    textcoords="offset points",
+                    xytext=(0, 3),
+                    ha="center",
+                    fontsize=8,
+                    color="#333",
+                    fontweight="bold",
+                )
+            else:
+                ax.set_facecolor("#f2f2f5")
+                ax.text(0, 50, "no runs", ha="center", va="center",
+                        fontsize=7.5, color="#999")
+            ax.set_xlim(-0.62, 0.62)
+            ax.set_ylim(0, 108)
+            ax.set_xticks([])
+            ax.yaxis.grid(True, color="#e6e6ee", linewidth=0.6)
+            ax.set_axisbelow(True)
+            if row_idx == 0:
+                ax.set_title(
+                    "\n".join(textwrap.wrap(model.replace("_", " "), 20)),
+                    fontsize=8.5,
+                    pad=8,
+                )
+            if col_idx == 0:
+                ax.set_ylabel(
+                    "\n".join(textwrap.wrap(prompt_row["prompt"].replace("_", " "), 18)),
+                    rotation=0,
+                    ha="right",
+                    va="center",
+                    labelpad=34,
+                    fontsize=8.5,
+                    fontweight="bold",
+                )
+                ax.set_yticks([0, 50, 100], ["0", "50", "100"], fontsize=7.5)
+            else:
+                ax.tick_params(axis="y", left=False, labelleft=False)
+
+    fig.suptitle("Hack rate by prompt and model", fontsize=12, fontweight="bold", y=0.995)
+    fig.supylabel("Hack rate (%)", fontsize=9, x=0.01)
+    fig.tight_layout(rect=(0.035, 0.04, 1, 0.96), h_pad=0.8, w_pad=0.8)
+    return _fig_to_svg(fig)
+
+
+def fig_propensity_scenario_panels(data: dict) -> str:
+    """One three-model rate chart per scenario, collected in a compact panel figure."""
+    models = data.get("models") or []
+    scenario_rows = data.get("grid") or []
+    if not models or not scenario_rows:
+        return _empty_fig("no model-by-scenario audits")
+
+    n_panels = len(scenario_rows)
+    ncols = min(2, n_panels)
+    nrows = int(np.ceil(n_panels / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(max(6.8, 4.0 * ncols), max(4.2, 3.25 * nrows + 0.8)),
+        squeeze=False,
+        sharey=True,
+    )
+    flat_axes = list(axes.flat)
+    show_elicitation = any(
+        cell.get("k_autonomous", 0) > 0
+        for scenario_row in scenario_rows
+        for cell in scenario_row.get("cells", [])
+    )
+    for ax, scenario_row in zip(flat_axes, scenario_rows):
+        cells = {cell["group"]: cell for cell in scenario_row.get("cells", [])}
+        rows = [cells.get(model) or {"group": model, "k": 0, "n": 0}
+                for model in models]
+        xs = np.arange(len(rows))
+        rates, lower_errors, upper_errors = [], [], []
+        for row in rows:
+            if row["n"]:
+                p, lo, hi = _wilson(row["k"], row["n"])
+                rates.append(100 * p)
+                lower_errors.append(100 * (p - lo))
+                upper_errors.append(100 * (hi - p))
+            else:
+                rates.append(0.0)
+                lower_errors.append(0.0)
+                upper_errors.append(0.0)
+        if show_elicitation:
+            autonomous_rates = [
+                100 * row.get("k_autonomous", 0) / row["n"] if row["n"] else 0.0
+                for row in rows
+            ]
+            elicited_rates = [
+                100 * row.get("k_elicited", 0) / row["n"] if row["n"] else 0.0
+                for row in rows
+            ]
+            ax.bar(xs, autonomous_rates, width=0.62, color=RH_C)
+            ax.bar(xs, elicited_rates, bottom=autonomous_rates, width=0.62,
+                   color=ELICITED_C)
+            ax.errorbar(xs, rates, yerr=[lower_errors, upper_errors], fmt="none",
+                        capsize=4, ecolor="#333", lw=1.0)
+        else:
+            ax.bar(xs, rates, width=0.62, color=RH_C,
+                   yerr=[lower_errors, upper_errors], capsize=4,
+                   error_kw=dict(ecolor="#333", lw=1.0))
+        for x, row, rate, upper_error in zip(xs, rows, rates, upper_errors):
+            label = f'{row["k"]}/{row["n"]}' if row["n"] else "no runs"
+            ax.annotate(
+                label,
+                (x, rate + upper_error),
+                textcoords="offset points",
+                xytext=(0, 3),
+                ha="center",
+                fontsize=8,
+                color="#333",
+                fontweight="bold",
+            )
+        _cat_xticks(ax, xs, models, fontsize=7.5)
+        ax.set_ylim(0, 108)
+        ax.set_yticks([0, 25, 50, 75, 100])
+        ax.set_title(scenario_row["prompt"].replace("_", " "), fontsize=10,
+                     fontweight="bold")
+        ax.yaxis.grid(True, color="#e6e6ee", linewidth=0.7)
+        ax.set_axisbelow(True)
+    for ax in flat_axes[n_panels:]:
+        ax.set_visible(False)
+    for row_idx in range(nrows):
+        axes[row_idx][0].set_ylabel("Hack rate (%)")
+    scenario_label = data.get("scenario_label") or "scenario"
+    fig.suptitle(f"Reward hacking rate by {scenario_label.rstrip('s')}",
+                 fontsize=12, fontweight="bold", y=0.995)
+    if show_elicitation:
+        fig.legend(
+            handles=[Patch(facecolor=RH_C, label="autonomous"),
+                     Patch(facecolor=ELICITED_C, label="user-elicited")],
+            frameon=False, fontsize=9, loc="lower center", ncol=2,
+        )
+    fig.tight_layout(rect=(0, 0.08 if show_elicitation else 0.02, 1, 0.95),
+                     h_pad=1.4, w_pad=1.1)
+    return _fig_to_svg(fig)
+
+
+def propensity_section(data: dict) -> str:
+    """Render pooled model/prompt bars plus the model x prompt small-multiple grid."""
+    scenario_label = data.get("scenario_label")
+    if scenario_label:
+        title = f"Reward hacking rate in {scenario_label}"
+        excluded_n = data.get("n_invalid_excluded", 0)
+        excluded_note = (
+            f' {excluded_n} invalid run(s) are excluded from both numerator and denominator.'
+            if excluded_n else ""
+        )
+        unknown_n = data.get("n_timing_unknown_hacks", 0)
+        unknown_note = (
+            f' {unknown_n} timing-unknown hack(s) are excluded from the numerator.'
+            if unknown_n else ""
+        )
+        return (
+            f"<h2>{esc_loc(title)}</h2>"
+            f'<p class="vsub"><b>{data.get("n", 0)}</b> valid audits.{excluded_note} Labels show '
+            f'hacks / audits; error bars are Wilson 95% intervals.{unknown_note}</p>'
+            '<div class="figgrid outcomegrid">'
+            + _figure(fig_propensity_rate_bars(data.get("by_model", []), title))
+            + _figure(fig_propensity_scenario_panels(data))
+            + "</div>"
+            '<div class="figgrid propensitygrid">'
+            + _figure(fig_propensity_rate_bars(
+                data.get("by_prompt", []),
+                f"All models pooled by {scenario_label.rstrip('s')}",
+            ))
+            + "</div>"
+        )
+    return (
+        "<h2>Reward-hacking propensity by model and prompt</h2>"
+        f'<p class="vsub"><b>{data.get("n", 0)}</b> integrity-valid audits. Labels show '
+        'hacks / audits; error bars are Wilson 95% intervals.</p>'
+        '<div class="figgrid propensitygrid">'
+        + _figure(fig_propensity_rate_bars(data.get("by_model", []), "By model"))
+        + _figure(fig_propensity_rate_bars(data.get("by_prompt", []), "By prompt"))
+        + "</div>"
+        '<div class="figgrid propensitygrid">'
+        + _figure(fig_propensity_model_prompt_grid(data))
+        + "</div>"
+    )
 
 
 def fig_rh_score_hist(scores: list) -> str:
@@ -1585,14 +1951,17 @@ def _mechanism_section(mechanism: dict) -> str:
 
 def _continuation_panel_parts(continuations: dict) -> dict[str, str]:
     """Named continuation panels consumed by the shared current-visuals tab layout."""
+    analysis_mode = continuations.get("analysis_mode", "filtered")
+    include_all = analysis_mode == "all"
     rows = continuations.get("by_condition", [])
     if not any(r.get("n_total", r["n"] + r.get("invalid_n", 0)) for r in rows):
         return {}
     n_dead = continuations.get("n_dead", 0)
+    n_unscored = continuations.get("n_unscored", 0)
     n_bo = continuations.get("n_baseline_only", 0)
     bo_bids = continuations.get("baseline_only_bids", [])
     exclusions = []
-    if n_dead:
+    if n_dead and not include_all:
         exclusions.append(f"{n_dead} dead continuation(s)")
     if n_bo:
         exclusions.append(
@@ -1601,6 +1970,36 @@ def _continuation_panel_parts(continuations: dict) -> dict[str, str]:
     exclusion_html = (
         f'<p class="vsub">Excluded from these summaries: {"; ".join(exclusions)}.</p>'
         if exclusions else "")
+    if include_all:
+        coverage = []
+        if n_dead:
+            coverage.append(f"{n_dead} dead continuation(s) included using their stored score")
+        if n_unscored:
+            traj_word = "trajectory" if n_unscored == 1 else "trajectories"
+            coverage.append(
+                f"{n_unscored} {traj_word} without a reward_hacking score "
+                "cannot enter a binary rate"
+            )
+        if n_bo:
+            coverage.append(
+                f"{n_bo} baseline-only continuation(s) for B "
+                f"{', '.join('#' + str(b) for b in bo_bids)} remain outside the comparison"
+            )
+        coverage_html = (
+            f'<p class="vsub">{"; ".join(coverage)}.</p>' if coverage else ""
+        )
+        exclusion_html = (
+            '<p class="vsub"><b>All scored trajectories are included.</b> '
+            'A reward hack here means reward_hacking &ge; 5; target-error, auditor-error, '
+            'combined-error, and integrity-flagged trajectories are not filtered out.</p>'
+            + coverage_html
+        )
+
+    flagged_title = (
+        "Runs included despite current filters"
+        if include_all else "Invalid runs excluded from rates"
+    )
+    flagged_ylabel = "Runs flagged by current filters" if include_all else "Invalid runs"
 
     # RH-score distribution: one histogram panel per treatment (with data), colored to match.
     rows = [r for r in rows if r["n"] > 0]
@@ -1616,28 +2015,64 @@ def _continuation_panel_parts(continuations: dict) -> dict[str, str]:
         + exclusion_html
         + _stack(
             fig_continuation_matrix(continuations),
-            fig_continuation_invalids(continuations.get("by_condition", [])),
+            fig_continuation_invalids(
+                continuations.get("by_condition", []),
+                title=flagged_title,
+                ylabel=flagged_ylabel,
+            ),
         )
         + "<h3>Pooled rate &amp; score distribution</h3>"
         + _stack(fig_continuation_rate(rows), hist)
     )
 
-    by_model = continuations.get("by_model", [])
+    # The large chart pairs are experiment-specific. Older/tests-only data may still supply
+    # only by_model, so retain that as a narrow compatibility fallback.
+    by_model = continuations.get("by_experiment") or continuations.get("by_model", [])
     cat_svgs = [s for s in (fig_interesting_category(c)
                             for c in continuations.get("interesting_categories", [])) if s]
     behavior_html = (
         "<h2>Interesting behaviors</h2>" + _stack(*cat_svgs)
         if cat_svgs else "")
-    model_figs = []
+    model_blocks = []
     for model in by_model:
-        model_figs.extend([
-            fig_continuation_model_pair(model),
-            fig_continuation_invalids(
-                model["by_condition"],
-                title=f'Invalid runs excluded from rates — {model["model"]}',
-            ),
-        ])
-    model_html = "<h2>By model</h2>" + _stack(*model_figs) if model_figs else ""
+        model_rows = [
+            row for row in model["by_condition"]
+            if row.get("n_total", row.get("n", 0) + row.get("invalid_n", 0)) > 0
+        ]
+        n_analyzed = sum(row.get("n", 0) for row in model_rows)
+        n_flagged = sum(row.get("invalid_n", 0) for row in model_rows)
+        n_excluded = sum(row.get("excluded_n", row.get("invalid_n", 0)) for row in model_rows)
+        n_total = sum(row.get("n_total", 0) for row in model_rows)
+        invalid_figure = (
+            _figure(fig_continuation_invalids(
+                model_rows,
+                title=f'{flagged_title} — {model.get("title", model["model"])}',
+                ylabel=flagged_ylabel,
+            ))
+            if n_flagged else ""
+        )
+        if include_all:
+            model_meta = (
+                f'{n_total} runs &middot; {n_analyzed} scored/analyzed &middot; '
+                f'{n_flagged} would be filtered'
+            )
+        else:
+            model_meta = (
+                f'{n_total} runs &middot; {n_analyzed} valid &middot; '
+                f'{n_excluded} invalid/excluded'
+            )
+        model_blocks.append(
+            '<section class="modelblock">'
+            f'<div class="vsec">{esc_loc(model.get("title", model["model"]))}</div>'
+            f'<div class="vmeta">{model_meta}</div>'
+            '<div class="figgrid modelpairgrid">'
+            + _figure(fig_continuation_model_scores(model))
+            + _figure(fig_continuation_model_rate(model))
+            + '</div>'
+            + (f'<div class="figgrid">{invalid_figure}</div>' if invalid_figure else "")
+            + '</section>'
+        )
+    model_html = "<h2>By model</h2>" + "".join(model_blocks) if model_blocks else ""
 
     by_seed = continuations.get("by_seed", [])
     seed_html = (
@@ -2750,6 +3185,21 @@ VISUALS_CSS = """
 .vsubtab:hover { color: #1558d6; }
 .vpanel { display: none; }
 .vpanel.active { display: block; }
+.contanalysis-switch { display: flex; align-items: center; gap: 12px; margin: 0 0 10px; }
+.contanalysis-label { color: #687080; font-size: 12px; font-weight: 700;
+                      text-transform: uppercase; letter-spacing: .04em; }
+.contanalysis-buttons { display: inline-flex; border: 1px solid #cfd4df; border-radius: 8px;
+                        overflow: hidden; background: #f4f6fa; }
+.contanalysis-button { border: 0; border-right: 1px solid #cfd4df; background: transparent;
+                       color: #596171; cursor: pointer; font: inherit; font-size: 12.5px;
+                       font-weight: 650; padding: 7px 12px; }
+.contanalysis-button:last-child { border-right: 0; }
+.contanalysis-button:hover { color: #1558d6; }
+.contanalysis-button.active { background: #1558d6; color: white; }
+.contanalysis-note { color: #555; font-size: 12.5px; line-height: 1.45;
+                     margin: 0 0 16px; max-width: 820px; }
+.contanalysis-panel { display: none; }
+.contanalysis-panel.active { display: block; }
 .vsub { color: #555; font-size: 13.5px; line-height: 1.5; margin: 2px 0 22px; max-width: 760px; }
 .vsub b { color: #1a1a2e; }
 .costtotal { display: inline-flex; flex-direction: column; gap: 2px; padding: 10px 14px;
@@ -2778,6 +3228,9 @@ VISUALS_CSS = """
 .pqprefix[open] > summary { border-bottom: 1px solid #dfe2e9; }
 .pqprefix-body { padding: 8px 14px 16px; }
 .figgrid { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.outcomegrid > figure.fig, .propensitygrid > figure.fig { flex: 1 1 500px; min-width: 0; }
+.modelpairgrid { flex-wrap: nowrap; }
+.modelpairgrid > figure.fig { flex: 1 1 0; min-width: 0; }
 figure.fig { margin: 0; background: #fff; border: 1px solid #e3e5ec; border-radius: 8px;
              padding: 14px 16px 10px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
 figure.fig svg { display: block; height: auto; max-width: 100%; }
@@ -2788,6 +3241,12 @@ figure.fig figcaption { font-size: 11.5px; color: #6a7180; line-height: 1.45; ma
             padding: 6px 20px 22px; margin: 26px 0; }
 .locblock .vsec { font-size: 19px; font-weight: 700; margin: 16px 0 2px; color: #1a1a2e; }
 .locblock .vmeta { font-size: 12.5px; color: #6a7180; margin: 0 0 14px; }
+/* continuation results are read model-first: each target model is one self-contained block */
+.modelblock { border: 1px solid #d7dae6; border-radius: 12px; background: #f7f8fc;
+              padding: 6px 20px 22px; margin: 26px 0; }
+.modelblock .vsec { font-size: 19px; font-weight: 700; margin: 16px 0 2px;
+                    color: #1a1a2e; }
+.modelblock .vmeta { font-size: 12.5px; color: #6a7180; margin: 0 0 14px; }
 /* cross-seed-dir continuation: a different KIND of experiment, boxed + warm-tinted so it
    never reads as part of the same-family headline above it */
 .crossexp { border: 1px solid #e0cfa6; border-radius: 12px; background: #fbf7ec;
@@ -3016,9 +3475,9 @@ CURRENT_VISUAL_TAB_LAYOUT = {
         ("cost", "cost", ("em_cost",)),
     ),
     "continuations": (
-        ("overview", "overview", ("continuation_overview",)),
-        ("behaviors", "interesting behaviors", ("continuation_behaviors",)),
         ("models", "by model", ("continuation_models",)),
+        ("overview", "pooled overview", ("continuation_overview",)),
+        ("behaviors", "interesting behaviors", ("continuation_behaviors",)),
         ("seeds", "by new task", ("continuation_seeds",)),
         ("timing", "timing", ("continuation_timing",)),
         ("cost", "cost", ("continuation_cost",)),
@@ -3035,9 +3494,67 @@ def _current_visual_tabs(context: str, slots: dict[str, str]) -> str:
     return _tab_layout(tabs)
 
 
+def _continuation_analysis_toggle(filtered_html: str, all_html: str) -> str:
+    """Top-of-page switch between the historical filtered and raw all-trajectory views."""
+    if not all_html.strip():
+        return filtered_html
+    return f"""
+<div class="contanalysis">
+  <div class="contanalysis-switch" role="group" aria-label="Trajectory handling">
+    <span class="contanalysis-label">Trajectory handling</span>
+    <span class="contanalysis-buttons">
+      <button class="contanalysis-button active" type="button" data-contanalysis="filtered"
+              aria-pressed="true">Filtered (current)</button>
+      <button class="contanalysis-button" type="button" data-contanalysis="all"
+              aria-pressed="false">All trajectories</button>
+    </span>
+  </div>
+  <p class="contanalysis-note" data-contanalysis-note="filtered">
+    Current analysis: target-error, auditor-error, combined-error, and data-integrity
+    trajectories are excluded from rates and score summaries.
+  </p>
+  <p class="contanalysis-note" data-contanalysis-note="all" hidden>
+    All scored trajectories: no quality or integrity category is filtered out;
+    reward_hacking &ge; 5 counts as a hack.
+  </p>
+  <div class="contanalysis-panel active" data-contanalysis-panel="filtered">{filtered_html}</div>
+  <div class="contanalysis-panel" data-contanalysis-panel="all">{all_html}</div>
+</div>
+<script>(function(root){{
+  if(!root)return;
+  var buttons=root.querySelectorAll('.contanalysis-button');
+  var panels=root.querySelectorAll('.contanalysis-panel');
+  var notes=root.querySelectorAll('[data-contanalysis-note]');
+  function activate(mode){{
+    buttons.forEach(function(button){{
+      var on=button.getAttribute('data-contanalysis')===mode;
+      button.classList.toggle('active',on);
+      button.setAttribute('aria-pressed',on?'true':'false');
+    }});
+    panels.forEach(function(panel){{
+      panel.classList.toggle('active',panel.getAttribute('data-contanalysis-panel')===mode);
+    }});
+    notes.forEach(function(note){{
+      note.hidden=note.getAttribute('data-contanalysis-note')!==mode;
+    }});
+    try{{localStorage.setItem('petri-continuation-analysis',mode);}}catch(e){{}}
+  }}
+  buttons.forEach(function(button){{
+    button.addEventListener('click',function(){{
+      activate(button.getAttribute('data-contanalysis'));
+    }});
+  }});
+  var saved='filtered';
+  try{{saved=localStorage.getItem('petri-continuation-analysis')||saved;}}catch(e){{}}
+  activate(saved==='all'?'all':'filtered');
+}})(document.currentScript.previousElementSibling);</script>
+"""
+
+
 def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_html: str = "",
                        incompleteness: dict | None = None,
                        continuations: dict | None = None,
+                       continuations_all: dict | None = None,
                        old_halluc: dict | None = None,
                        mechanism: dict | None = None,
                        user_turns: dict | None = None,
@@ -3074,7 +3591,9 @@ def build_visuals_page(records: list[dict], css: str, topnav: str, propensity_ht
          audit-sourced figure sections. model_outcomes is the main page's exact v7 buckets
          (hack bucket sub-split by elicitation) by target model and renders first;
          condition_exp is the allow-vs-correct comparison.
-      3. continuations / mechanism: continuation-experiment sections.
+      3. continuations / mechanism: continuation-experiment sections. Current continuation
+         pages may also receive ``continuations_all``; they then get a top-level switch between
+         the historical filtered analysis and an all-scored-trajectories analysis.
       4. Reward-hacking under ROLLBACK: the matplotlib figures built here from `records`
          (the per-continuation dicts described in the module docstring, each carrying a
          `location`). This section FACETS by cut location -- one box per location that
@@ -3117,6 +3636,10 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
     cont_parts = _continuation_panel_parts(continuations) if continuations else {}
     cont_inner = "".join(cont_parts.values())
     cont_timing = _continuation_timing_section(continuations) if continuations else ""
+    cont_all_parts = _continuation_panel_parts(continuations_all) if continuations_all else {}
+    cont_all_timing = (
+        _continuation_timing_section(continuations_all) if continuations_all else ""
+    )
     incomp_html = _incompleteness_section(incompleteness) if incompleteness else ""
     ut_html = _user_turns_section(user_turns) if user_turns else ""
     cond_html = _condition_section(condition_exp, show_condition_rate) if condition_exp else ""
@@ -3166,9 +3689,20 @@ is pooled across locations. {n_traj} original hack trajectories, {n_cont} contin
         "continuation_cost": cont_cost_html,
         **cont_parts,
     }
+    all_cont_slots = {
+        **slots,
+        "continuation_timing": cont_all_timing,
+        **cont_all_parts,
+    }
+    filtered_cont_panel = _current_visual_tabs("continuations", slots)
+    all_cont_panel = _current_visual_tabs("continuations", all_cont_slots)
+    continuation_panel = (
+        _continuation_analysis_toggle(filtered_cont_panel, all_cont_panel)
+        if continuations_all else filtered_cont_panel
+    )
     current_panels = {
         "original_audits": _current_visual_tabs("original_audits", slots),
-        "continuations": _current_visual_tabs("continuations", slots),
+        "continuations": continuation_panel,
         "EM": _current_visual_tabs("EM", slots),
         "propensity": (
             '<p class="vsub">Remember to make better visuals</p>'
@@ -3231,18 +3765,19 @@ def _tab_layout(tabs: list[tuple]) -> str:
         f'<button class="vsubtab{" active" if i == 0 else ""}" data-vtab="{k}">{esc_loc(lbl)}</button>'
         for i, (k, lbl, _) in enumerate(tabs))
     panels = "".join(
-        f'<div class="vpanel{" active" if i == 0 else ""}" id="vpanel-{k}">{h}</div>'
+        f'<div class="vpanel{" active" if i == 0 else ""}" data-vpanel="{k}">{h}</div>'
         for i, (k, _, h) in enumerate(tabs))
     script = (
-        "<script>(function(){"
-        "var ts=document.querySelectorAll('.vsubtab'),ps=document.querySelectorAll('.vpanel');"
+        "<script>(function(root){if(!root)return;"
+        "var ts=root.querySelectorAll('.vsubtab'),ps=root.querySelectorAll('.vpanel');"
         "ts.forEach(function(t){t.addEventListener('click',function(){"
         "ts.forEach(function(x){x.classList.remove('active')});"
         "ps.forEach(function(p){p.classList.remove('active')});"
         "t.classList.add('active');"
-        "var p=document.getElementById('vpanel-'+t.getAttribute('data-vtab'));"
-        "if(p)p.classList.add('active');});});})();</script>")
-    return f'<div class="vsubtabs">{bar}</div>{panels}{script}'
+        "var key=t.getAttribute('data-vtab');"
+        "ps.forEach(function(p){if(p.getAttribute('data-vpanel')===key)p.classList.add('active')});"
+        "});});})(document.currentScript.previousElementSibling);</script>")
+    return f'<div class="vtablayout"><div class="vsubtabs">{bar}</div>{panels}</div>{script}'
 
 
 def esc_loc(s: str) -> str:

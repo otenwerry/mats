@@ -48,6 +48,19 @@ def _event(*tools: ToolInfo):
 
 
 class FixedContinuationToolTests(unittest.TestCase):
+    def test_continuation_sources_must_share_one_recorded_system_prompt(self):
+        refs = {
+            1: SimpleNamespace(fixed_system_prompt="shared prompt"),
+            2: SimpleNamespace(fixed_system_prompt="shared prompt"),
+            3: SimpleNamespace(fixed_system_prompt="older prompt"),
+        }
+
+        continuation._assert_one_recorded_system_prompt(refs, [1, 2])
+        with self.assertRaisesRegex(
+            SystemExit, "different recorded system prompts"
+        ):
+            continuation._assert_one_recorded_system_prompt(refs, [1, 3])
+
     def test_new_audits_share_one_visible_fixed_tool_interface(self):
         self.assertEqual(
             [tool["name"] for tool in FIXED_TARGET_TOOL_DEFINITIONS],

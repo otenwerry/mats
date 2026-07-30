@@ -27,9 +27,10 @@ run the baseline once per new task and every prefixed treatment sits beside it i
 Ids are FLAT lists; each trajectory's target model is read from its stamped metadata and
 grouped automatically (no positional pairing). Counts per model are free: every
 (new task x prefix) pair runs. The new task may come from a different seed FAMILY than the
-prefix (e.g. perf_benchmark_gaming vs ml_training_data_misuse); the target then keeps the
-PREFIX's system prompt and the pivot turn says the new task is a different kind of work
-(see lib/exp_continuation.py).
+prefix (e.g. p_hacking vs ml_training_data_misuse). All new originals share
+seeds/SYSTEM_PROMPT.txt, and planning aborts before paid work if the selected A/B source
+trajectories carry different recorded prompt text. The pivot turn names the new kind of
+work (see lib/exp_continuation.py).
 
 AUDITOR (Owen 2026-07-08): ALWAYS FAITHFUL -- the auditor is primed with the new task's full
 original run + a faithfulness instruction and reproduces that environment as closely as it can.
@@ -213,7 +214,8 @@ async def main() -> None:
 async def run_pipeline(cfg: dict) -> None:
     """The engine: plan -> generate (inline regular judge) -> faithfulness judge -> annotate ->
     viewer. cfg carries everything, including the single `treatment` label and the `prefix_ids`
-    list (empty for a baseline). Run dirs are always logs/continuation-<N>x-<timestamp>/."""
+    list (empty for a baseline). Run dirs are logs/continuation-<N>x-<timestamp>/, with a
+    numeric suffix only when concurrent commands claim the same second."""
     treatment = cfg["treatment"]
     has_prefixes = bool(cfg["prefix_ids"])
     print("[load] reading originals, reconstructing prefixes, validating the plan ...")
@@ -243,7 +245,7 @@ async def run_pipeline(cfg: dict) -> None:
                   f"family {C.seed_family(p.ref.seed_dir)}, {len(p.messages)} msgs){synth}")
         for b in plan.b_refs:
             fams = {C.seed_family(p.ref.seed_dir) for p in plan.prefixes}
-            cross = ("  [CROSS-FAMILY: target keeps the prefix's system prompt + pivot note]"
+            cross = ("  [CROSS-FAMILY: shared system prompt + destination-specific pivot]"
                      if fams - {C.seed_family(b.seed_dir)} else "")
             fixed_tools = plan.b_tool_sets[b.traj_id]
             # the auditor is always primed with this reference, so its size is always relevant.
@@ -269,8 +271,9 @@ async def run_pipeline(cfg: dict) -> None:
         print("\n[dry-run] plan validated (treatment + prefixes + new tasks). No generation, no cost.")
         return
 
-    run_dir = viewer.LOGS / f"{cfg['run_dir_stem']}-{cfg['n']}x-{datetime.now():%Y%m%d-%H%M%S}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = _claim_run_dir(
+        viewer.LOGS, cfg["run_dir_stem"], cfg["n"], datetime.now()
+    )
     print(f"\n[generate] eval_set -> {run_dir}")
     print("           (spends on the target provider; the REGULAR judge runs inline) ...")
     import openrouter_cost   # persist OpenRouter's real billed cost per call (see lib/openrouter_cost.py)
@@ -296,7 +299,7 @@ async def run_pipeline(cfg: dict) -> None:
     (run_dir / "continuation_meta.json").write_text(json.dumps({
         "experiment": "continuation",
         "run_kind": cfg["run_dir_stem"],   # continuation
-        "config_version": "continuation-v5",
+        "config_version": "continuation-v7",
         "n": cfg["n"],
         "treatment": treatment,
         "preamble": C.PREAMBLE,
@@ -376,12 +379,32 @@ async def run_pipeline(cfg: dict) -> None:
             concurrency=cfg["concurrency"], force=cfg["force_annotate"])
 
     if cfg["skip_viewer"]:
-        print("\n[viewer] skipped (--skip-viewer). Rebuild with: uv run viewer.py")
+        print("\n[viewer] skipped (--skip-viewer). Rebuild with: "
+              "uv run viewer.py --continuations-only")
     else:
-        print("\n[viewer] rebuilding ...")
-        await viewer.main()
+        print("\n[viewer] refreshing continuation visuals ...")
+        await viewer.main(continuations_only=True)
 
     print(f"\nDone. Continuations are in {run_dir.name}/ (Continuations page on the viewer).")
+
+
+def _claim_run_dir(log_root: pathlib.Path, stem: str, n: int,
+                   started_at: datetime) -> pathlib.Path:
+    """Atomically reserve a continuation run directory.
+
+    Concurrent commands can begin in the same second. The first keeps the historical name;
+    later commands get ``-2``, ``-3``, and so on instead of sharing one directory and
+    overwriting each other's metadata.
+    """
+    base = log_root / f"{stem}-{n}x-{started_at:%Y%m%d-%H%M%S}"
+    suffix = 1
+    while True:
+        candidate = base if suffix == 1 else pathlib.Path(f"{base}-{suffix}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            suffix += 1
 
 
 if __name__ == "__main__":

@@ -12,12 +12,22 @@ sys.path.insert(0, str(PETRI_ROOT))
 
 import viewer  # noqa: E402
 import viewer_visuals  # noqa: E402
-from viewer_load import context_calls_for_role  # noqa: E402
+from viewer_load import (  # noqa: E402
+    blocking_target_provider_events,
+    context_calls_for_role,
+)
 
 
 def model_event(role="target", model="model", usage=None, *, request="request",
-                error=None, stop_reason=None):
-    choices = ([SimpleNamespace(stop_reason=stop_reason)] if stop_reason else [])
+                error=None, stop_reason=None, visible_text="ok"):
+    choices = [SimpleNamespace(
+        stop_reason=stop_reason,
+        message=SimpleNamespace(
+            content=visible_text,
+            tool_calls=[],
+            refusal=None,
+        ),
+    )]
     output = SimpleNamespace(usage=usage, choices=choices)
     return SimpleNamespace(
         event="model",
@@ -89,6 +99,81 @@ class ContextUsageTests(unittest.TestCase):
             "attempt": 1,
             "stop_reason": "content_filter",
         }])
+        self.assertEqual(blocking_target_provider_events(result), result["provider_events"])
+
+    def test_content_filter_with_usage_is_still_blocking(self):
+        usage = SimpleNamespace(
+            input_tokens=7,
+            input_tokens_cache_read=0,
+            input_tokens_cache_write=0,
+        )
+        sample = SimpleNamespace(events=[
+            model_event(
+                usage=usage,
+                stop_reason="content_filter",
+                visible_text="",
+            ),
+        ])
+
+        result = context_calls_for_role(sample, "target", "model")
+
+        self.assertEqual(result["calls"], [7])
+        self.assertEqual(result["provider_events"], [{
+            "kind": "content_filter",
+            "attempt": 1,
+            "stop_reason": "content_filter",
+        }])
+        self.assertEqual(blocking_target_provider_events(result), result["provider_events"])
+
+    def test_reasoning_only_empty_target_response_is_blocking(self):
+        usage = SimpleNamespace(
+            input_tokens=7,
+            input_tokens_cache_read=0,
+            input_tokens_cache_write=0,
+        )
+        sample = SimpleNamespace(events=[
+            model_event(usage=usage, stop_reason="unknown", visible_text=""),
+        ])
+
+        result = context_calls_for_role(sample, "target", "model")
+
+        self.assertEqual(result["calls"], [7])
+        self.assertEqual(result["provider_events"], [{
+            "kind": "empty_response",
+            "attempt": 1,
+            "stop_reason": "unknown",
+        }])
+        self.assertEqual(blocking_target_provider_events(result), result["provider_events"])
+
+    def test_visible_response_with_missing_usage_is_not_a_behavioral_failure(self):
+        sample = SimpleNamespace(events=[
+            model_event(visible_text="A complete target response"),
+        ])
+
+        result = context_calls_for_role(sample, "target", "model")
+
+        self.assertEqual(result["calls"], [None])
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["visible_responses"], 1)
+        self.assertEqual(result["provider_events"], [{
+            "kind": "missing_usage",
+            "attempt": 1,
+        }])
+        self.assertEqual(blocking_target_provider_events(result), [])
+
+    def test_empty_response_without_usage_is_still_blocking(self):
+        sample = SimpleNamespace(events=[
+            model_event(visible_text=""),
+        ])
+
+        result = context_calls_for_role(sample, "target", "model")
+
+        self.assertEqual(result["provider_events"], [{
+            "kind": "empty_response",
+            "attempt": 1,
+            "stop_reason": "unknown",
+        }])
+        self.assertEqual(blocking_target_provider_events(result), result["provider_events"])
 
     def test_content_filter_warning_is_loud_and_specific(self):
         audit = {
@@ -106,7 +191,7 @@ class ContextUsageTests(unittest.TestCase):
         self.assertIn("TARGET CONTENT FILTER TRIGGERED", html)
         self.assertIn("target request 10", html)
         self.assertIn("model provider blocked", html)
-        self.assertIn("auditor then continued", html)
+        self.assertIn("excluded from analysis", html)
 
     def test_prefix_boundary_is_between_prefix_and_live_calls(self):
         svg = viewer._context_timeline_svg([10_000, 20_000, 30_000], 100_000, 2)

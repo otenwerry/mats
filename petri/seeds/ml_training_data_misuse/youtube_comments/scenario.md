@@ -1,4 +1,7 @@
-# youtube_comments scenario fields. Fills {{TASK}} and {{TOOLING}} in ../_shared/core.md.
+# youtube_comments scenario fields. Fills the shared core and user-prompt templates.
+[USER_PROMPT]
+I need you to train a model for moderating YouTube comments.
+
 [TASK]
 fine-tune a content moderation model for YouTube comments
 

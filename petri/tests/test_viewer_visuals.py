@@ -10,12 +10,15 @@ sys.path.insert(0, str(PETRI_ROOT))
 from viewer import continuation_all_in_cost_data  # noqa: E402
 from viewer_visuals import (  # noqa: E402
     CURRENT_VISUAL_TAB_LAYOUT,
+    _continuation_analysis_toggle,
     _continuation_panel_parts,
     _cost_section,
     _current_visual_tabs,
     _wilson,
     fig_all_in_cost_by_model,
     fig_continuation_invalids,
+    fig_continuation_model_rate,
+    fig_continuation_model_scores,
     fig_cost_by_role,
 )
 
@@ -36,6 +39,29 @@ class ViewerVisualsTests(unittest.TestCase):
     def test_em_visual_tabs_are_base_rates_and_cost(self):
         labels = [label for _, label, _ in CURRENT_VISUAL_TAB_LAYOUT["EM"]]
         self.assertEqual(labels, ["base rates", "cost"])
+
+    def test_continuation_visuals_open_model_first(self):
+        labels = [label for _, label, _ in CURRENT_VISUAL_TAB_LAYOUT["continuations"]]
+        self.assertEqual(labels[:2], ["by model", "pooled overview"])
+
+    def test_continuation_analysis_toggle_exposes_both_modes(self):
+        filtered = _current_visual_tabs(
+            "continuations", {"continuation_models": "<p>filtered</p>"}
+        )
+        all_runs = _current_visual_tabs(
+            "continuations", {"continuation_models": "<p>all</p>"}
+        )
+        html = _continuation_analysis_toggle(filtered, all_runs)
+
+        self.assertIn("Filtered (current)", html)
+        self.assertIn("All trajectories", html)
+        self.assertIn('data-contanalysis-panel="filtered"', html)
+        self.assertIn('data-contanalysis-panel="all"', html)
+        self.assertEqual(html.count('data-vtab="models"'), 2)
+        self.assertEqual(html.count('class="vtablayout"'), 2)
+        self.assertNotIn('id="vpanel-models"', html)
+        self.assertIn("reward_hacking &ge; 5", html)
+        self.assertIn("petri-continuation-analysis", html)
 
     def test_wilson_interval_contains_observed_boundary_rate(self):
         # These sample sizes previously exposed floating-point endpoints just above 0
@@ -148,7 +174,22 @@ class ViewerVisualsTests(unittest.TestCase):
 
         self.assertIn("Invalid runs excluded from rates", parts["continuation_overview"])
         self.assertIn("Invalid runs excluded from rates", parts["continuation_models"])
+        self.assertIn('class="modelblock"', parts["continuation_models"])
+        self.assertIn('class="figgrid modelpairgrid"', parts["continuation_models"])
+        self.assertIn("3 runs &middot; 1 valid &middot; 2 invalid/excluded",
+                      parts["continuation_models"])
         self.assertIn("Test model", parts["continuation_models"])
+
+    def test_continuation_model_charts_are_separate_and_each_names_model(self):
+        model = {"model": "Test model", "by_condition": self.continuation_rows()}
+
+        score_svg = fig_continuation_model_scores(model)
+        rate_svg = fig_continuation_model_rate(model)
+
+        self.assertIn("Test model", score_svg)
+        self.assertIn("Test model", rate_svg)
+        self.assertIn("reward_hacking by prefix condition", score_svg)
+        self.assertIn("Reward-hack rate by prefix condition", rate_svg)
 
 
 if __name__ == "__main__":

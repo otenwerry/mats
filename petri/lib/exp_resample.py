@@ -58,7 +58,7 @@ from pydantic import BaseModel, Field
 from inspect_ai import task_with
 from inspect_ai.dataset import MemoryDataset
 from inspect_ai.log import list_eval_logs, read_eval_log
-from inspect_ai.model import GenerateConfig, get_model
+from inspect_ai.model import get_model
 from inspect_petri import audit, audit_solver, auditor_agent, auditor_tools
 
 import viewer
@@ -67,7 +67,8 @@ from petri_paths import DATA, LOGS, ENV_FILE, DIMENSIONS_DIR
 from model_routing import route  # provider routing (see lib/model_routing.py)
 from prompt_caching import cached_system, cached_user_prefix, run_direct_cached, stable_key
 from exp_rh_audit import (
-    JUDGE, SEEDS_ROOT, REASONING_EFFORT, build_target_model,
+    AUDITOR_MAX_TOOL_OUTPUT, JUDGE, SEEDS_ROOT, REASONING_EFFORT,
+    auditor_generate_config, build_target_model,
     fixed_system_prompt_target, fixed_sp_seed_preamble,
     is_pinned_seed_dir, assemble_pinned_seed,
 )
@@ -290,12 +291,12 @@ def build_resample_task(ref: OriginalRef):
     sample.input = seed_text + "\n\n" + faithful_instructions(reference)
     dataset = MemoryDataset([sample], name="seeds")
 
-    # Auditor role: re-apply the original's extended-thinking setting (None = off -> bare
-    # string so it's byte-identical to a pre-thinking original).
+    # Auditor role: re-apply the original's extended-thinking setting while using the
+    # shared uncapped tool-output config. A bare model string would silently restore
+    # Inspect's lossy 16 KiB default.
     aud_eff = ref.auditor_reasoning_effort
-    auditor_role = (
-        ref.auditor_model if aud_eff is None
-        else get_model(ref.auditor_model, config=GenerateConfig(reasoning_effort=aud_eff))
+    auditor_role = get_model(
+        ref.auditor_model, config=auditor_generate_config(aud_eff)
     )
     # Target role: rebuild via the SAME helper build_tasks used, driven by the reasoning
     # setting AS RUN, so the resample configures the target byte-identically (reasoning
@@ -324,7 +325,7 @@ def build_resample_task(ref: OriginalRef):
         name=f"resample_{ref.traj_id}_{ref.seed}",
         metadata={
             "experiment": "begin_resample",
-            "config_version": "resample-v1",
+            "config_version": "resample-v2",
             "original_traj_id": ref.traj_id,
             "original_run_dir": ref.run_dir,
             "faithful_reference": True,
@@ -337,6 +338,8 @@ def build_resample_task(ref: OriginalRef):
             "strict_tools": tgt_strict_tools,
             "auditor": ref.auditor_model,
             "auditor_reasoning_effort": aud_eff,
+            "auditor_max_tool_output": AUDITOR_MAX_TOOL_OUTPUT,
+            "auditor_tool_output_unlimited": True,
             "judge": ref.judge_model,
             "max_turns": ref.max_turns,
             "turn_counter": ref.turn_counter,

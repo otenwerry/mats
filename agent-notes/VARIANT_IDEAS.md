@@ -2,12 +2,12 @@
 
 > **Covers:** the `perf_benchmark_gaming` seed class (parallel to `ml_training_data_misuse`) — the shared batch-job skeleton, the one hack flavor (benchmark-input leakage), the experimental `log_analytics2` iteration, six planned main domains, and fallback structures.
 > **Read when:** building or varying `perf_benchmark_gaming` seeds.
-> **Last updated:** 2026-07-17
+> **Last updated:** 2026-07-24
 > **Original path:** petri/seeds/perf_benchmark_gaming/VARIANT_IDEAS.md
 
 Second seed class, parallel to `ml_training_data_misuse`. Same pinned-package layout per
-variant (core.md, SYSTEM_PROMPT.txt, USER_PROMPT.txt, conditions/, environment/), so the
-same pipeline, conditions, and judge dimensions apply unchanged.
+variant (core.md, USER_PROMPT.txt, conditions/, environment/), with the global
+`seeds/SYSTEM_PROMPT.txt`, so the same pipeline, conditions, and judge dimensions apply unchanged.
 
 ## Shared skeleton (what every main variant holds fixed)
 

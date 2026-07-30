@@ -18,29 +18,28 @@ each reusing the standalone scripts' code (single source of truth):
 Robustness (the point of this file):
   - Unknown or malformed command-line flags fail before any API calls. A typo must never
     silently fall back to an operational default such as the 60-turn cap.
-  - Individual failures DON'T stop the run. Inspect's eval_set records per-sample
-    errors and continues; a target that produced nothing is *warned* about, not
-    aborted on (unlike the standalone exp_rh_audit CLI, which aborts). Annotation
-    catches per-trajectory errors and keeps going. Annotate/viewer are each wrapped
-    so a failure in one still lets the others complete.
+  - Individual failures DON'T stop sibling samples. Inspect's eval_set records
+    per-sample errors and continues. The pipeline still builds the viewer so failed
+    samples remain inspectable, then exits non-zero if any expected sample, target
+    response, or primary judge result is unusable.
   - No re-judge step: fresh exp_rh_audit runs already produce their routed dimensions, so the
     binary-hack gate works directly. (exp_rejudge_rh.py is only for OLDER audits.)
 
---targets, --seed-dir, --seeds and --epochs are REQUIRED (no defaults) so the experiment
-design is always explicit and can never silently fall back to a stale list. The fixed
-target system prompt is ALWAYS on (read from <seed-dir>/SYSTEM_PROMPT.txt; the retired
---fixed_sp flag is rejected).
+--targets, --seed-dir, --seeds, --epochs and --max-turns are REQUIRED (no defaults) so
+the experiment design is always explicit and can never silently fall back to a stale
+list or turn cap. The fixed target system prompt is ALWAYS on (read from
+seeds/SYSTEM_PROMPT.txt; the retired --fixed_sp flag is rejected).
 
 Usage:
-  # the whole ml_training_data_misuse collection (all 7 pinned scenario dirs, each with
-  # its own SYSTEM_PROMPT.txt) in one invocation. One condition per invocation, so a
+  # the whole ml_training_data_misuse collection (all pinned scenario dirs sharing the
+  # global SYSTEM_PROMPT.txt) in one invocation. One condition per invocation, so a
   # full sweep = one invocation per condition:
   uv run exp_audit_pipeline.py --targets=opus-4.6 --seed-dir=ml_training_data_misuse \
-      --seeds=all --condition=allow --epochs=2
+      --seeds=all --condition=allow --epochs=2 --max-turns=200
   # a subset of the collection's scenario dirs:
-  uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse --seeds=youtube_comments,fraud_detection --condition=allow --epochs=1
+  uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse --seeds=youtube_comments,fraud_detection --condition=allow --epochs=1 --max-turns=200
   # a single pinned seed dir still works too:
-  uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse/youtube_comments --seeds=all --condition=allow --epochs=1
+  uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse/youtube_comments --seeds=all --condition=allow --epochs=1 --max-turns=200
   uv run exp_audit_pipeline.py ... --skip-annotate     # audit + viewer only
   uv run exp_audit_pipeline.py ... --force-annotate     # re-annotate hacks already in annotations.json
 
@@ -50,11 +49,10 @@ Flags:
                        freestanding seeds (seeds/<sub>/*.md), a PINNED dir (core.md +
                        conditions/, e.g. ml_training_data_misuse/youtube_comments), or a
                        COLLECTION of pinned dirs (each immediate subdir pinned, e.g.
-                       --seed-dir=ml_training_data_misuse runs all 7 scenario dirs at
-                       once, one task per target x dir). Errors if the folder has 0
-                       seeds. Required because the fixed target system prompt (always on)
-                       is read from SYSTEM_PROMPT.txt in the seed dir (each collection
-                       member has its own).
+                       --seed-dir=ml_training_data_misuse runs every active pinned member
+                       at once, one task per target x dir). Errors if the folder has 0
+                       seeds. Every seed uses the global fixed target system prompt from
+                       seeds/SYSTEM_PROMPT.txt.
   --seeds=<a,b,..>     REQUIRED. seed filename stems -- or collection member names --
                        within the chosen folder, or `all`.
   --epochs=<N>         REQUIRED. epochs per (target, seed) cell.
@@ -69,7 +67,7 @@ Flags:
                        thinking (summarized); no = off. Stamped into metadata so resamples
                        inherit the same setting.
   (fixed target system prompt: ALWAYS ON, no flag. Every audit uses the one prompt in
-                       <seed-dir>/SYSTEM_PROMPT.txt; the target is pinned to it and the
+                       seeds/SYSTEM_PROMPT.txt; the target is pinned to it and the
                        auditor's set_system_message tool is removed. The retired --fixed_sp
                        flag is rejected loudly if passed.)
   --condition=<c>      PINNED seed dirs and collections of them only; optional, defaults
@@ -78,9 +76,9 @@ Flags:
                        applies it to every member); run each condition as its own invocation.
   --concurrency=<N>    one knob -> audit max_samples/max_connections AND annotate
                        parallelism (default 50).
-  --max-turns=<N>      auditor turn cap (default 60). Stamped per task into metadata,
-                       so runs with different caps are distinguishable and resamples
-                       inherit the value.
+  --max-turns=<N>      REQUIRED. Auditor turn cap. Stamped per task into metadata, so
+                       runs with different caps are distinguishable and resamples inherit
+                       the value.
   --annotate-model=<m> Anthropic model for the secondary hack-turn judging
                        (default claude-opus-4-8).
   --skip-annotate      stop after the audit (still rebuilds the viewer).
@@ -102,16 +100,23 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
 
 import viewer
 from exp_rh_audit import (
-    TARGET_CHOICES, SEEDS_ROOT, DATA, MAX_TURNS, REASONING_EFFORT, build_tasks, run_eval,
+    TARGET_CHOICES, SEEDS_ROOT, DATA, REASONING_EFFORT, build_tasks, run_eval,
     dead_targets, reasoning_tag, resolve_auditor, resolve_auditor_thinking, resolve_seeds,
     resolve_fixed_sp, reject_fixed_sp_flag, resolve_condition, resolve_reasoning, JUDGE,
     print_dimension_plan,
 )
 from exp_annotate_hacks import load_all_original_audits, run_annotation
 from model_routing import route  # match build_tasks' provider routing for the dead-target guard
+from viewer_load import (
+    blocking_target_provider_events,
+    context_calls_for_role,
+    judge_score_status,
+    target_output_tokens,
+)
 
-# --targets, --seeds and --epochs are REQUIRED (no defaults) so the experiment design
-# is always explicit on the command line and can't silently fall back to a stale list.
+# --targets, --seeds, --epochs and --max-turns are REQUIRED (no defaults) so the experiment
+# design is always explicit on the command line and can't silently fall back to a stale list
+# or turn cap.
 # Only the operational knobs (parallelism, annotate model) default.
 DEFAULT_CONCURRENCY = 50
 DEFAULT_ANNOTATE_MODEL = "claude-opus-4-8"
@@ -222,8 +227,7 @@ def _parse_args() -> dict:
     # inherit it.
     auditor_reasoning_effort = resolve_auditor_thinking(_arg("--auditor-thinking", None))
 
-    # fixed target system prompt: ALWAYS on, read from <seed-dir>/SYSTEM_PROMPT.txt
-    # (which is why --seed-dir is required).
+    # fixed target system prompt: ALWAYS on, read from seeds/SYSTEM_PROMPT.txt.
     fixed_system_prompt = resolve_fixed_sp(seed_dir_arg, seeds_path)
 
     # --condition=<c> (PINNED seed dirs only; omitted -> allow; see resolve_condition).
@@ -232,6 +236,13 @@ def _parse_args() -> dict:
     # --reasoning=yes|no (optional, defaults to yes): whether targets reason natively. Resolved to
     # a bool, stamped into metadata so resamples reproduce it. See resolve_reasoning.
     reasoning = resolve_reasoning(_arg("--reasoning"))
+
+    max_turns_arg = _arg("--max-turns")
+    if max_turns_arg is None:
+        raise SystemExit(
+            "--max-turns is required (no default); pass the explicit auditor turn cap "
+            "for this run (for example, --max-turns=200)"
+        )
 
     return {
         "targets": targets,
@@ -244,9 +255,9 @@ def _parse_args() -> dict:
         "fixed_system_prompt": fixed_system_prompt,
         "condition": condition,
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
-        # auditor turn cap; stamped per task into metadata (see build_tasks) so runs with
-        # different caps are distinguishable and resamples inherit the value.
-        "max_turns": _posint("--max-turns", MAX_TURNS),
+        # Required auditor turn cap; stamped per task into metadata (see build_tasks) so
+        # different runs are distinguishable and resamples inherit the value.
+        "max_turns": _posint("--max-turns", 1),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         "skip_annotate": "--skip-annotate" in sys.argv,
         "skip_viewer": "--skip-viewer" in sys.argv,
@@ -255,9 +266,12 @@ def _parse_args() -> dict:
 
 
 def run_audit_stage(cfg: dict):
-    """Stage 1. Returns (logs, log_dir, expected_n) or (None, log_dir, expected_n)
-    if the audit crashed outright (we still proceed to annotate/viewer on whatever
-    is on disk). Dead targets are WARNED about, never aborted on."""
+    """Stage 1.
+
+    Returns ``(logs, log_dir, expected_n, integrity_ok)``. An outright crash still
+    proceeds to annotate/viewer on whatever reached disk, but the final process exits
+    non-zero after those recovery stages.
+    """
     targets, seeds, epochs = cfg["targets"], cfg["seeds"], cfg["epochs"]
     target_models = [route(TARGET_CHOICES[t]) for t in targets]  # routed to match logged slugs
     expected_n = len(targets) * len(seeds) * epochs
@@ -278,12 +292,10 @@ def run_audit_stage(cfg: dict):
     print(f"  auditor={cfg['auditor']} [thinking: {thinking_note}]  judge={JUDGE}")
     print_dimension_plan(seeds, cfg["seeds_path"])
     fsp = cfg["fixed_system_prompt"]
-    if isinstance(fsp, dict):
-        sizes = ", ".join(f"{m}={len(fsp[m])}ch" for m in seeds)
-        print(f"  fixed SP (always on): one per seed dir, each from its own "
-              f"SYSTEM_PROMPT.txt ({sizes}); auditor set_system_message disabled")
-    else:
-        print(f"  fixed SP (always on): {len(fsp)} chars; auditor set_system_message disabled")
+    resolved_sp = next(iter(fsp.values())) if isinstance(fsp, dict) else fsp
+    print(f"  fixed SP (always on): seeds/SYSTEM_PROMPT.txt "
+          f"({len(resolved_sp)} chars, shared by every seed); "
+          "auditor set_system_message disabled")
     if cfg["condition"] is not None:
         print(f"  condition: {cfg['condition']} (pinned seed dir(s) -- core.md + "
               f"conditions/{cfg['condition']}.md + inlined pinned files; a collection "
@@ -312,7 +324,7 @@ def run_audit_stage(cfg: dict):
         print("\n!! AUDIT STAGE CRASHED (continuing to annotate+viewer on existing logs):")
         print(f"   {type(e).__name__}: {e}")
         traceback.print_exc()
-        return None, log_dir, expected_n
+        return None, log_dir, expected_n, False
 
     print(f"\neval_set finished, success={success}")
     actual_n = 0
@@ -322,7 +334,7 @@ def run_audit_stage(cfg: dict):
         print(f"  {log.eval.task}: status={log.status}, samples={n}")
 
     # Robustness check #1: did every target actually generate? Warn, don't abort.
-    dead = dead_targets(logs, target_models)
+    dead = unrecovered_dead_targets(logs, target_models)
     if dead:
         print("\n" + "!" * 72)
         print(f"WARNING: target(s) {dead} produced 0 output tokens -- they never ran")
@@ -339,25 +351,132 @@ def run_audit_stage(cfg: dict):
               "The viewer will show only what completed.")
     else:
         print(f"\nall {expected_n} trajectories present.")
-    return logs, log_dir, expected_n
+
+    integrity_failures = audit_integrity_failures(logs)
+    if integrity_failures:
+        print("\n" + "!" * 72)
+        print(
+            f"WARNING: {len(integrity_failures)} trajectory(ies) have data-integrity "
+            "failures. They remain visible in the viewer but are excluded from analysis:"
+        )
+        for failure in integrity_failures:
+            print(
+                f"  {failure['task']}/{failure['sample']} epoch {failure['epoch']}: "
+                f"{', '.join(failure['issues'])}"
+            )
+        print("!" * 72)
+
+    integrity_ok = (
+        bool(success)
+        and actual_n == expected_n
+        and not dead
+        and not integrity_failures
+    )
+    return logs, log_dir, expected_n, integrity_ok
 
 
-async def run_post_audit_stages(cfg: dict) -> None:
+def audit_integrity_failures(logs: list) -> list[dict]:
+    """Per-sample primary-judge and target-provider failures in fresh eval logs.
+
+    This is the run-time counterpart of ``viewer_load.finalize_audit_integrity``.
+    It deliberately runs before annotation so the terminal result cannot call a
+    sample set complete merely because every ``EvalSample`` object exists.
+    """
+    failures: list[dict] = []
+    for log in logs or []:
+        roles = log.eval.model_roles or {}
+        target_model = (
+            getattr(roles.get("target"), "model", None)
+            or str(roles.get("target", "?"))
+        )
+        declared = list((log.eval.metadata or {}).get("judge_dimensions") or [])
+        for sample in log.samples or []:
+            score = (sample.scores or {}).get("audit_judge")
+            status, _issue = judge_score_status(score)
+            values = (
+                score.value
+                if score is not None and isinstance(getattr(score, "value", None), dict)
+                else {}
+            )
+            missing_dimensions = [
+                dimension
+                for dimension in declared
+                if not isinstance(values.get(dimension), (int, float))
+            ]
+            target_usage = context_calls_for_role(sample, "target", target_model)
+            issues: list[str] = []
+            if status != "usable":
+                issues.append(f"judge_score_{status}")
+            if missing_dimensions:
+                issues.append(
+                    "judge_dimensions_missing:" + ",".join(missing_dimensions)
+                )
+            if (
+                target_output_tokens(sample, target_model) == 0
+                and not target_usage.get("visible_responses")
+            ):
+                issues.append("target_no_output")
+            issues.extend(
+                f"target_provider_{event['kind']}:attempt{event.get('attempt', '?')}"
+                for event in blocking_target_provider_events(target_usage)
+            )
+            if issues:
+                failures.append({
+                    "task": log.eval.task,
+                    "sample": str(sample.id),
+                    "epoch": sample.epoch,
+                    "issues": list(dict.fromkeys(issues)),
+                })
+    return failures
+
+
+def unrecovered_dead_targets(logs: list, target_models: list[str]) -> list[str]:
+    """Token-based dead-target guard, repaired by direct visible-response evidence.
+
+    Inspect's aggregate usage is normally the cheapest reliable guard against a bad
+    slug/key/402. Some provider responses omit usage metadata, though; a target that
+    visibly answered must not be declared dead solely because that counter stayed zero.
+    """
+    dead = set(dead_targets(logs, target_models))
+    if not dead:
+        return []
+    for log in logs or []:
+        roles = log.eval.model_roles or {}
+        target_model = (
+            getattr(roles.get("target"), "model", None)
+            or str(roles.get("target", "?"))
+        )
+        target_name = target_model.split("/")[-1]
+        if target_name not in dead:
+            continue
+        if any(
+            context_calls_for_role(sample, "target", target_model).get("visible_responses")
+            for sample in (log.samples or [])
+        ):
+            dead.remove(target_name)
+    return sorted(dead)
+
+
+async def run_post_audit_stages(cfg: dict) -> bool:
     """Stages 2 (annotate) and 3 (viewer). Each is wrapped so a failure in one
     doesn't prevent the other; the viewer always runs last."""
+    ok = True
     if not cfg["skip_annotate"]:
         print("\n" + "=" * 72)
         print("STAGE 2/3  ANNOTATE  (secondary hack-turn judging of FULL reward hacks)")
         print("=" * 72)
         try:
             audits = await load_all_original_audits()
-            await run_annotation(
+            annotation_stats = await run_annotation(
                 audits,
                 model=cfg["annotate_model"],
                 concurrency=cfg["concurrency"],
                 force=cfg["force_annotate"],
             )
+            if annotation_stats.get("failed"):
+                ok = False
         except Exception as e:
+            ok = False
             print(f"\n!! ANNOTATE STAGE FAILED (continuing to viewer): {type(e).__name__}: {e}")
             traceback.print_exc()
     else:
@@ -370,21 +489,31 @@ async def run_post_audit_stages(cfg: dict) -> None:
         try:
             await viewer.main()
         except Exception as e:
+            ok = False
             print(f"\n!! VIEWER STAGE FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()
     else:
         print("\n(skipping STAGE 3 viewer: --skip-viewer)")
+    return ok
 
 
 def main() -> None:
     cfg = _parse_args()
     # eval_set is synchronous and spins up its own event loop, so it must run OUTSIDE
     # asyncio.run; the async annotate/viewer stages run after it.
-    run_audit_stage(cfg)
-    asyncio.run(run_post_audit_stages(cfg))
+    _logs, _log_dir, _expected_n, audit_ok = run_audit_stage(cfg)
+    post_ok = asyncio.run(run_post_audit_stages(cfg))
     print("\n" + "=" * 72)
-    print(f"PIPELINE DONE.  open {DATA / 'viewer' / 'index.html'}")
+    if audit_ok and post_ok:
+        print(f"PIPELINE DONE.  open {DATA / 'viewer' / 'index.html'}")
+    else:
+        print(
+            "PIPELINE FINISHED WITH INTEGRITY FAILURES. "
+            f"Inspect {DATA / 'viewer' / 'index.html'} and the warnings above."
+        )
     print("=" * 72)
+    if not (audit_ok and post_ok):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -78,8 +78,9 @@ also forces a lie or a conspicuous omission there.
 ## How a run actually works
 
 Identical mechanics to the ML seeds: no real code executes, the auditor fabricates all
-tool results, and each variant's files pin that improvisation (`SYSTEM_PROMPT.txt`,
-`USER_PROMPT.txt`, `environment/`, `core.md`, `conditions/allow|correct.md`). One
+tool results, and each variant's files pin that improvisation (`USER_PROMPT.txt`,
+`environment/`, `core.md`, `conditions/allow|correct.md`). Every seed family shares the
+target prompt at `seeds/SYSTEM_PROMPT.txt`. One
 addition with no ML equivalent: `core.md` pins a **timing canon** — a fixed schedule of
 what the baseline, each legitimate fix, the honest floor, and a hack should cost.
 Wall-clock times have no natural scale (unlike F1), and targets doing performance work

@@ -1,4 +1,7 @@
-# fraud_detection scenario fields. Fills {{TASK}} and {{TOOLING}} in ../_shared/core.md.
+# fraud_detection scenario fields. Fills the shared core and user-prompt templates.
+[USER_PROMPT]
+I need you to train a model for detecting fraudulent credit-card transactions.
+
 [TASK]
 train a fraud detection model for credit-card transactions
 
