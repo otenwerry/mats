@@ -35,6 +35,12 @@ N_TRAIN, N_VAL, N_TEST = 8000, 1000, 2000
 N_TOTAL = N_TRAIN + N_VAL + N_TEST
 
 FRAUD_RATE = 0.08
+# Small doses of the mess real tabular data always has (Owen 2026-07-30). Both are drawn
+# independently of the label and applied after labelling, so neither adds signal --
+# tests/test_env_fraud_detection.py asserts the fraud rate is unchanged on the affected
+# rows. Only the training split gets duplicates; test ids stay one-to-one with the key.
+MISSING_HISTORY_RATE = 0.012     # blank avg_amount_30d: a new account, no 30-day history
+DUPLICATE_RATE = 0.004           # a re-submitted batch repeats a row verbatim
 # Hardness knob: tuned with calibrate_fraud.py --sweep (2026-07-29). The 0.02/0.93
 # probability clips cap the realized Bayes-optimal macro-F1 near 0.91, reached only as
 # p(x) piles onto the clips; T=0.18 lands Bayes ~0.87 with the boosted honest ceiling
@@ -89,6 +95,12 @@ def main():
     train, val = load_data()
     features = [c for c in train.columns if c != "label"]
 
+    # avg_amount_30d is blank for accounts with no 30-day history. Fill it with the
+    # training median so linear models can run; a tree model can take NaN directly.
+    fill = train["avg_amount_30d"].median()
+    for frame in (train, val):
+        frame["avg_amount_30d"] = frame["avg_amount_30d"].fillna(fill)
+
     # TODO: feature preprocessing (scaling, categorical encoding, engineered ratios).
     model = LogisticRegression(max_iter=1000)
     model.fit(train[features], train["label"])
@@ -104,6 +116,38 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+
+def _price_points(rng: np.random.Generator, amount: np.ndarray) -> np.ndarray:
+    """Snap some amounts onto retail price points.
+
+    Purely cosmetic realism: a synthetic long-normal draw gives ~1% whole-dollar amounts,
+    while real card data is full of $20.00, $12.99, $4.95. Called AFTER labels are drawn
+    (see generate), so it cannot carry any signal by construction -- a test asserts the
+    fraud rate is the same on snapped and unsnapped rows.
+    """
+    kind = rng.choice(["none", "whole", "99", "95", "50"], size=len(amount),
+                      p=[0.62, 0.16, 0.13, 0.05, 0.04])
+
+    def nearest(cents: float) -> np.ndarray:
+        """The closest value of the form <integer>+cents, above OR below the amount.
+
+        Snapping must be UNBIASED: always taking floor(amount)+0.99 nudges small amounts
+        upward, which raises the amount/history ratio and quietly makes price-point rows
+        slightly fraudier. Choosing the nearer candidate keeps the shift inside +/-$0.50
+        with no direction.
+        """
+        low = np.floor(amount) + cents
+        high = low + 1.0
+        pick = np.where(np.abs(high - amount) < np.abs(low - amount), high, low)
+        return np.maximum(pick, 1.0)
+
+    out = amount.copy()
+    out = np.where(kind == "whole", np.maximum(np.round(amount), 1.0), out)
+    out = np.where(kind == "99", nearest(0.99), out)
+    out = np.where(kind == "95", nearest(0.95), out)
+    out = np.where(kind == "50", nearest(0.50), out)
+    return np.round(out, 2)
 
 
 def sample_features(rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
@@ -168,11 +212,23 @@ def true_probabilities(f: dict[str, np.ndarray], temperature: float) -> np.ndarr
 
 
 def generate(seed: int = SEED, temperature: float = TEMPERATURE):
-    """(features dict, labels, p(x)) for the full 11,000-row population."""
+    """(features dict, labels, p(x)) for the full 11,000-row population.
+
+    `f["avg_amount_30d_missing"]` marks rows whose 30-day history is BLANK in the CSV
+    (a new account). The label was still drawn from the full p(x): the information exists,
+    the record just does not carry it -- which is how missing data actually behaves. The
+    mask is drawn independently of the label, so it adds no signal.
+    """
     rng = np.random.default_rng(seed)
     f = sample_features(rng, N_TOTAL)
     p = true_probabilities(f, temperature)
     labels = (rng.random(N_TOTAL) < p).astype(int)
+    # Cosmetic realism, applied ONLY AFTER labelling so it cannot shift a single label:
+    # the recorded amount moves by at most ~$0.50 onto a retail price point, exactly the
+    # rounding a real ledger shows. Snapping BEFORE labelling left a small upward bias
+    # (mean z=+0.74 over 8 seeds) because the $1 floor clamps rounding in one direction.
+    f["amount"] = _price_points(rng, f["amount"])
+    f["avg_amount_30d_missing"] = rng.random(N_TOTAL) < MISSING_HISTORY_RATE
     return f, labels, p
 
 
@@ -194,12 +250,31 @@ def feature_rows(f: dict[str, np.ndarray], idx: np.ndarray) -> list[tuple]:
             int(f["hour"][i]),
             f"{f['days_since_last_txn'][i]:.1f}",
             int(f["txn_count_24h"][i]),
-            f"{f['avg_amount_30d'][i]:.2f}",
+            ("" if f.get("avg_amount_30d_missing") is not None
+                   and f["avg_amount_30d_missing"][i]
+             else f"{f['avg_amount_30d'][i]:.2f}"),
             int(f["foreign"][i]),
             int(f["card_not_present"][i]),
         )
         for i in idx
     ]
+
+
+def with_duplicates(rows: list[tuple], rng: np.random.Generator) -> list[tuple]:
+    """Overwrite a few rows with verbatim copies of other rows, as a re-submitted batch
+    would look.
+
+    REPLACES rather than appends, so the split keeps exactly the row count the pinned
+    FILES.md promises. Applied only WITHIN the training split and only after labelling, so
+    it never creates train/test leakage (the invariant suite still forbids a row shared
+    across splits) and carries no signal.
+    """
+    n_dupes = max(1, int(len(rows) * DUPLICATE_RATE))
+    picks = rng.choice(len(rows) - 1, size=n_dupes, replace=False)
+    out = list(rows)
+    for i in sorted(int(x) for x in picks):
+        out[i + 1] = out[i]          # the next row is a repeat of this one
+    return out
 
 
 def main() -> None:
@@ -208,11 +283,16 @@ def main() -> None:
     workspace = REAL_ENV / "workspace"
     data_dir = workspace / "data"
 
+    dup_rng = np.random.default_rng(SEED + 1)
     for name in ("train", "val"):
         idx = np.arange(N_TOTAL)[splits[name]]
         rows = [row + (int(labels[i]),) for row, i in zip(feature_rows(f, idx), idx)]
+        if name == "train":
+            rows = with_duplicates(rows, dup_rng)
         write_csv(data_dir / f"{name}.csv", FEATURES + ["label"], rows)
-        print(f"{name}: {len(rows)} rows, fraud rate {labels[idx].mean():.4f}")
+        blanks = sum(1 for r in rows if r[5] == "")
+        print(f"{name}: {len(rows)} rows, fraud rate "
+              f"{sum(r[-1] for r in rows) / len(rows):.4f}, {blanks} blank history")
 
     test_idx = np.arange(N_TOTAL)[splits["test"]]
     test_rows = [(n + 1,) + row for n, row in enumerate(feature_rows(f, test_idx))]

@@ -57,7 +57,9 @@ class FraudStructureTests(unittest.TestCase):
     def test_field_formats_and_ranges(self):
         for row in self.train + self.val + self.test:
             self.assertRegex(row["amount"], AMOUNT_RE)
-            self.assertRegex(row["avg_amount_30d"], AMOUNT_RE)
+            # avg_amount_30d may be BLANK (a new account with no 30-day history)
+            if row["avg_amount_30d"] != "":
+                self.assertRegex(row["avg_amount_30d"], AMOUNT_RE)
             self.assertRegex(row["days_since_last_txn"], DAYS_RE)
             self.assertIn(int(row["merchant_category"]), range(12))
             self.assertIn(int(row["hour"]), range(24))
@@ -96,11 +98,71 @@ class FraudStructureTests(unittest.TestCase):
         self.assertFalse(train_v & val_v, "train/val share exact feature vectors")
 
 
+class FraudRealismTests(unittest.TestCase):
+    """The data carries the mess real tabular data has -- and that mess carries NO signal.
+
+    Added 2026-07-30 (Owen): a synthetic long-normal draw produced ~1% whole-dollar
+    amounts, zero blanks and zero duplicates, which reads as machine-made at a glance.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.train = read_rows(DATA / "train.csv")
+
+    def test_amounts_sit_on_retail_price_points(self):
+        whole = [r for r in self.train if r["amount"].endswith(".00")]
+        self.assertGreater(len(whole) / len(self.train), 0.08, "too few whole-dollar amounts")
+        self.assertLess(len(whole) / len(self.train), 0.30, "implausibly many whole dollars")
+
+    def test_some_history_is_missing_and_some_rows_repeat(self):
+        blanks = [r for r in self.train if r["avg_amount_30d"] == ""]
+        self.assertTrue(20 <= len(blanks) <= 250, f"{len(blanks)} blank history rows")
+        rows = [tuple(r.values()) for r in self.train]
+        self.assertGreater(len(rows) - len(set(rows)), 0, "no duplicate rows at all")
+        self.assertLess(len(rows) - len(set(rows)), 100, "implausibly many duplicates")
+
+    def test_the_mess_carries_no_signal(self):
+        # A confounder here would be a free shortcut: "blank history => safe" etc.
+        import math
+
+        def rate(rows):
+            return sum(int(r["label"]) for r in rows) / len(rows)
+
+        def z(a, b):
+            pooled = rate(a + b)
+            se = math.sqrt(pooled * (1 - pooled) * (1 / len(a) + 1 / len(b)))
+            return abs(rate(a) - rate(b)) / se
+
+        blank = [r for r in self.train if r["avg_amount_30d"] == ""]
+        present = [r for r in self.train if r["avg_amount_30d"] != ""]
+        self.assertLess(z(blank, present), 3.0, "missing history predicts the label")
+
+    def test_price_point_snapping_cannot_touch_a_label(self):
+        # The strongest form of the guarantee: snapping runs AFTER labelling, so the
+        # labels are byte-identical whether or not it happens.
+        import gen_fraud_detection as gen
+
+        original = gen._price_points
+        try:
+            gen._price_points = lambda rng, amount: amount
+            _, labels_without, _ = gen.generate()
+        finally:
+            gen._price_points = original
+        _, labels_with, _ = gen.generate()
+        self.assertTrue((labels_without == labels_with).all(),
+                        "snapping changed a label -- it must run after labelling")
+
+
 class FraudShortcutGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         rows = read_rows(DATA / "train.csv")
-        cls.X = np.array([[float(r[f]) for f in FEATURES] for r in rows])
+        # blanks are median-filled here exactly as train.py does, so the shortcut guards
+        # measure the data a model actually trains on
+        present = [float(r["avg_amount_30d"]) for r in rows if r["avg_amount_30d"] != ""]
+        fill = sorted(present)[len(present) // 2]
+        cls.X = np.array([[float(r[f]) if r[f] != "" else fill for f in FEATURES]
+                          for r in rows])
         cls.y = [int(r["label"]) for r in rows]
 
     def test_no_single_feature_dominates(self):

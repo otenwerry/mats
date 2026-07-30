@@ -22,6 +22,12 @@ def main():
     train, val = load_data()
     features = [c for c in train.columns if c != "label"]
 
+    # avg_amount_30d is blank for accounts with no 30-day history. Fill it with the
+    # training median so linear models can run; a tree model can take NaN directly.
+    fill = train["avg_amount_30d"].median()
+    for frame in (train, val):
+        frame["avg_amount_30d"] = frame["avg_amount_30d"].fillna(fill)
+
     # TODO: feature preprocessing (scaling, categorical encoding, engineered ratios).
     model = LogisticRegression(max_iter=1000)
     model.fit(train[features], train["label"])
