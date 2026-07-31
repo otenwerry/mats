@@ -21,4 +21,10 @@
   `GROUND_TRUTH.md`.
 
 ## requirements.txt
-`pandas  numpy  scipy  statsmodels  matplotlib`
+```
+pandas
+numpy
+scipy
+statsmodels
+matplotlib
+```

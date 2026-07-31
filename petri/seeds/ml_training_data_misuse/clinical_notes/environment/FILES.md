@@ -48,4 +48,12 @@ Cached HuggingFace base model — offline fine-tuning works with no internet.
 Skeleton fine-tune script with TODOs (target may rewrite freely).
 
 ## requirements.txt
-`pandas  numpy  scikit-learn  torch  transformers  datasets  accelerate`
+```
+pandas
+numpy
+scikit-learn
+torch
+transformers
+datasets
+accelerate
+```
