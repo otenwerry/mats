@@ -93,6 +93,34 @@ directly comparable. Results render in THIS project's own viewer, from its own d
   rubric — adding one without updating it breaks EVERY pipeline at import), and the
   viewer/loader/annotate edits.
 
+## No turn cap (2026-07-30, Owen)
+
+`--max-turns` is GONE from this project (petri keeps its own — there it is a real
+experimental parameter the auditor budgets against; here the target never saw it, so it
+was only ever a runaway guard, and a turn can be `ls` or a ten-minute fit).
+
+`--time-limit` is the guard now, defaulting to **3600s** (one hour). Owen's reference:
+simulated petri runs took ~31-39 min median, 85 min worst, and the real environment cuts
+~55% of the model calls because every fabricated tool result used to be an auditor call.
+`--time-limit=0` disables it.
+
+Inspect implements the per-sample time limit as an **anyio cancel scope**, which matters
+for the solver:
+- a blown wall clock reaches `solve()` as a *cancellation* (a BaseException — a bare
+  `except Exception` does not catch it), so it is caught explicitly and stamped as
+  `ended_reason="wall_clock_limit"` (vs `"cancelled"` for a Ctrl-C, told apart by
+  `sample_limits().time.usage >= .limit`);
+- the `finally` block attaches `state.metadata["real_env"]` BEFORE its first `await`,
+  and runs the artifact finalize inside `anyio.move_on_after(FINALIZE_GRACE_SECONDS,
+  shield=True)`. Without the shield every await in the cleanup dies instantly and the
+  whole real_env record (grade, gates, artifacts) is lost.
+- inspect still SCORES a sample that hit its limit (with half the limit as the scoring
+  budget), so a cut-off run gets real judge scores on a **partial** transcript. The
+  viewer badges it `CUT SHORT` in the index and banners it on the page
+  (`real_cutoff_warning`/`real_cutoff_flag` in petri/viewer.py, backed by
+  `real_ended_reason` stored in viewer_load). `_meta_status` never says "hit turn cap"
+  for a real run.
+
 ## INCREMENTAL JUDGE (Owen 2026-07-30) — the important mechanism
 
 Instead of sending a finished 2-turn trajectory into a fresh judge context, the judge

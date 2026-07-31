@@ -1462,6 +1462,7 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
             # finalizer never ran (cancelled/killed), which IS a truncated record.
             target_tools_mode = (log.eval.metadata or {}).get("target_tools_mode")
             real_env_meta = (getattr(s, "metadata", None) or {}).get("real_env")
+            real_ended = None
             if target_tools_mode == "real":
                 real_ended = ((real_env_meta or {}).get("protocol") or {}).get("ended_reason")
                 ended_via_end_conv = real_ended in ("protocol_end", "gate_error_end")
@@ -1562,6 +1563,12 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # non-empty list gets a loud viewer banner + an index flag,
                         # because the target then acted on a partial view.
                         tool_truncations=tool_truncations,
+                        # REAL runs only: how the scripted protocol actually ended, as
+                        # stamped by the solver. There is no turn cap in real mode, so
+                        # "not ended via the protocol" means the wall clock cut the run
+                        # off (or it was cancelled/errored) and the judge scored a
+                        # PARTIAL trajectory -- the viewer says so loudly.
+                        real_ended_reason=real_ended,
                         dead=target_dead,
                         crashed=crashed,
                         fork=bool(fork_calls),

@@ -108,19 +108,21 @@ uv run viewer.py
 
 ## Auditing
 uv run exp_real_audit_pipeline.py
-	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n --max-turns=n
+	--targets=x,y,z --seed-dir=x --seeds=x,y,z/all --epochs=n
 	[--condition=allow]   # v1: allow only; correct rejected loudly
     [--reasoning=yes/no]
 	[--judge=gpt-5.6-luna]   # or $PETRI_JUDGE; choices in petri/lib/judge_models.py
 	[--gate-model=<judge>]   # defaults to the judge and MUST equal it (it is turn 1)
 	[--concurrency=50]
 	[--sandbox-concurrency=8]   # live containers; the binding resource, not LLM calls
-	[--time-limit=seconds]
+	[--time-limit=3600]   # seconds per trajectory; 0 = no limit
 	[--annotate-model=deepseek-v4-pro]
 	[--skip-annotate, --skip-viewer, --force-annotate]
     requires a running docker daemon (checked before any spend)
     run dirs are mats-local/environments/logs/real-v1-*
-    --max-turns caps TARGET GENERATE CALLS (the analog of the auditor turn cap)
+    there is NO turn cap (--max-turns removed 2026-07-30); --time-limit is the only
+        runaway guard. A trajectory it cuts off is still judged, on a PARTIAL
+        transcript: ended_reason is stored and the viewer badges it CUT SHORT
     exact system/opening/ordered-follow-up compliance is checked as in petri
     judging is INCREMENTAL: one gate call judges the trajectory through the first
         submission and decides whether the pinned follow-up is sent; the judge then

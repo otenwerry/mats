@@ -16,12 +16,15 @@ sys.path.insert(0, str(PETRI / "lib"))
 sys.path.insert(0, str(PETRI))
 
 from exp_real_audit import (  # noqa: E402
+    DEFAULT_TIME_LIMIT_SECONDS,
     REAL_PROTOCOL_VERSION,
     RealProtocolController,
     RealProtocolSpec,
     assemble_real_protocol,
     build_real_tasks,
     real_dimensions_for_seed,
+    reject_max_turns_flag,
+    resolve_time_limit,
 )
 from exp_real_gate import GateConfig  # noqa: E402
 from judge_models import resolve_judge  # noqa: E402
@@ -172,7 +175,7 @@ class BuildRealTasksTests(unittest.TestCase):
     def test_task_contract(self):
         tasks = build_real_tasks(
             ["qwen3-32b"], ["fraud_detection"], "test-run",
-            reasoning=True, condition="allow", max_turns=200,
+            reasoning=True, condition="allow",
             gate_model=resolve_judge(None),   # the gate must equal the judge
             seeds_path=str(FRAUD.parent),
         )
@@ -182,6 +185,8 @@ class BuildRealTasksTests(unittest.TestCase):
         md = task.metadata
         self.assertEqual(md["target_tools_mode"], "real")
         self.assertEqual(md["condition"], "allow")
+        # no turn cap in real mode: the wall clock is the only runaway guard
+        self.assertIsNone(md["max_turns"])
         self.assertIn("environment_failure", md["judge_dimensions"])
         self.assertNotIn("auditor_mistakes", md["judge_dimensions"])
         self.assertTrue(md["real_env_manifest_sha"])
@@ -195,10 +200,51 @@ class BuildRealTasksTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build_real_tasks(
                 ["qwen3-32b"], ["fraud_detection"], "x",
-                reasoning=True, condition="correct", max_turns=200,
+                reasoning=True, condition="correct",
                 gate_model=resolve_judge(None),   # the gate must equal the judge
                 seeds_path=str(FRAUD.parent),
             )
+
+
+
+class TimeLimitFlagTests(unittest.TestCase):
+    """--time-limit replaced --max-turns as the runaway guard, so its defaulting and
+    validation are now load-bearing rather than incidental."""
+
+    def test_default_is_one_hour(self):
+        self.assertEqual(DEFAULT_TIME_LIMIT_SECONDS, 3600)
+        self.assertEqual(resolve_time_limit(None), 3600)
+
+    def test_explicit_value_wins(self):
+        self.assertEqual(resolve_time_limit("900"), 900)
+
+    def test_zero_means_no_limit(self):
+        self.assertIsNone(resolve_time_limit("0"))
+
+    def test_bad_values_fail_before_the_run(self):
+        for bad in ("abc", "-1", "1.5"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                resolve_time_limit(bad)
+
+    def test_stale_max_turns_flag_is_rejected_not_ignored(self):
+        """The lib CLI does not validate unknown flags, so a leftover --max-turns must be
+        caught explicitly rather than silently dropped."""
+        for argv in (["prog", "--max-turns=200"], ["prog", "--max-turns"]):
+            with self.subTest(argv=argv):
+                saved, sys.argv = sys.argv, argv
+                try:
+                    with self.assertRaises(SystemExit) as caught:
+                        reject_max_turns_flag()
+                finally:
+                    sys.argv = saved
+                self.assertIn("--time-limit", str(caught.exception))
+
+    def test_normal_argv_passes_the_max_turns_check(self):
+        saved, sys.argv = sys.argv, ["prog", "--target=qwen3-32b", "--time-limit=900"]
+        try:
+            reject_max_turns_flag()
+        finally:
+            sys.argv = saved
 
 
 if __name__ == "__main__":

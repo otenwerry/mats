@@ -2797,6 +2797,43 @@ def truncation_flag(a: dict) -> str:
     )
 
 
+# How a REAL-environment run ended (metadata.real_env.protocol.ended_reason), split into
+# the ones that mean "the scripted protocol ran to its end" and the ones that mean "we cut
+# it off". Real mode has no turn cap, so anything in the second group is a partial
+# trajectory that the judge nonetheless scored.
+_REAL_END_CLEAN = {"protocol_end", "gate_error_end"}
+_REAL_END_CUT = {
+    "wall_clock_limit": "the per-trajectory wall-clock limit (--time-limit) fired",
+    "cancelled": "the eval was cancelled",
+    "interrupted": "the target loop raised before the protocol ended",
+}
+
+
+def real_cutoff_warning(a: dict) -> str:
+    """LOUD trajectory-page banner when a real run was cut off instead of ending."""
+    reason = a.get("real_ended_reason")
+    if reason is None or reason in _REAL_END_CLEAN:
+        return ""
+    why = _REAL_END_CUT.get(reason, f"the run ended as {reason!r}")
+    return (
+        '<div class="deadbanner">&#9888; <b>RUN CUT SHORT</b> &mdash; '
+        f"the scripted protocol never reached its end: {esc(why)}. The judge scored a "
+        "<b>partial</b> trajectory, so incompleteness (and anything read off the final "
+        "deliverables) describes where we stopped the model, not where it stopped."
+        "</div>"
+    )
+
+
+def real_cutoff_flag(a: dict) -> str:
+    """Compact index-table badge mirroring the same stored record."""
+    reason = a.get("real_ended_reason")
+    if reason is None or reason in _REAL_END_CLEAN:
+        return ""
+    why = _REAL_END_CUT.get(reason, str(reason))
+    return (f' <span class="hacktag" title="{esc(why)}; the judge scored a partial '
+            f'trajectory">&#9888; CUT SHORT</span>')
+
+
 def annotation_coverage_warning(ann: dict | None) -> str:
     """Banner describing how much of the transcript the AGENTIC annotator actually read.
 
@@ -2994,6 +3031,9 @@ def _meta_status(a: dict) -> str:
         base = "dead (no target output)"
     elif a.get("crashed"):
         base = "crashed (auditor stalled)"
+    elif a.get("real_ended_reason") is not None:
+        # real mode has no auditor and no turn cap; the solver stamps the actual reason
+        base = f"real protocol: {a['real_ended_reason']}"
     elif a.get("ended_via_end_conv"):
         base = "auditor ended (end_conversation)"
     else:
@@ -3138,6 +3178,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {integrity_warning(a)}
 {truncation_warning(a)}
+{real_cutoff_warning(a)}
 {auditor_protocol_warning(a)}
 {annotation_coverage_warning(ann)}
 {banners}
@@ -3395,6 +3436,8 @@ def write_table(title: str, definition: str, count: str, audits: list[dict],
         flag += auditor_protocol_flag(a)
         # truncated tool output: the target saw a partial view of its own command output
         flag += truncation_flag(a)
+        # real runs only: the protocol never reached its end (wall clock / cancel / error)
+        flag += real_cutoff_flag(a)
         comp_flag = ' <span class="comptag">&#9888; COMPACTED</span>' if a.get("compactions") else ""
         # (The old CUTOFF badge -- which flagged audits that ran to the max-turns cap -- was
         # removed in favor of the `incompleteness` judge dimension, a more fine-grained measure

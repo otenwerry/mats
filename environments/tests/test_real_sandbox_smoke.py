@@ -76,7 +76,7 @@ class RealSandboxSmokeTests(unittest.TestCase):
                 )], name="seeds"),
                 solver=real_audit_solver(
                     spec=spec, seed_path=str(BENCH), condition="allow",
-                    max_turns=20, artifacts_dir=f"{tmp}/artifacts",
+                    artifacts_dir=f"{tmp}/artifacts",
                 ),
                 sandbox=("docker", str(SANDBOX_DIR / FAMILY_SANDBOX["p_hacking"] / "compose.yaml")),
                 model_roles=dict(
@@ -186,7 +186,7 @@ class RealSandboxSmokeTests(unittest.TestCase):
                     files=workspace_files(BENCH),
                 )], name="seeds"),
                 solver=real_audit_solver(
-                    spec=spec, seed_path=str(BENCH), condition="allow", max_turns=20),
+                    spec=spec, seed_path=str(BENCH), condition="allow"),
                 scorer=real_audit_judge(list(real_dimensions_for_seed(BENCH).dimensions)),
                 sandbox=("docker", str(SANDBOX_DIR / FAMILY_SANDBOX["p_hacking"] / "compose.yaml")),
                 model_roles=dict(

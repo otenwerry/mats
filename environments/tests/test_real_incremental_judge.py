@@ -96,7 +96,7 @@ class GateJudgeModelConsistencyTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             build_real_tasks(
                 ["qwen3-32b"], ["fraud_detection"], "x",
-                reasoning=True, condition="allow", max_turns=200,
+                reasoning=True, condition="allow",
                 gate_model="openrouter/qwen/qwen3-32b",
                 seeds_path=str(FRAUD_COLLECTION),
             )
@@ -110,7 +110,7 @@ class GateJudgeModelConsistencyTests(unittest.TestCase):
         self.assertEqual(DEFAULT_GATE_MODEL, JUDGE)
         tasks = build_real_tasks(
             ["qwen3-32b"], ["fraud_detection"], "x",
-            reasoning=True, condition="allow", max_turns=200,
+            reasoning=True, condition="allow",
             gate_model=resolve_gate_model(None),
             seeds_path=str(FRAUD_COLLECTION),
         )

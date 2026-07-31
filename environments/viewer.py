@@ -244,6 +244,12 @@ async def main() -> None:
         if truncated:
             print(f"  NOTE: {len(truncated)} trajectory(ies) had TRUNCATED tool output "
                   "(flagged on their pages and in the index)")
+        cut = [a for a in audits if pv.real_cutoff_flag(a)]
+        if cut:
+            reasons = sorted({str(a.get("real_ended_reason")) for a in cut})
+            print(f"  NOTE: {len(cut)} trajectory(ies) were CUT SHORT before the scripted "
+                  f"protocol ended ({', '.join(reasons)}); the judge scored partial "
+                  "trajectories. Flagged on their pages and in the index")
         print(f"\nwrote {OUT / PAGE_FILE}  ({len(audits)} trajectory(ies))")
 
 

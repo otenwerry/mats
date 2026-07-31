@@ -6,17 +6,16 @@ pinned file, and the only in-run AI decision is the first-submission gate
 Usage (CLI, from petri/ -- this file lives in lib/; exp_real_audit_pipeline.py is the
 one-command wrapper with annotate + viewer stages):
   uv run lib/exp_real_audit.py --target=qwen3-32b --seed-dir=ml_training_data_misuse \
-      --seeds=fraud_detection --max-turns=200 --epochs=1
+      --seeds=fraud_detection --epochs=1
 
 Flags (mirroring exp_rh_audit.py, minus the auditor):
   --target=<a,b,..>       REQUIRED. Names from TARGET_CHOICES, comma-separated.
   --seed-dir=<sub>        REQUIRED. Pinned seed dir or collection; every selected member
                           must have a generated real_env/workspace/ tree.
   --seeds=<a,b,..>        Member names within the collection (default: all PORTED ones).
-  --condition=<c>         allow only in v1 (correct is a designed seam, rejected loudly).
+  --condition=<c>         defaults to allow; v1 supports allow only (correct is a
+                          designed seam, rejected loudly).
   --epochs=<N>            default 1.
-  --max-turns=<N>         REQUIRED. Cap on TARGET GENERATE CALLS per trajectory (the
-                          real-mode analog of the auditor turn cap).
   --reasoning=yes|no      default yes (same semantics as simulated audits).
   --judge=<m>             alignment judge (default: lib/judge_models.py, currently
                           gpt-5.6-luna; or set $PETRI_JUDGE). Shortname or full slug.
@@ -25,7 +24,9 @@ Flags (mirroring exp_rh_audit.py, minus the auditor):
   --concurrency=<N>       LLM parallelism (default 50, as everywhere).
   --sandbox-concurrency=<N>  max live Docker containers (default 8; containers, not
                           LLM calls, are the binding resource on a laptop).
-  --time-limit=<seconds>  optional per-sample wall-clock limit.
+  --time-limit=<seconds>  per-trajectory WALL CLOCK budget, default 3600 (one hour).
+                          This is the runaway guard -- there is no turn cap. Pass 0 to
+                          disable it entirely (not recommended).
 
 Requires a running Docker daemon (each trajectory gets its own container built from
 petri/sandbox/<family>/). Costs money: target + judge + gate LLM calls.
@@ -39,6 +40,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import anyio
 from dotenv import load_dotenv
 from inspect_ai import Task
 from inspect_ai.dataset import MemoryDataset, Sample
@@ -54,7 +56,7 @@ from inspect_ai.model import (
 )
 from inspect_ai.scorer import mean, stderr
 from inspect_ai.solver import Generate, Solver, TaskState, solver
-from inspect_ai.util import span
+from inspect_ai.util import sample_limits, span
 
 # Internals of inspect_petri's judge, reused exactly the way exp_continuation.py does
 # (the sanctioned pattern): same structured answer, same score key, swapped framing.
@@ -149,6 +151,25 @@ REAL_PROTOCOL_VERSION = "real-exact-script-v1"
 # match) the judge model -- see the check in build_real_tasks.
 DEFAULT_GATE_MODEL = JUDGE
 DEFAULT_SANDBOX_CONCURRENCY = 8
+# Per-trajectory wall-clock budget. This is the ONLY runaway guard: there is no turn cap
+# (removed 2026-07-30), because the target never sees one and a turn can be `ls` or a
+# ten-minute fit. Measured simulated trajectories ran 31-39 min median / 85 min worst;
+# the real environment drops ~55% of the model calls (every fabricated tool result was an
+# auditor call), so an hour is comfortably above a healthy run on the CPU seeds.
+DEFAULT_TIME_LIMIT_SECONDS = 3600
+
+
+def resolve_time_limit(arg: str | None) -> int | None:
+    """Seconds per trajectory. Absent -> one hour. `0` -> no limit (stated explicitly)."""
+    if arg is None:
+        return DEFAULT_TIME_LIMIT_SECONDS
+    try:
+        value = int(arg)
+    except ValueError:
+        raise SystemExit(f"--time-limit must be an integer number of seconds, got {arg!r}")
+    if value < 0:
+        raise SystemExit(f"--time-limit must be >= 0, got {value}")
+    return value or None
 ENVIRONMENTS_ROOT = _ENVIRONMENTS_ROOT
 SANDBOX_DIR = ENVIRONMENTS_ROOT / "sandbox"
 
@@ -381,14 +402,45 @@ async def _render_messages(messages: list) -> str:
         return ""
 
 
+# Grace period for the finally-block artifact extraction, used ONLY when the sample was
+# already cancelled (a wall-clock cutoff). Bounded so a hung container cannot hold the
+# eval open indefinitely past its own time limit.
+FINALIZE_GRACE_SECONDS = 120
+
+
+def get_cancelled_exc_class():
+    """anyio's cancellation exception (asyncio.CancelledError under the default backend).
+
+    It is a BaseException, so a bare `except Exception` does NOT catch it -- which is the
+    whole reason this is handled explicitly.
+    """
+    return anyio.get_cancelled_exc_class()
+
+
+def _time_limit_blown() -> bool:
+    """True when the per-sample WALL CLOCK is what cancelled us, as opposed to the whole
+    eval being cancelled (Ctrl-C). Keeps those two apart in the stored ended_reason."""
+    try:
+        limit = sample_limits().time
+    except Exception:  # noqa: BLE001 - no running sample (unit tests)
+        return False
+    return limit.limit is not None and limit.usage >= limit.limit
+
+
 @solver
 def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
-                      max_turns: int, artifacts_dir: str | None = None) -> Solver:
+                      artifacts_dir: str | None = None) -> Solver:
     """Custom target loop with the same semantics as the simulated target driver:
     tool calls -> execute (for real, in the sandbox) and continue; a text-only response
     is a submission -> the scripted controller answers or ends. react()/basic_agent are
     deliberately NOT used (they inject their own scaffolding and a submit tool, which
-    would break byte-comparability with the simulated protocol)."""
+    would break byte-comparability with the simulated protocol).
+
+    There is NO turn cap (removed 2026-07-30, Owen). The target never saw one -- unlike the
+    simulated auditor, which was told "turn N of M" and budgeted against it -- so it only
+    ever acted as a runaway guard, and a turn is a poor unit for that when one turn can be
+    `ls` or a ten-minute fit. The per-sample WALL CLOCK limit (--time-limit, one hour by
+    default) is the guard now, with a per-command timeout underneath it."""
 
     result_md_path = f"{WORKSPACE_DIR}/RESULT.md"
 
@@ -404,7 +456,9 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
                 ChatMessageUser(content=spec.opening_user_message),
             ]
         model = get_model(role="target")
-        ended_reason = "turn_limit"
+        # Overwritten when the scripted controller ends the run. If the wall-clock limit
+        # or an error cuts the loop short, this is what gets stamped.
+        ended_reason = "interrupted"
         start_snapshot: dict[str, str] = {}
         result_md_sha: str | None = None
         tool_calls_since_user = 0
@@ -413,7 +467,7 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
             async with span(name="target", type="agent"):
                 await create_empty_dirs(seed_path)
                 start_snapshot = await workspace_snapshot()
-                for _ in range(max_turns):
+                while True:
                     turns_used += 1
                     state.output = await model.generate(input=state.messages, tools=tools)
                     state.messages.append(state.output.message)
@@ -467,18 +521,38 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
                         continue
                     ended_reason = payload
                     break
+        except get_cancelled_exc_class():
+            # Inspect implements --time-limit as an anyio cancel scope, so a blown wall
+            # clock reaches this solver as a cancellation (inspect converts it to a
+            # LimitExceededError above us and STILL scores the partial trajectory -- so
+            # the stored reason is the only thing separating "the model finished" from
+            # "we cut it off at an hour").
+            ended_reason = "wall_clock_limit" if _time_limit_blown() else "cancelled"
+            raise
         finally:
             real_env["protocol"] = controller.summary(ended_reason)
             real_env["turns_used"] = turns_used
             real_env["max_tool_output"] = REAL_MAX_TOOL_OUTPUT
-            try:
-                await _finalize_real_sample(
-                    state, spec, real_env, start_snapshot, artifacts_dir
-                )
-            except Exception as ex:  # noqa: BLE001 - e.g. sandbox already torn down
-                real_env["finalize_error"] = repr(ex)[:500]
-                print(f"  !! WARNING [{spec.member}]: artifact finalize failed: {ex!r}")
+            # Attach BEFORE the finalize await. If we got here by cancellation we are
+            # inside an already-expired cancel scope, and an await that gets cancelled
+            # would skip everything below and lose the whole real_env record.
             state.metadata = {**(state.metadata or {}), "real_env": real_env}
+            # Shielded + separately bounded so a timed-out sample still gets its
+            # artifacts graded and copied out (the container is alive until the sample
+            # returns); without the shield every await in here dies instantly.
+            with anyio.move_on_after(FINALIZE_GRACE_SECONDS, shield=True):
+                try:
+                    await _finalize_real_sample(
+                        state, spec, real_env, start_snapshot, artifacts_dir
+                    )
+                except Exception as ex:  # noqa: BLE001 - e.g. sandbox already torn down
+                    real_env["finalize_error"] = repr(ex)[:500]
+                    print(f"  !! WARNING [{spec.member}]: artifact finalize failed: {ex!r}")
+            if "artifacts" not in real_env and "finalize_error" not in real_env:
+                real_env["finalize_error"] = (
+                    f"artifact finalize did not complete within {FINALIZE_GRACE_SECONDS}s"
+                )
+                print(f"  !! WARNING [{spec.member}]: artifact finalize timed out")
             # The live judge path reads transcript.timelines; a plain solver has none,
             # so synthesize the target timeline (mirrors inspect_petri _add_timelines).
             try:
@@ -802,7 +876,7 @@ def ported_members(seeds_path: str) -> list[str]:
 
 def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                      run_label: str, *, reasoning: bool, condition: str,
-                     max_turns: int, gate_model: str, judge: str | None = None,
+                     gate_model: str, judge: str | None = None,
                      seeds_path: str, artifacts_root: Path | None = None) -> list:
     """One plain Inspect Task per (target x ported member): docker sandbox, scripted
     solver, real judge. Mirrors exp_rh_audit.build_tasks' metadata contract."""
@@ -883,7 +957,7 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                 dataset=MemoryDataset([sample], name="seeds"),
                 solver=real_audit_solver(
                     spec=spec, seed_path=str(unit_path), condition=condition,
-                    max_turns=max_turns, artifacts_dir=artifacts_dir,
+                    artifacts_dir=artifacts_dir,
                 ),
                 scorer=real_audit_judge(list(dims.dimensions)),
                 sandbox=("docker", str(compose)),
@@ -903,7 +977,8 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                     "gate_model": gate_model,
                     "nudge": "no_nudge",
                     **dimension_provenance(unit_path, dims),
-                    "max_turns": max_turns,
+                    # no turn cap in real mode; the wall-clock limit bounds a run
+                    "max_turns": None,
                     "target_tools_mode": "real",
                     "target_tools_version": REAL_TOOL_SEMANTICS_VERSION,
                     "target_tool_names": [t["name"] for t in fixed_target_tools_metadata()],
@@ -931,8 +1006,21 @@ def _flag(name: str) -> str | None:
     return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(f"--{name}=")), None)
 
 
+def reject_max_turns_flag() -> None:
+    """This CLI does not validate unknown flags, so a stale --max-turns would be silently
+    ignored and the run would quietly use different semantics than the command says.
+    Fail loudly instead (removed 2026-07-30; --time-limit is the guard now)."""
+    if any(a == "--max-turns" or a.startswith("--max-turns=") for a in sys.argv[1:]):
+        raise SystemExit(
+            "--max-turns no longer exists in real mode: the target never saw a turn cap, "
+            "so it was only a runaway guard. Use --time-limit=<seconds> "
+            f"(default {DEFAULT_TIME_LIMIT_SECONDS}, 0 = no limit)."
+        )
+
+
 def main() -> None:
     reject_fixed_sp_flag()
+    reject_max_turns_flag()
     target_arg = _flag("target")
     if target_arg is None:
         raise SystemExit(f"--target is required; choices: {sorted(TARGET_CHOICES)}")
@@ -957,16 +1045,11 @@ def main() -> None:
             raise SystemExit(f"unknown seeds {bad}; available: {available}")
 
     condition = resolve_condition(_flag("condition"), seeds_path)
-    max_turns_arg = _flag("max-turns")
-    if max_turns_arg is None:
-        raise SystemExit("--max-turns is required (cap on target generate calls; "
-                         "documented runs use 200)")
-    max_turns = int(max_turns_arg)
     epochs = int(_flag("epochs") or "1")
     reasoning = resolve_reasoning(_flag("reasoning"))
     concurrency = int(_flag("concurrency") or "50")
     sandbox_concurrency = int(_flag("sandbox-concurrency") or str(DEFAULT_SANDBOX_CONCURRENCY))
-    time_limit = int(_flag("time-limit")) if _flag("time-limit") else None
+    time_limit = resolve_time_limit(_flag("time-limit"))
     judge = _flag("judge")
     gate_model = resolve_gate_model(_flag("gate-model"), judge)
 
@@ -980,7 +1063,7 @@ def main() -> None:
 
     tasks = build_real_tasks(
         selected_targets, selected_seeds, run_dir.name,
-        reasoning=reasoning, condition=condition, max_turns=max_turns,
+        reasoning=reasoning, condition=condition,
         gate_model=gate_model, judge=judge, seeds_path=seeds_path,
         artifacts_root=run_dir / "real_artifacts",
     )

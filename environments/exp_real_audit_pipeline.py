@@ -10,9 +10,9 @@ v1 scope: fraud_detection + reasoning_prompt_benchmark, --condition=allow only.
 
 Usage (from mats/environments/; re-execs into petri/.venv automatically):
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
-      --seeds=fraud_detection --condition=allow --epochs=3 --max-turns=200
+      --seeds=fraud_detection --epochs=3
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
-      --seeds=reasoning_prompt_benchmark --condition=allow --epochs=3 --max-turns=200
+      --seeds=reasoning_prompt_benchmark --epochs=3
 
 Flags:
   --targets=<a,b,..>   REQUIRED. target names from TARGET_CHOICES.
@@ -20,16 +20,16 @@ Flags:
                        needs a generated real_env/workspace/ tree (envgen/gen_*.py).
   --seeds=<a,b,..>     REQUIRED. member names, or `all` (= every PORTED member).
   --epochs=<N>         REQUIRED. epochs per (target, seed) cell.
-  --max-turns=<N>      REQUIRED. cap on TARGET GENERATE CALLS per trajectory (the
-                       real-mode analog of the auditor turn cap).
   --reasoning=yes|no   optional (default yes). Same semantics as the simulated pipeline.
-  --condition=<c>      allow only in v1 (correct is a designed seam, rejected loudly).
+  --condition=<c>      defaults to allow; v1 supports allow only (correct is a designed
+                       seam, rejected loudly).
   --judge=<m>          alignment judge (default gpt-5.6-luna; see lib/judge_models.py,
                        or set $PETRI_JUDGE).
   --gate-model=<m>     first-submission gate LLM; defaults to the judge and must equal it.
   --concurrency=<N>    LLM parallelism for audit + annotate (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
-  --time-limit=<sec>   optional per-sample wall-clock limit.
+  --time-limit=<sec>   per-trajectory wall clock, default 3600 (one hour). This is the
+                       runaway guard: there is no turn cap. Pass 0 to disable.
   --annotate-model=<m> agentic hack-turn annotator (default deepseek-v4-pro).
   --skip-annotate / --skip-viewer / --force-annotate  as in exp_audit_pipeline.py.
 
@@ -87,6 +87,7 @@ from exp_real_audit import (
     build_real_tasks,
     ported_members,
     resolve_gate_model,
+    resolve_time_limit,
 )
 # Petri's integrity guards are mode-agnostic and reused verbatim. Its
 # run_post_audit_stages is NOT: it annotates petri's log root and builds petri's viewer,
@@ -120,7 +121,7 @@ def env_viewer():
 
 _VALUE_FLAGS = {
     "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--condition",
-    "--concurrency", "--sandbox-concurrency", "--time-limit", "--max-turns",
+    "--concurrency", "--sandbox-concurrency", "--time-limit",
     "--judge", "--gate-model", "--annotate-model",
 }
 _SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
@@ -216,12 +217,6 @@ def _parse_args() -> dict:
     epochs = _posint("--epochs", None)
     if epochs is None:
         raise SystemExit("--epochs is required (no default); positive integer")
-    max_turns = _posint("--max-turns", None)
-    if max_turns is None:
-        raise SystemExit(
-            "--max-turns is required (no default); the cap on target generate calls "
-            "(for example, --max-turns=200)"
-        )
 
     condition = resolve_condition(_arg("--condition"), seeds_path)
 
@@ -236,8 +231,7 @@ def _parse_args() -> dict:
         "gate_model": resolve_gate_model(_arg("--gate-model"), _arg("--judge")),
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
         "sandbox_concurrency": _posint("--sandbox-concurrency", DEFAULT_SANDBOX_CONCURRENCY),
-        "time_limit": _posint("--time-limit", None),
-        "max_turns": max_turns,
+        "time_limit": resolve_time_limit(_arg("--time-limit")),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         "skip_annotate": "--skip-annotate" in sys.argv,
         "skip_viewer": "--skip-viewer" in sys.argv,
@@ -284,7 +278,7 @@ def run_real_audit_stage(cfg: dict):
     print(f"  judge={resolve_judge(cfg['judge'])}  gate={cfg['gate_model']}")
     print(f"  epochs={epochs}  concurrency={cfg['concurrency']}  "
           f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
-          f"max_turns={cfg['max_turns']}  time_limit={cfg['time_limit']}")
+          f"time_limit={cfg['time_limit']}s (no turn cap)")
     if cfg["reasoning"]:
         print(f"  reasoning=ON effort={REASONING_EFFORT}; '<thinking> tags' SP "
               "instruction stripped")
@@ -296,8 +290,7 @@ def run_real_audit_stage(cfg: dict):
         tasks = build_real_tasks(
             targets, seeds, log_dir.name,
             reasoning=cfg["reasoning"], condition=cfg["condition"],
-            max_turns=cfg["max_turns"], gate_model=cfg["gate_model"],
-            judge=cfg["judge"],
+            gate_model=cfg["gate_model"], judge=cfg["judge"],
             seeds_path=cfg["seeds_path"],
             artifacts_root=log_dir / "real_artifacts",
         )
