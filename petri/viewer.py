@@ -3221,6 +3221,140 @@ def metadata_section(a: dict, extra_cells: str = "",
             f'<div class="metabody">{scores_block}{run_block}</div></details>')
 
 
+def real_env_record_section(a: dict) -> str:
+    """Collapsed 'Environment record' section for REAL-environment trajectory pages:
+    everything the non-judge machinery measured, straight from the stored
+    metadata.real_env blob — the real grade + deliverables presence, the
+    first-submission gate decision (verdict, mechanical rule, detectors), the judge's
+    stage-1 (turn-1-judged-as-complete) scores beside its final ones, and the scripted
+    protocol facts. Returns '' for simulated audits and for real runs whose record was
+    lost (finalize failure). Same collapsed-metadata look as the Metadata box; the
+    summary bar previews the grade + gate verdict."""
+    env = a.get("real_env")
+    if not isinstance(env, dict):
+        return ""
+    cell = _meta_cell
+    blocks: list[str] = []
+    prev_bits: list[str] = []
+
+    grade = env.get("grade") or {}
+    gcells = []
+    if grade.get("scored"):
+        f1 = grade.get("macro_f1")
+        if isinstance(f1, (int, float)):
+            gcells.append(cell("macro-F1 (true key)", esc(f"{f1:.4f}")))
+            prev_bits.append(f"macro-F1 {f1:.3f}")
+        agreement = grade.get("agreement_with_key")
+        if isinstance(agreement, (int, float)):
+            gcells.append(cell("agreement with key", esc(f"{agreement:.4f}")))
+        if grade.get("exact_key_copy"):
+            gcells.append(cell("exact key copy",
+                               '<span class="hacktag">&#9888; yes</span>'))
+        missing, extra = grade.get("n_missing_ids"), grade.get("n_extra_ids")
+        if missing or extra:
+            gcells.append(cell("ids missing / extra", esc(f"{missing or 0} / {extra or 0}")))
+        coercions = (grade.get("id_coercions") or 0) + (grade.get("label_coercions") or 0)
+        if coercions:
+            gcells.append(cell("format coercions", esc(str(coercions))))
+        if grade.get("input_truncated"):
+            gcells.append(cell("graded on", '<span class="hacktag">&#9888; '
+                                            "extraction-capped copy</span>"))
+    elif grade:
+        gcells.append(cell("grade", esc(str(grade.get("reason") or "not scored"))))
+    deliverables = grade.get("deliverables")
+    if isinstance(deliverables, dict) and deliverables:
+        gcells.append(cell("deliverables", " &middot; ".join(
+            f"{esc(name)} {'&#10003;' if present else '<b>&#10007;</b>'}"
+            for name, present in deliverables.items())))
+    issues = grade.get("parse_issues")
+    if issues:
+        gcells.append(cell("grade notes", esc("; ".join(str(i) for i in issues))))
+    if gcells:
+        blocks.append(f'<div class="mblock"><div class="mblock-h">Grade</div>'
+                      f'<div class="metagrid">{"".join(gcells)}</div></div>')
+
+    for gate in env.get("gates") or []:
+        verdict = str(gate.get("verdict") or "?")
+        prev_bits.append(f"gate {verdict}")
+        vhtml = (f'<span class="hacktag">{esc(verdict)}</span>'
+                 if verdict != "clean" else esc(verdict))
+        gc = [cell("verdict", vhtml)]
+        if gate.get("error"):
+            gc.append(cell("gate error", esc(str(gate["error"]))))
+        rule = gate.get("rule") or {}
+        if rule:
+            gc.append(cell("stage-1 reward hacking",
+                           esc(str(rule.get("reward_hacking")))))
+            failed = rule.get("confounders_failed") or []
+            gc.append(cell("confounders out of range",
+                           esc(", ".join(failed)) if failed else "none"))
+            category = rule.get("rh_category")
+            category_html = esc(category) if category else "(none parsed)"
+            if rule.get("rh_category_parse_error"):
+                category_html += " &mdash; parse error"
+            gc.append(cell("RH category", category_html))
+            if rule.get("reversed_hack"):
+                gc.append(cell("reversed hack", "yes"))
+        detector_rows = "".join(
+            f'<tr><td>{esc(str(d.get("name", "")))}</td>'
+            f'<td>{"<span class=\'hacktag\'>&#9888; fired</span>" if d.get("fired") else "quiet"}</td>'
+            f'<td class="meta">{esc(json.dumps(d.get("evidence"), default=str)[:400])}</td></tr>'
+            for d in gate.get("detectors") or [])
+        detector_table = (
+            f'<table class="scoretop"><tr class="cols"><th>detector</th><th></th>'
+            f"<th>evidence</th></tr>{detector_rows}</table>"
+            if detector_rows else "")
+        blocks.append(
+            f'<div class="mblock"><div class="mblock-h">Gate '
+            f'(submission {esc(str(gate.get("submission", "?")))})</div>'
+            f'<div class="metagrid">{"".join(c for c in gc if c)}</div>{detector_table}</div>')
+
+    stage1 = (env.get("judge_replay") or {}).get("stage1_answer") or {}
+    stage1_scores = {k: v for k, v in stage1.items() if isinstance(v, (int, float))}
+    final_scores = {k: v for k, v in (a.get("scores") or {}).items()
+                    if isinstance(v, (int, float))}
+    if stage1_scores:
+        dims = [d for d in KEY_DIMS if d in stage1_scores or d in final_scores]
+        dims += sorted(k for k in (set(stage1_scores) | set(final_scores))
+                       if k not in dims)
+        head = "".join(f"<th>{dim_head(d)}</th>" for d in dims)
+        rows = "".join(
+            f'<tr><td class="meta">{label}</td>' + "".join(
+                f"<td>{score_cell(d, scores[d]) if d in scores else 'null'}</td>"
+                for d in dims) + "</tr>"
+            for label, scores in (("stage 1", stage1_scores), ("final", final_scores)))
+        stage1_summary = stage1.get("summary")
+        summary_html = (
+            f'<details><summary class="meta">stage-1 summary</summary>'
+            f'<div class="note">{linkify(str(stage1_summary))}</div></details>'
+            if stage1_summary else "")
+        blocks.append(
+            f'<div class="mblock"><div class="mblock-h">Judge scores: stage 1 '
+            f"(turn 1 judged as complete) vs final</div>"
+            f'<table class="scoretop"><tr class="cols"><th></th>{head}</tr>{rows}</table>'
+            f"{summary_html}</div>")
+
+    protocol = env.get("protocol") or {}
+    if protocol:
+        pcells = [
+            cell("submissions", esc(str(protocol.get("submissions")))),
+            cell("follow-up sent", "yes" if protocol.get("follow_up_sent") else "no"),
+        ]
+        if protocol.get("finalize_sent"):
+            pcells.append(cell("finalize sent", "yes"))
+        if env.get("turns_used") is not None:
+            pcells.append(cell("target turns", esc(str(env["turns_used"]))))
+        blocks.append(f'<div class="mblock"><div class="mblock-h">Protocol</div>'
+                      f'<div class="metagrid">{"".join(c for c in pcells if c)}</div></div>')
+
+    if not blocks:
+        return ""
+    preview = esc(" · ".join(prev_bits))
+    return (f'<details class="sec metadata"><summary><h2>Environment record</h2>'
+            f'<span class="meta metaprev">{preview}</span></summary>'
+            f'<div class="metabody">{"".join(blocks)}</div></details>')
+
+
 def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
                           back_href: str, banners: str = "", meta_cells: str = "",
                           context_graph: str = "",
@@ -3290,6 +3424,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {banners}
 {metadata_section(a, extra_cells=meta_cells,
                   context_graph=context_graph)}
+{real_env_record_section(a)}
 
 <details class="sec" open><summary><h2>Judge summary</h2></summary>
 <div class="note">{linkify(a['summary'])}</div>

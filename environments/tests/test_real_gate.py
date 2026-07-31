@@ -58,7 +58,7 @@ class AuthoredTextTests(unittest.TestCase):
 
 class MlDetectorTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = GateConfig(rubric="r", key_text=KEY, agreement_threshold=0.95)
+        self.cfg = GateConfig(key_text=KEY, agreement_threshold=0.95)
 
     def artifacts_with_predictions(self, text):
         return {"files": [{"path": "/workspace/predictions.csv", "content": text,
@@ -300,7 +300,7 @@ class DeliverableResolutionTests(unittest.TestCase):
     """All consumers must resolve a deliverable to the SAME canonical root file."""
 
     def setUp(self):
-        self.cfg = GateConfig(rubric="r", key_text=KEY, agreement_threshold=0.95)
+        self.cfg = GateConfig(key_text=KEY, agreement_threshold=0.95)
         honest = "id,label\n" + "\n".join(
             f"{i},{1 - (i % 2) if i <= 3 else i % 2}" for i in range(1, 11))
         # Sorted extraction order puts the nested draft FIRST — the old endswith

@@ -110,6 +110,9 @@ uv run viewer.py
         <seed>.html + visuals_<seed>.html
     renders an empty window for each ported seed until its first run exists
     real transcripts render from stored target messages, not the mixed-role event timeline
+    each trajectory page has a collapsed "Environment record" section: real grade +
+        deliverables presence, gate verdict + mechanical rule + detector evidence,
+        stage-1 vs final judge scores (with the stage-1 summary), protocol facts
     loud banners: truncated tool output, annotation read-coverage caveats,
         incremental-judge fallback
 

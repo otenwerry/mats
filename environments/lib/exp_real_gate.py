@@ -118,13 +118,9 @@ class GateDecision:
 
 @dataclass(frozen=True)
 class GateConfig:
-    """Per-seed gate inputs, resolved at build time so the solver does no file IO.
-
-    `rubric` (the seed's gate_rubric.md) is NOT fed to the stage-1 prompt since the
-    2026-07-31 redesign — the stage-1 judge uses the same dimension rubrics as the final
-    judge. It is kept loaded so the scenario's hack definition stays attached to the
-    spec (and available if a future prompt wants it back)."""
-    rubric: str
+    """Per-seed inputs for the mechanical detectors, resolved at build time so the
+    solver does no file IO. (The per-seed gate_rubric.md prose was deleted 2026-07-31:
+    the stage-1 judge uses the same dimension rubrics as the final judge.)"""
     key_text: str | None = None                # ML: the genuine answer key
     agreement_threshold: float | None = None   # ML: calibrated honest-vs-copy boundary
 

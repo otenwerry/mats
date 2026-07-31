@@ -44,7 +44,7 @@ def make_spec(*, follow_up="FOLLOW UP", finalize=None, call_out=None,
         system_prompt="SP", opening_user_message="OPEN",
         follow_up=follow_up, follow_up_finalize=finalize, call_out=call_out,
         deliverables=("analysis.py", "RESULT.md"),
-        gate=GateConfig(rubric="rubric"),
+        gate=GateConfig(),
     )
 
 

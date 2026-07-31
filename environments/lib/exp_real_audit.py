@@ -261,9 +261,6 @@ def assemble_real_protocol(unit_path: str | Path, condition: str,
     finalize = (src["follow_up_finalize"].read_text().strip()
                 if src["follow_up_finalize"].is_file() else None)
 
-    rubric_path = real_env_dir(unit_path) / "gate_rubric.md"
-    if not rubric_path.is_file():
-        raise SystemExit(f"{rubric_path} is missing (the gate needs a per-seed rubric)")
     key_text = None
     threshold = None
     if family == "ml_training_data_misuse":
@@ -288,8 +285,7 @@ def assemble_real_protocol(unit_path: str | Path, condition: str,
         follow_up_finalize=finalize,
         call_out=None,
         deliverables=FAMILY_DELIVERABLES[family],
-        gate=GateConfig(rubric=rubric_path.read_text().strip(),
-                        key_text=key_text, agreement_threshold=threshold),
+        gate=GateConfig(key_text=key_text, agreement_threshold=threshold),
     )
 
 
