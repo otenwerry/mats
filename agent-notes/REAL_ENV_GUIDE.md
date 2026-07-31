@@ -59,12 +59,23 @@ directly comparable. Results render in THIS project's own viewer, from its own d
   concealment (retained caveats do NOT rescue below 5; scored by outcome, so an
   abandoned attempt is NOT 5+ — unlike the ml rubric, where attempts count). Evidence +
   extracted dataset: mats-local/petri/_analysis/p_hacking_band_analysis_20260731/.
-  The RH_CATEGORY/RH_TYPES tail is degenerate on this family (423/426 hacks =
-  delivered_hack; types near-constant) — deletion proposed to Owen but NOT done:
-  the gate (exp_real_gate GATE_REVERSED_CATEGORIES), the viewer's Reversed bucket, and
-  viewer_load's missing-tag parse error (fires on every 2+ score in v7 dirs) all
-  consume the lines, so deleting the instruction without code changes floods real
-  p_hacking runs with rh_category_parse_error flags.
+  The RH_CATEGORY/RH_TYPES tail was DELETED from the p_hacking rubric by Owen the same
+  day (degenerate there: 423/426 petri hacks = delivered_hack, types near-constant);
+  the ml rubric KEEPS it. Code accounts for the split via `rh_tags_requested`
+  (exp_real_gate.rh_tags_requested = does the run's routed reward_hacking rubric text
+  contain "RH_CATEGORY"): build_real_tasks stamps it into run metadata, the solver
+  passes it to run_gate (tags_requested=False -> nothing parsed, missing line never a
+  parse error, stray tag lines ignored, reversed_hack always False — coherent because
+  the outcome-based p_hacking bands never score a backed-out hack 5+), and
+  viewer_load's missing-tag parse error adds `and a.get("rh_tags_requested") is not
+  False` (stamp False suppresses; unstamped None = old behavior, so petri dirs and
+  pre-stamp real dirs are untouched). The environments viewer's "Reversed reward
+  hacks" bucket is now structurally empty for p_hacking seeds (kept for layout parity
+  with ml). Tests: test_real_gate (gate paths + rubric-text helper),
+  test_real_protocol (family split pinned: fraud True / benchmark False + metadata
+  stamp), test_real_sandbox_smoke (end-to-end rule fields), test_real_viewer_load
+  (stamp survives load). NB the viewer_load edit busts the shared load cache (code-sig
+  key) -> next petri/environments viewer build is a cold re-read.
   dimension_provenance is stamped with dimensions_root/project_root pointing here, so
   stored rubric paths are environments-relative.
 - `lib/real_target_tools.py` — real ToolDef bindings; schemas come verbatim from
@@ -279,6 +290,19 @@ Two things learned here, both worth keeping:
   Real transcripts render directly from `Sample.messages`, the canonical target-facing
   record. They never render from the event timeline, which also contains private gate
   and judge model calls.
+- PAST ITERATIONS (Owen 2026-07-31): environments/viewer.py pins the four 2026-07-30
+  pilot run dirs (PAST_RUN_DIRS, explicit list — petri's membership rule: unlisted =
+  current) to per-seed `<seed>_past.html` pages, a third viewnav item rendered only
+  when a seed has past runs. Past runs are excluded from the current tables AND the
+  current visuals; their trajectory pages back-link to the past page. Current pages
+  never render the retired hallucination/incompleteness columns
+  (RETIRED_CURRENT_COLUMNS), and the EMPTY skeleton's columns come from
+  environments/dimensions (audit_dimension_names_on_disk(dimensions_root=ENV_DIMENSIONS))
+  rather than petri's tree — otherwise an empty current window would resurrect petri's
+  auditor/hallucination/incompleteness columns. A closed "caveats" dropdown
+  (caveat_legend, _CAVEATS) at the top of every index page lists each warning badge
+  with a sub-sentence description; tests that assert a badge is ABSENT must count
+  occurrences (the legend always contributes one).
 - ENVIRONMENT RECORD (2026-07-31): every real trajectory page gets a collapsed
   "Environment record" section (petri/viewer.py real_env_record_section, rendered from
   the audit's `real_env` blob; returns '' on simulated audits and on real runs whose

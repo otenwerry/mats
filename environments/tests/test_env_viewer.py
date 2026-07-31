@@ -123,10 +123,11 @@ def build_real_run(log_dir: Path, *, truncate: bool,
         metadata={
             "target_tools_mode": "real", "condition": "allow", "max_turns": None,
             # the environments/dimensions fork: no auditor dims, no incompleteness
-            # (mechanical since 2026-07-31)
+            # (mechanical since 2026-07-31), no hallucination (folded into
+            # degenerate_behavior)
             "judge_dimensions": [
                 "reward_hacking", "noticed_hack", "deception", "degenerate_behavior",
-                "hallucination", "situational_awareness", "environment_failure",
+                "situational_awareness", "environment_failure",
             ],
         },
     )
@@ -183,6 +184,15 @@ class EnvViewerTests(unittest.TestCase):
                       "Interesting behavior", "Clean trajectories", "Invalid"):
             self.assertIn(title, html)
         self.assertIn("none", html)          # write_table's empty-row placeholder
+        # the closed caveat legend sits at the top of every index page
+        self.assertIn("caveats", html)
+        self.assertIn("CUT SHORT", html)
+        # the empty skeleton's columns come from environments/dimensions, NOT petri's
+        # tree: no retired or auditor-only dimensions on current pages
+        self.assertIn("environment failure", html)
+        for retired in ("incompleteness", "hallucination",
+                        "auditor mistakes", "auditor nudging"):
+            self.assertNotIn(retired, html)
         self.assertTrue(html.rstrip().endswith("</html>"))
 
     def test_renders_a_real_trajectory_with_truncation_banner(self):
@@ -386,12 +396,13 @@ class EnvViewerTests(unittest.TestCase):
             index = (root / "viewer" / "index.html").read_text()
             page = next((root / "viewer" / "pages").glob("*.html")).read_text()
 
-        self.assertNotIn("CUT SHORT", index)
+        # exactly ONE mention each: the caveat legend's row, never a row badge
+        self.assertEqual(index.count("CUT SHORT"), 1)
         self.assertNotIn("RUN CUT SHORT", page)
         self.assertNotIn("hit turn cap", page)
         self.assertIn("real protocol: protocol_end", page)
         # uncapped artifacts must not trip the extraction-cap badge or banner
-        self.assertNotIn("ARTIFACT CAPPED", index)
+        self.assertEqual(index.count("ARTIFACT CAPPED"), 1)
         self.assertNotIn("ARTIFACT CAPPED", page)
 
     def test_cut_short_run_is_mechanically_invalid(self):
@@ -423,6 +434,33 @@ class EnvViewerTests(unittest.TestCase):
         cols = ["reward_hacking", "environment_failure"]
         self.assertIn("cut short", pv.v7_invalid_definition(cols, real_cutoff_rule=True))
         self.assertNotIn("cut short", pv.v7_invalid_definition(cols))
+
+    def test_past_iteration_runs_split_off_the_current_page(self):
+        """Run dirs pinned in PAST_RUN_DIRS render on a per-seed past-iterations page:
+        the current page excludes them (rows, columns, and figures), links to the past
+        page, and never shows the retired hallucination/incompleteness columns."""
+        env_viewer = load_env_viewer()
+        past_dir = sorted(env_viewer.PAST_RUN_DIRS)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._point_at(env_viewer, root)
+            build_real_run(root / "logs" / past_dir, truncate=False,
+                           seed="fraud_detection")
+            build_real_run(root / "logs" / "real-v1-mock-allow-1ep-20260801-000000",
+                           truncate=False, seed="fraud_detection")
+            asyncio.run(env_viewer.main())
+            out = root / "viewer"
+            index = (out / "index.html").read_text()
+            past_page = (out / "fraud_detection_past.html").read_text()
+
+        self.assertIn("real-v1-mock-allow-1ep-20260801-000000", index)
+        self.assertNotIn(past_dir, index)
+        self.assertIn('href="fraud_detection_past.html"', index)
+        self.assertIn("past iterations", past_page)
+        self.assertIn(past_dir, past_page)
+        self.assertNotIn("real-v1-mock-allow-1ep-20260801-000000", past_page)
+        for retired in ("incompleteness", "hallucination"):
+            self.assertNotIn(retired, index)
 
     def test_unreadable_run_dir_is_skipped_loudly_not_fatally(self):
         # The error path must work precisely when something is wrong: an interrupted or

@@ -61,7 +61,8 @@ for _p in (str(ENVIRONMENTS / "lib"), str(PETRI / "lib"), str(PETRI)):
 
 import viewer as pv            # petri's viewer: the whole display layer  # noqa: E402
 import viewer_load             # the load layer (shared, repointed below) # noqa: E402
-from env_paths import ENV_SEEDS, annotation_file_lock  # noqa: E402
+from dimension_routing import audit_dimension_names_on_disk  # noqa: E402
+from env_paths import ENV_DIMENSIONS, ENV_SEEDS, annotation_file_lock  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # this project's data root
@@ -86,6 +87,22 @@ VISUALS_FILE = "visuals.html"
 # added automatically after these.
 V1_SEED_ORDER = ("fraud_detection", "reasoning_prompt_benchmark")
 
+# The four 2026-07-30 pilot/validation runs predate the 2026-07-31 judge redesign
+# (verdict-question gate, judged incompleteness, hallucination dimension). They render
+# on per-seed "past iterations" pages and are excluded from the current tables AND the
+# current visuals; every UNLISTED run dir is CURRENT (petri's membership rule).
+PAST_RUN_DIRS = {
+    "real-v1-deepseek-v4-pro-allow-1ep-20260730-172231",
+    "real-v1-deepseek-v4-pro-allow-1ep-20260730-172244",
+    "real-v1-deepseek-v4-pro-allow-1ep-20260730-220847",
+    "real-v1-deepseek-v4-pro-allow-1ep-20260730-220853",
+}
+# Dimensions no longer judged since 2026-07-31 (incompleteness is mechanical,
+# hallucination folded into degenerate_behavior): never rendered as CURRENT-page
+# columns — the empty-skeleton fallback would otherwise inherit them from petri's
+# on-disk rubric tree. Past-iterations pages keep them (those runs scored them).
+RETIRED_CURRENT_COLUMNS = ("hallucination", "incompleteness")
+
 
 # --------------------------------------------------------------------------- #
 # nav: one top-level window per seed
@@ -107,6 +124,14 @@ def seed_visuals_file(seed: str) -> str:
         if seed == V1_SEED_ORDER[0]
         else f"visuals_{_seed_slug(seed)}.html"
     )
+
+
+def seed_past_file(seed: str) -> str:
+    return f"{_seed_slug(seed)}_past.html"
+
+
+def is_past_run(audit: dict) -> bool:
+    return str(audit.get("mode")) in PAST_RUN_DIRS
 
 
 def seed_windows(audits: list[dict]) -> list[str]:
@@ -143,11 +168,13 @@ def topnav(active_seed: str, seeds: list[str]) -> str:
     return f'<div class="topnav">{links}</div>'
 
 
-def viewnav(seed: str, active: str) -> str:
-    items = (
+def viewnav(seed: str, active: str, has_past: bool = False) -> str:
+    items = [
         ("trajectories", seed_index_file(seed)),
         ("visuals", seed_visuals_file(seed)),
-    )
+    ]
+    if has_past:
+        items.append(("past iterations", seed_past_file(seed)))
     links = "".join(
         f'<a href="{href}"{pv.ACTIVE_CLS if name == active else ""}>{name}</a>'
         for name, href in items
@@ -155,14 +182,50 @@ def viewnav(seed: str, active: str) -> str:
     return f'<div class="viewnav">{links}</div>'
 
 
-def index_heading(seed: str, audits: list[dict]) -> str:
+# Every warning badge/chip this project's pages can show, in one closed dropdown at the
+# top of the trajectory-index pages: (chip html, sub-sentence description).
+_CAVEATS = (
+    ('<span class="hacktag">&#9888; DEAD</span>',
+     "the target produced no output; the all-1 scores are not data"),
+    ('<span class="hacktag">&#9888; CRASHED</span>',
+     "the run-end record is missing; the ending is an artifact"),
+    ('<span class="hacktag">&#9888; INTEGRITY</span>',
+     "generation, transcript, or judging broke (e.g. incremental-judge fallback); "
+     "excluded from analysis"),
+    ('<span class="hacktag">&#9888; CUT SHORT</span>',
+     "the wall clock / a cancel ended the run mid-work; mechanically incomplete "
+     "&rarr; Invalid"),
+    ('<span class="hacktag">&#9888; TRUNCATED &times;N</span>',
+     "N tool results were clipped at the per-call cap; the target saw partial output"),
+    ('<span class="hacktag">&#9888; ARTIFACT CAPPED &times;N</span>',
+     "N extracted workspace files were clipped; gate/judge/grade read a prefix"),
+    ('<span class="hacktag">&#9888; AUDITOR DEVIATION</span>',
+     "a scripted message failed the byte-exact compliance check"),
+    ('<span class="comptag">&#9888; COMPACTED</span>',
+     "the context was compacted mid-run"),
+    ('&#9888; <b>ANNOTATION CAVEAT</b>',
+     "the hack-turn annotator labeled turns it never read, or ended abnormally"),
+    ('<span class="hacktag">&#9888; fired</span> / '
+     '<span class="hacktag">&#9888; yes</span>',
+     "inside a page's Environment record: a mechanical detector fired / "
+     "predictions are an exact key copy"),
+)
+
+
+def caveat_legend() -> str:
+    rows = "".join(f'<tr><td>{chip}</td><td class="meta">{text}</td></tr>'
+                   for chip, text in _CAVEATS)
+    return (f'<details class="sec"><summary>&#9888; caveats</summary>'
+            f'<table class="scoretop">{rows}</table></details>')
+
+
+def index_heading(seed: str, audits: list[dict], past: bool = False) -> str:
+    label = pv.seed_label(seed) + (" — past iterations" if past else "")
     n = len(audits)
     runs = len({a["mode"] for a in audits})
     if not n:
-        return f"{pv.seed_label(seed)} — no runs yet"
-    return (
-        f"{pv.seed_label(seed)} — {n} trajectory(ies) across {runs} run(s)"
-    )
+        return f"{label} — no runs yet"
+    return f"{label} — {n} trajectory(ies) across {runs} run(s)"
 
 
 def empty_skeleton_note(seed: str) -> str:
@@ -184,11 +247,13 @@ def write_trajectory_pages(audits: list[dict], annotations: dict) -> set[str]:
         name = pv.page_name(a["mode"], a["task"], a["seed"], a["epoch"])
         ann = annotations.get(name)
         label = pv.seed_label(a["seed"])
+        back_file = (seed_past_file(str(a["seed"])) if is_past_run(a)
+                     else seed_index_file(str(a["seed"])))
         unmatched_total += pv.write_trajectory_page(
             a, name,
             title=f"#{a['id']} {pv.esc(label)}",
             doc_title=f"#{a['id']} {label}",
-            back_href=f"../{seed_index_file(str(a['seed']))}",
+            back_href=f"../{back_file}",
             ann=ann,
             transcript_heading="Transcript",
         )
@@ -200,9 +265,21 @@ def write_trajectory_pages(audits: list[dict], annotations: dict) -> set[str]:
 
 
 def write_index(seed: str, seeds: list[str], audits: list[dict],
-                annotations: dict) -> None:
-    """One seed's trajectory index, using Petri's v7 outcome buckets and tables."""
+                annotations: dict, *, past: bool = False,
+                has_past: bool = False) -> None:
+    """One seed's trajectory index (current, or its frozen past-iterations page),
+    using Petri's v7 outcome buckets and tables."""
     cols, show_other = pv.topmost_columns(audits)
+    if not past:
+        if audits:
+            cols = [c for c in cols if c not in RETIRED_CURRENT_COLUMNS]
+        else:
+            # Empty skeleton: petri's fallback union comes from ITS rubric tree
+            # (auditor dims, hallucination, incompleteness); show this project's own
+            # active fork instead.
+            active = set(audit_dimension_names_on_disk(
+                dimensions_root=ENV_DIMENSIONS))
+            cols = [d for d in pv.KEY_DIMS if d in active]
     n = len(audits)
     dropdowns: dict = {}          # no rollback/resample experiments in this project
     # id -> the [M#] of the first annotated hack turn, for the hack-timing columns
@@ -261,18 +338,20 @@ def write_index(seed: str, seeds: list[str], audits: list[dict],
             invalid_dimensions=invalid_dims),
     ]
 
-    heading = index_heading(seed, audits)
+    heading = index_heading(seed, audits, past=past)
     body = f"""
 {topnav(seed, seeds)}
-{viewnav(seed, "trajectories")}
+{viewnav(seed, "past iterations" if past else "trajectories", has_past=has_past)}
 {pv.page_head(pv.esc(heading))}
+{caveat_legend()}
 {pv.skipped_run_banner()}{pv.dead_run_banner(audits)}
 {empty_skeleton_note(seed) if not audits else ''}
 {''.join(parts)}
 """
     page = pv.html_page(pv.esc(heading), body, fit=True,
                         tail=f"{pv.SORT_JS}{pv.TOTOP_HTML}")
-    (OUT / seed_index_file(seed)).write_text(page)
+    out_file = seed_past_file(seed) if past else seed_index_file(seed)
+    (OUT / out_file).write_text(page)
 
 
 def _combined_usage(*records: dict | None) -> dict | None:
@@ -314,8 +393,9 @@ def real_cost_data(audits: list[dict], annotations: dict) -> dict | None:
 
 
 def write_visuals(seed: str, seeds: list[str], audits: list[dict],
-                  annotations: dict) -> None:
-    """Petri's current-audit visuals over exactly one seed window."""
+                  annotations: dict, *, has_past: bool = False) -> None:
+    """Petri's current-audit visuals over exactly one seed window (CURRENT runs only;
+    past iterations are excluded so they cannot skew the figures)."""
     heading = pv.seed_label(seed)
     try:
         import viewer_visuals
@@ -337,7 +417,7 @@ def write_visuals(seed: str, seeds: list[str], audits: list[dict],
             heading=heading,
             totop=pv.TOTOP_HTML,
             context_nav_html={
-                "original_audits": viewnav(seed, "visuals")
+                "original_audits": viewnav(seed, "visuals", has_past=has_past)
             },
         )
         page = pages["original_audits"]
@@ -348,7 +428,7 @@ def write_visuals(seed: str, seeds: list[str], audits: list[dict],
             '<p class="meta">Visuals unavailable in this build.</p>',
             topnav(seed, seeds),
             heading=f"{heading} · visuals",
-            subnav_html=viewnav(seed, "visuals"),
+            subnav_html=viewnav(seed, "visuals", has_past=has_past),
         )
     (OUT / seed_visuals_file(seed)).write_text(page)
 
@@ -392,8 +472,13 @@ async def main() -> None:
         seeds = seed_windows(audits)
         for seed in seeds:
             seed_audits = audits_for_seed(audits, seed)
-            write_index(seed, seeds, seed_audits, annotations)
-            write_visuals(seed, seeds, seed_audits, annotations)
+            current = [a for a in seed_audits if not is_past_run(a)]
+            past = [a for a in seed_audits if is_past_run(a)]
+            write_index(seed, seeds, current, annotations, has_past=bool(past))
+            if past:
+                write_index(seed, seeds, past, annotations,
+                            past=True, has_past=True)
+            write_visuals(seed, seeds, current, annotations, has_past=bool(past))
         # prune trajectory pages whose run dir is gone (same discipline as petri)
         for stale in (OUT / "pages").glob("*.html"):
             if stale.name not in written:
