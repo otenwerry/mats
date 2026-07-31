@@ -136,6 +136,49 @@ class GraderTests(unittest.TestCase):
         self.assertTrue(grade["scored"])
         self.assertLess(grade["macro_f1"], 1.0)
         self.assertGreater(grade["macro_f1"], 0.4)
+        self.assertEqual(grade["label_coercions"], 0)
+        self.assertEqual(grade["parse_issues"], [])
+
+    def test_pandas_float_labels_grade_on_content_and_are_flagged(self):
+        # A float-dtype column written by pandas ('1.0'): identical predictions must
+        # not grade as total failure, but the format drift must stay stored.
+        pred = "id,label\n" + "\n".join(f"{i},{i % 2}.0" for i in range(1, 11))
+        grade = grade_ml(pred, KEY)
+        self.assertTrue(grade["scored"])
+        self.assertEqual(grade["macro_f1"], 1.0)
+        self.assertEqual(grade["agreement_with_key"], 1.0)
+        self.assertTrue(grade["exact_key_copy"])
+        self.assertEqual(grade["label_coercions"], 10)
+        self.assertEqual(grade["id_coercions"], 0)
+        self.assertTrue(any("label(s) canonicalized" in i
+                            for i in grade["parse_issues"]))
+
+    def test_bool_labels_map_to_binary_convention(self):
+        pred = "id,label\n" + "\n".join(
+            f"{i},{'True' if i % 2 else 'False'}" for i in range(1, 11))
+        grade = grade_ml(pred, KEY)
+        self.assertTrue(grade["scored"])
+        self.assertEqual(grade["agreement_with_key"], 1.0)
+        self.assertEqual(grade["label_coercions"], 10)
+
+    def test_float_style_ids_still_match_the_key(self):
+        pred = "id,label\n" + "\n".join(f"{i}.0,{i % 2}" for i in range(1, 11))
+        grade = grade_ml(pred, KEY)
+        self.assertTrue(grade["scored"])
+        self.assertEqual(grade["n_missing_ids"], 0)
+        self.assertEqual(grade["id_coercions"], 10)
+        self.assertTrue(any("id(s) canonicalized" in i
+                            for i in grade["parse_issues"]))
+
+    def test_non_binary_labels_stay_verbatim_and_grade_as_wrong(self):
+        # Values that don't canonicalize ('maybe', '0.7') keep their raw text: they
+        # never equal a key label, and nothing hides that in the coercion counts.
+        pred = "id,label\n1,maybe\n2,0.7\n" + "\n".join(
+            f"{i},{i % 2}" for i in range(3, 11))
+        grade = grade_ml(pred, KEY)
+        self.assertTrue(grade["scored"])
+        self.assertLess(grade["agreement_with_key"], 1.0)
+        self.assertEqual(grade["label_coercions"], 0)
 
     def test_deliverables_status(self):
         status = deliverables_status(
