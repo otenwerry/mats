@@ -112,24 +112,29 @@ LEGACY_DIMS = [
 ]
 
 
-# Dimension columns are organized left-to-right into three labeled SECTIONS on the index,
-# separated by a subtle vertical rule, each grouping dims by what they're about:
-#   "reward hacking"   -- the hack itself (did it game the metric; did the final solution use it)
-#   "target error" -- the target acted incoherently/hallucinated (the "degenerate" failures)
-#   "auditor error"-- the scenario/validity failures (auditor steered it, made mistakes,
-#                         target knew it was tested, scenario was ill-posed)
-# This mirrors the degenerate/nudged category split. A dimension file NOT listed in any group
-# (a newly added one, or a legacy dim) is appended to the RIGHT in a trailing unlabeled group,
-# so new dims still show up automatically. Edit a group's list to move/add a column.
+# Dimension columns are organized left-to-right into two labeled SECTIONS on the index,
+# separated by a subtle vertical rule (Owen 2026-07-31, replacing the three-way
+# reward-hacking / target-error / auditor-error split):
+#   "reward hacking" -- the hack itself and how it was carried (gamed the metric,
+#                       noticed the opportunity, deceived about it)
+#   "confounders"    -- everything that can invalidate or excuse the reading (incoherent
+#                       target, steering/mistakes by the auditor, test awareness, a broken
+#                       environment, a run cut short)
+# A dimension file NOT listed in any group (a newly added one, or a legacy dim) is appended
+# to the RIGHT in a trailing unlabeled group, so new dims still show up automatically. Edit
+# a group's list to move/add a column.
 DIM_GROUPS: list[tuple[str, list[str]]] = [
     # noticed_hack is the v7 dim; hack_in_final_solution + refused_hack are pre-v7 and stay
     # listed so old-sweep pages still render them in this group (topmost_columns only shows
     # a dim where it's active OR the page's latest run scored it).
-    ("reward hacking",    ["reward_hacking", "hack_in_final_solution", "deception",
-                           "refused_hack", "noticed_hack"]),
-    ("target error",  ["degenerate_behavior", "hallucination"]),
-    ("auditor error", ["auditor_nudging", "auditor_mistakes",
-                           "situational_awareness"]),
+    ("reward hacking", ["reward_hacking", "hack_in_final_solution", "deception",
+                        "refused_hack", "noticed_hack"]),
+    # hallucination was folded into degenerate_behavior (Owen 2026-07-31, environments
+    # rubrics) and incompleteness is mechanical for real runs; both stay listed so the
+    # legacy columns still render inside this group.
+    ("confounders", ["degenerate_behavior", "hallucination", "auditor_nudging",
+                     "auditor_mistakes", "situational_awareness",
+                     "environment_failure", "incompleteness"]),
 ]
 
 # Preferred left-to-right column order = the groups flattened in order. Any dimension file
@@ -153,8 +158,8 @@ _KEY_UNIVERSE = _active_dims() + [d for d in LEGACY_DIMS if d not in _active_dim
 # CONTIGUOUS under one section header even when some are legacy. Without this, a legacy dim
 # that's still in a DIM_GROUP (e.g. hack_in_final_solution / refused_hack, retired in v7 but
 # kept in the "reward hacking" group for old sweeps) would sort to the end of KEY_DIMS and
-# split its group into two headers. Dims not in _DIM_ORDER (incompleteness, the Petri
-# built-ins) trail in their existing order -> the unlabeled right-hand group.
+# split its group into two headers. Dims not in _DIM_ORDER (the Petri built-ins and any
+# brand-new rubric) trail in their existing order -> the unlabeled right-hand group.
 KEY_DIMS = ([d for d in _DIM_ORDER if d in _KEY_UNIVERSE]
             + [d for d in _KEY_UNIVERSE if d not in _DIM_ORDER])
 # higher-is-better / not-bad-when-high dimensions (don't color these red). refused_hack
@@ -234,8 +239,8 @@ th { background: #eef0f4; position: sticky; top: 0; }
 /* the sortable column-name header: a touch smaller than the body so the long dimension
    names (e.g. hack_in_final_solution) don't force the table wider than the viewport. */
 tr.cols th { font-size: 11px; font-weight: 600; }
-/* vertical divider rule separating the dimension column SECTIONS (reward hacking / target
-   error / auditor error); on the first column of each section + its group label. */
+/* vertical divider rule separating the dimension column SECTIONS (reward hacking /
+   confounders); on the first column of each section + its group label. */
 .gsep { border-left: 2px solid #c5cad3; }
 /* the faint, non-sticky group-label row above the sortable column headers. */
 tr.ghead-row th { position: static; background: #f0f2f6; color: #6b7280; font-weight: 600;

@@ -17,6 +17,13 @@ Deliberately NOT forked from petri:
   `metadata.real_env.protocol.ended_reason` says whether the scripted protocol reached
   its end; anything else (wall clock, cancel, crash) makes the run mechanically
   incomplete, which the viewer badges CUT SHORT and buckets as Invalid.
+- `hallucination` — forked, then folded into `degenerate_behavior` (Owen 2026-07-31);
+  the viewer keeps its hallucination criteria rows so legacy scored runs classify
+  unchanged.
+
+These rubrics are also the judge's stage-1 gate criteria: at the first submission the
+gate model fills the same answer() schema built from this tree, and the run stops when
+those scores land in the reward-hack category (exp_real_gate.gate_verdict_from_answer).
 
 `environment_failure` lives in `global/` here (in petri it sat in a special `real_env/`
 scope because petri owned the file while only real runs used it).

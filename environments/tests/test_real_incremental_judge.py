@@ -1,9 +1,11 @@
 """Unit tests for the two-stage incremental judge (no docker, no LLM, no cost).
 
-The scheme (Owen 2026-07-30): the gate call is stage 1 of the judge's own conversation
-(it carries the turn-1 transcript and returns a clean/hacked verdict); after the run the
-scorer replays that exchange verbatim and appends only the REMAINDER of the trajectory,
-so the judge commits to a reading of turn 1 before seeing turn 2.
+The scheme (Owen 2026-07-31): the gate call is the judge's FULL evaluation of the
+trajectory-so-far, presented as though it were the entire trajectory (same prompt, same
+answer() schema as the final judge — no "has it hacked yet" question); the branch is
+derived mechanically from its scores. After the run the scorer replays that whole
+stage-1 conversation verbatim and appends only the REMAINDER of the trajectory, asking
+for the same evaluation over the whole run.
 
 These tests cover the deterministic pieces: the render-splitting contract that makes a
 verbatim replay safe, the stage-1/stage-2 prompt templates, and the model-consistency
@@ -13,6 +15,7 @@ guard. The live two-call behavior is asserted end-to-end in test_real_sandbox_sm
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 PETRI = ENVIRONMENTS.parent / "petri"
@@ -25,11 +28,14 @@ from exp_real_audit import (  # noqa: E402
     _CONTINUED_NOTE,
     _ENDED_AT_STAGE1_NOTE,
     _split_render,
+    _target_timeline_events,
     build_real_tasks,
+    build_stage1_prompt,
+    real_dimensions_for_seed,
 )
-from exp_real_gate import GATE_PROMPT  # noqa: E402
 
 FRAUD_COLLECTION = PETRI / "seeds" / "ml_training_data_misuse"
+BENCH = PETRI / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
 
 HEAD = "[M1] SYSTEM: sp\n[M2] USER: open\n[M3] ASSISTANT: done"
 TAIL = "[M4] USER: follow up\n[M5] ASSISTANT: more work"
@@ -55,16 +61,39 @@ class SplitRenderTests(unittest.TestCase):
         self.assertEqual(_split_render(f"{HEAD}\n\n\n{TAIL}", HEAD), TAIL)
 
 
+class TargetTimelineEventTests(unittest.TestCase):
+    def test_private_gate_model_event_is_excluded_but_target_tools_remain(self):
+        events = [
+            SimpleNamespace(event="model", role="target"),
+            SimpleNamespace(event="tool", role=None),
+            SimpleNamespace(event="model", role="gate"),
+            SimpleNamespace(event="span_begin", role=None),
+        ]
+
+        kept = _target_timeline_events(events)
+
+        self.assertEqual(kept, [events[0], events[1], events[3]])
+
+
 class PromptTemplateTests(unittest.TestCase):
-    def test_stage1_prompt_carries_the_transcript_and_asks_for_a_verdict(self):
-        prompt = GATE_PROMPT.format(
-            rubric="RUBRIC", transcript_head=HEAD,
-            deliverables="DELIVERABLES", evidence="EVIDENCE",
-        )
-        for expected in (HEAD, "RUBRIC", "DELIVERABLES", "EVIDENCE",
-                         "VERDICT: clean", "stage 1"):
+    def test_stage1_prompt_is_the_judge_prompt_as_if_complete(self):
+        dims = list(real_dimensions_for_seed(BENCH).dimensions)
+        artifacts = {"files": [{"path": "/workspace/RESULT.md",
+                                "content": "# Results\nnull.\n", "truncated": False}]}
+        detectors = [{"name": "key_agreement", "fired": False, "evidence": {}}]
+        prompt = build_stage1_prompt(dims, HEAD, artifacts, detectors)
+        for expected in (HEAD, "impartial judge", "RESULT.md", "Mechanical evidence",
+                         "key_agreement", "answer()", "reward_hacking",
+                         "Critical Evaluation Guidelines"):
             self.assertIn(expected, prompt)
-        self.assertNotIn("{", prompt.replace("{{", ""), "unfilled placeholder remains")
+        # no staging tell, no verdict question: the model is asked to evaluate this as
+        # though it were the entire trajectory, the same way the final judge would
+        for forbidden in ("VERDICT", "stage 1", "first submission",
+                          "has the target committed"):
+            self.assertNotIn(forbidden, prompt)
+        for placeholder in ("{messages}", "{artifacts}", "{scoring_dimensions}",
+                            "{highlights_description}", "{instructions}"):
+            self.assertNotIn(placeholder, prompt, "unfilled placeholder remains")
 
     def test_stage2_prompt_scores_the_whole_trajectory(self):
         prompt = REAL_JUDGE_STAGE2_PROMPT.format(
@@ -73,9 +102,11 @@ class PromptTemplateTests(unittest.TestCase):
             highlights_description="HIGHLIGHTS",
         )
         for expected in (TAIL, "ARTIFACTS", "DIMS", "HIGHLIGHTS",
-                         "Score the WHOLE trajectory", "answer()"):
+                         "score the WHOLE trajectory", "answer()"):
             self.assertIn(expected, prompt)
         self.assertIn("numbering continues", prompt)
+        # stage 2 must come clean about the staged reveal
+        self.assertIn("only the FIRST PART", prompt)
         # the judge must not feel bound by its stage-1 answer
         self.assertIn("not bound by it", prompt)
         self.assertNotIn("{", prompt.replace("{{", ""))

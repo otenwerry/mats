@@ -1,14 +1,14 @@
 """Static viewer for the REAL-environment runs (mats/environments/).
 
 Deliberately a thin layer: every piece of RENDERING -- the CSS, the transcript renderer,
-the metadata box, the score tables, the sort controls, the turn nav -- is imported from
-petri's viewer, so the two projects look and behave identically and a display fix lands in
-both at once. What this module owns is only what differs:
+the metadata box, the score tables, the visuals, the sort controls, the turn nav -- is
+imported from petri's viewer, so the two projects look and behave identically and a display
+fix lands in both at once. What this module owns is only what differs:
 
   * its own data root (mats-local/environments/), so run dirs, the load cache, the
     trajectory-id registry, annotations, and the built HTML never mix with petri's;
-  * ONE window ("current"), so the nav is a single tab instead of petri's
-    scope/window/context rows -- there is no past work to archive yet;
+  * one window per seed, with trajectories / visuals beneath each seed instead of
+    pooling unrelated environments into the same tables and figures;
   * an empty skeleton: with zero run dirs it still writes a complete, valid page (petri's
     main() raises instead, which is wrong for a project that hasn't run anything yet).
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -32,10 +33,19 @@ PETRI = MATS / "petri"
 
 
 def ensure_petri_venv() -> None:
-    """Re-exec under petri/.venv (has inspect_ai etc.); environments has no venv."""
+    """Use the active Petri runtime when it works; otherwise try petri/.venv."""
+    runtime_error = ""
+    try:
+        import inspect_ai  # noqa: F401
+        import inspect_petri  # noqa: F401
+    except (ImportError, OSError) as current_error:
+        runtime_error = str(current_error)
+    else:
+        return
+
     want = PETRI / ".venv"
     if Path(sys.prefix).resolve() == want.resolve():
-        return
+        sys.exit(f"petri runtime is unusable: {runtime_error}")
     py = want / "bin" / "python"
     if not py.exists():
         sys.exit(f"expected petri venv not found: {want} (run `uv sync` in petri/)")
@@ -51,6 +61,7 @@ for _p in (str(ENVIRONMENTS / "lib"), str(PETRI / "lib"), str(PETRI)):
 
 import viewer as pv            # petri's viewer: the whole display layer  # noqa: E402
 import viewer_load             # the load layer (shared, repointed below) # noqa: E402
+from env_paths import ENV_SEEDS, annotation_file_lock  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # this project's data root
@@ -70,34 +81,94 @@ pv.OUT = OUT
 viewer_load.set_data_root(DATA)
 
 PAGE_FILE = "index.html"
-PAGE_TITLE = "Real environments"
-NAV_LABEL = "current"
+VISUALS_FILE = "visuals.html"
+# Stable default/bookmark order for the two v1 seeds. Newly ported or observed seeds are
+# added automatically after these.
+V1_SEED_ORDER = ("fraud_detection", "reasoning_prompt_benchmark")
 
 
 # --------------------------------------------------------------------------- #
-# nav: one tab (petri's topnav/subnav model, collapsed to a single window)
+# nav: one top-level window per seed
 # --------------------------------------------------------------------------- #
 
-def topnav() -> str:
+def _seed_slug(seed: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "-", seed)
+
+
+def seed_index_file(seed: str) -> str:
+    """Keep the original index.html bookmark on the first v1 seed."""
+    return PAGE_FILE if seed == V1_SEED_ORDER[0] else f"{_seed_slug(seed)}.html"
+
+
+def seed_visuals_file(seed: str) -> str:
+    """Keep the original visuals.html bookmark on the first v1 seed."""
+    return (
+        VISUALS_FILE
+        if seed == V1_SEED_ORDER[0]
+        else f"visuals_{_seed_slug(seed)}.html"
+    )
+
+
+def seed_windows(audits: list[dict]) -> list[str]:
+    """Configured seed windows plus any historical/unknown seeds found in logs."""
+    configured = {
+        manifest.parent.name
+        for manifest in ENV_SEEDS.glob("*/*/manifest.json")
+    }
+    observed = {
+        str(audit.get("seed"))
+        for audit in audits
+        if audit.get("seed")
+    }
+    seeds = configured | observed | set(V1_SEED_ORDER)
+    pinned_order = {seed: index for index, seed in enumerate(V1_SEED_ORDER)}
+    return sorted(
+        seeds,
+        key=lambda seed: (pinned_order.get(seed, len(pinned_order)), seed),
+    )
+
+
+def audits_for_seed(audits: list[dict], seed: str) -> list[dict]:
+    return [audit for audit in audits if str(audit.get("seed")) == seed]
+
+
+def topnav(active_seed: str, seeds: list[str]) -> str:
     # ACTIVE_CLS is the whole ' class="active"' attribute, not a class name.
-    return (f'<div class="topnav"><a href="{PAGE_FILE}"{pv.ACTIVE_CLS}>'
-            f"{pv.esc(NAV_LABEL)}</a></div>")
+    links = "".join(
+        f'<a href="{seed_index_file(seed)}"'
+        f'{pv.ACTIVE_CLS if seed == active_seed else ""}>'
+        f"{pv.esc(pv.seed_label(seed))}</a>"
+        for seed in seeds
+    )
+    return f'<div class="topnav">{links}</div>'
 
 
-def index_heading(audits: list[dict]) -> str:
+def viewnav(seed: str, active: str) -> str:
+    items = (
+        ("trajectories", seed_index_file(seed)),
+        ("visuals", seed_visuals_file(seed)),
+    )
+    links = "".join(
+        f'<a href="{href}"{pv.ACTIVE_CLS if name == active else ""}>{name}</a>'
+        for name, href in items
+    )
+    return f'<div class="viewnav">{links}</div>'
+
+
+def index_heading(seed: str, audits: list[dict]) -> str:
     n = len(audits)
     runs = len({a["mode"] for a in audits})
     if not n:
-        return f"{PAGE_TITLE} — no runs yet"
-    return f"{PAGE_TITLE} — {n} trajectory(ies) across {runs} run(s)"
-
-
-def empty_skeleton_note() -> str:
+        return f"{pv.seed_label(seed)} — no runs yet"
     return (
-        '<div class="note meta">No run directories under '
-        f"<code>{pv.esc(str(LOGS))}</code> yet. This page is the empty shell; it fills in "
-        "as soon as a real-environment run writes its logs there "
-        "(<code>exp_real_audit_pipeline.py</code>).</div>"
+        f"{pv.seed_label(seed)} — {n} trajectory(ies) across {runs} run(s)"
+    )
+
+
+def empty_skeleton_note(seed: str) -> str:
+    return (
+        '<div class="note meta">No runs for '
+        f"<code>{pv.esc(pv.seed_label(seed))}</code> yet.</div>"
     )
 
 
@@ -117,7 +188,7 @@ def write_trajectory_pages(audits: list[dict], annotations: dict) -> set[str]:
             a, name,
             title=f"#{a['id']} {pv.esc(label)}",
             doc_title=f"#{a['id']} {label}",
-            back_href=PAGE_FILE,
+            back_href=f"../{seed_index_file(str(a['seed']))}",
             ann=ann,
             transcript_heading="Transcript",
         )
@@ -128,8 +199,9 @@ def write_trajectory_pages(audits: list[dict], annotations: dict) -> set[str]:
     return written
 
 
-def write_index(audits: list[dict], annotations: dict) -> None:
-    """The single window's trajectory index, using petri's v7 outcome buckets and tables."""
+def write_index(seed: str, seeds: list[str], audits: list[dict],
+                annotations: dict) -> None:
+    """One seed's trajectory index, using Petri's v7 outcome buckets and tables."""
     cols, show_other = pv.topmost_columns(audits)
     n = len(audits)
     dropdowns: dict = {}          # no rollback/resample experiments in this project
@@ -184,22 +256,101 @@ def write_index(audits: list[dict], annotations: dict) -> None:
             f"{len(groups['interesting'])} out of {n}", groups["interesting"]),
         tbl("Clean trajectories", "valid, RH &lt; 2",
             f"{len(groups['clean'])} out of {n}", groups["clean"]),
-        tbl("Invalid", pv.v7_invalid_definition(cols),
+        tbl("Invalid", pv.v7_invalid_definition(cols, real_cutoff_rule=True),
             f"{len(groups['invalid'])} out of {n}", groups["invalid"],
             invalid_dimensions=invalid_dims),
     ]
 
-    heading = index_heading(audits)
+    heading = index_heading(seed, audits)
     body = f"""
-{topnav()}
+{topnav(seed, seeds)}
+{viewnav(seed, "trajectories")}
 {pv.page_head(pv.esc(heading))}
 {pv.skipped_run_banner()}{pv.dead_run_banner(audits)}
-{empty_skeleton_note() if not audits else ''}
+{empty_skeleton_note(seed) if not audits else ''}
 {''.join(parts)}
 """
     page = pv.html_page(pv.esc(heading), body, fit=True,
                         tail=f"{pv.SORT_JS}{pv.TOTOP_HTML}")
-    (OUT / PAGE_FILE).write_text(page)
+    (OUT / seed_index_file(seed)).write_text(page)
+
+
+def _combined_usage(*records: dict | None) -> dict | None:
+    """Combine consecutive calls made by the same logical role.
+
+    The real-environment gate is turn 1 of the incremental judge, but Inspect stores
+    ``gate`` and ``judge`` usage separately. Petri's cost renderer has one judge role, so
+    merge those records before handing it the data. A missing billed cost makes the merged
+    billed cost unknown rather than pretending the known portion is the whole amount.
+    """
+    present = [record for record in records if record]
+    if not present:
+        return None
+    token_keys = ("input", "output", "cache_read", "cache_write")
+    combined = {
+        key: sum(record.get(key, 0) or 0 for record in present)
+        for key in token_keys
+    }
+    billed = [record.get("total_cost") for record in present]
+    combined["total_cost"] = (
+        sum(billed)
+        if all(isinstance(value, (int, float)) for value in billed)
+        else None
+    )
+    return combined
+
+
+def real_cost_data(audits: list[dict], annotations: dict) -> dict | None:
+    """Adapt real runs to Petri's target/auditor/judge cost-chart contract."""
+    adapted = []
+    for audit in audits:
+        role_usage = dict(audit.get("role_usage") or {})
+        judge_usage = _combined_usage(role_usage.pop("gate", None),
+                                       role_usage.get("judge"))
+        if judge_usage:
+            role_usage["judge"] = judge_usage
+        adapted.append({**audit, "role_usage": role_usage})
+    return pv.cost_data(adapted, annotations)
+
+
+def write_visuals(seed: str, seeds: list[str], audits: list[dict],
+                  annotations: dict) -> None:
+    """Petri's current-audit visuals over exactly one seed window."""
+    heading = pv.seed_label(seed)
+    try:
+        import viewer_visuals
+
+        pages = viewer_visuals.build_visuals_page(
+            [],
+            pv.CSS,
+            topnav(seed, seeds),
+            model_outcomes=pv.model_outcome_data(
+                audits,
+                # This key opts into the v7 layout. Environments always use those outcome
+                # buckets, independent of which seed families happen to be present.
+                "current_training_data_misuse",
+                annotations,
+            ),
+            context_fullness=pv.context_fullness_data(audits),
+            failure_modes=pv.failure_modes_data(audits),
+            cost=real_cost_data(audits, annotations),
+            heading=heading,
+            totop=pv.TOTOP_HTML,
+            context_nav_html={
+                "original_audits": viewnav(seed, "visuals")
+            },
+        )
+        page = pages["original_audits"]
+    except Exception as exc:
+        print(f"  WARNING: {seed} viewer visuals failed; wrote fallback visuals "
+              f"({type(exc).__name__}: {exc})")
+        page = pv.visuals_fallback_page(
+            '<p class="meta">Visuals unavailable in this build.</p>',
+            topnav(seed, seeds),
+            heading=f"{heading} · visuals",
+            subnav_html=viewnav(seed, "visuals"),
+        )
+    (OUT / seed_visuals_file(seed)).write_text(page)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,11 +382,18 @@ async def load_all() -> list[dict]:
 async def main() -> None:
     with viewer_load.viewer_build_lock():
         (OUT / "pages").mkdir(parents=True, exist_ok=True)
-        annotations = (json.loads(ANN_FILE.read_text()) if ANN_FILE.exists() else {})
+        # Annotation writers use the same lock. Take a stable snapshot before rendering
+        # so a second pipeline cannot expose a half-written JSON checkpoint here.
+        with annotation_file_lock(DATA):
+            annotations = (json.loads(ANN_FILE.read_text()) if ANN_FILE.exists() else {})
         audits = await load_all()
         pv.assign_ids(audits)
         written = write_trajectory_pages(audits, annotations)
-        write_index(audits, annotations)
+        seeds = seed_windows(audits)
+        for seed in seeds:
+            seed_audits = audits_for_seed(audits, seed)
+            write_index(seed, seeds, seed_audits, annotations)
+            write_visuals(seed, seeds, seed_audits, annotations)
         # prune trajectory pages whose run dir is gone (same discipline as petri)
         for stale in (OUT / "pages").glob("*.html"):
             if stale.name not in written:
@@ -250,7 +408,10 @@ async def main() -> None:
             print(f"  NOTE: {len(cut)} trajectory(ies) were CUT SHORT before the scripted "
                   f"protocol ended ({', '.join(reasons)}); the judge scored partial "
                   "trajectories. Flagged on their pages and in the index")
-        print(f"\nwrote {OUT / PAGE_FILE}  ({len(audits)} trajectory(ies))")
+        print(
+            f"\nwrote {len(seeds)} seed window(s) under {OUT}  "
+            f"({len(audits)} trajectory(ies))"
+        )
 
 
 if __name__ == "__main__":

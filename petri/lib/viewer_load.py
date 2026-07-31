@@ -161,6 +161,17 @@ def finalize_audit_integrity(audit: dict) -> dict:
     raw_judge_status = audit.get("judge_score_status")
     if raw_judge_status in {"missing", "unusable"} and not audit.get("rejudged"):
         issues.append(f"judge_score_{raw_judge_status}")
+    # Real-environment incremental judging is a committed experimental condition.
+    # Require positive provenance for both the mode and canonical transcript source;
+    # missing provenance fails closed. Keep bad trajectories visible, but never pool or
+    # automatically annotate them as if the intended judge ran.
+    if audit.get("target_tools_mode") == "real":
+        if audit.get("judge_fallback_reason"):
+            issues.append("judge_incremental_fallback")
+        elif audit.get("judge_mode") != "incremental":
+            issues.append("judge_incremental_mode_missing")
+        elif audit.get("judge_transcript_source") != "stored_target_messages":
+            issues.append("judge_transcript_noncanonical")
 
     declared = list(audit.get("judge_dimensions") or [])
     scores = audit.get("scores") or {}
@@ -1356,10 +1367,33 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                 )
             md = (getattr(sc, "metadata", None) or {}) if sc is not None else {}
             transcript = rendered.get((log.eval.task, str(s.id), s.epoch), "")
-            # resolve attachment placeholders the scout renderer left in the transcript
-            transcript = resolve_attachments(transcript, s.attachments or {})
             run_metadata = log.eval.metadata or {}
             sample_metadata = s.metadata or {}
+            target_tools_mode = run_metadata.get("target_tools_mode")
+            transcript_source = "timeline"
+            transcript_render_error = None
+            if target_tools_mode == "real":
+                # A real run's Sample.messages is the canonical target-facing
+                # conversation. Its event timeline also contains the private gate model
+                # call; older runs built that mixed-role graph as the "target" timeline,
+                # which put the gate prompt/verdict in the viewer and confused message
+                # numbering. Render the lossless stored messages directly instead.
+                try:
+                    messages_as_str, _extract_refs, _label_for_id = message_numbering(
+                        MessagesPreprocessor(exclude_system=False), label_for_id=True
+                    )
+                    transcript = await messages_as_str(list(s.messages or []))
+                    transcript_source = "sample_messages"
+                except Exception as ex:  # noqa: BLE001
+                    transcript = ""
+                    transcript_source = "sample_messages_error"
+                    transcript_render_error = repr(ex)[:500]
+                    print(
+                        f"  WARNING: canonical real transcript render failed for "
+                        f"{s.id} epoch {s.epoch}: {ex!r}"
+                    )
+            # Resolve attachment placeholders after either rendering route.
+            transcript = resolve_attachments(transcript, s.attachments or {})
             # Only an original task that explicitly stamps the protocol version opts in.
             # Copies of the sample metadata used by continuations/resamples must not be
             # mistaken for a fresh original-script check.
@@ -1460,7 +1494,6 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
             # would false-positive. The solver stamps how the run actually ended
             # (metadata.real_env.protocol.ended_reason); a missing stamp means the
             # finalizer never ran (cancelled/killed), which IS a truncated record.
-            target_tools_mode = (log.eval.metadata or {}).get("target_tools_mode")
             real_env_meta = (getattr(s, "metadata", None) or {}).get("real_env")
             real_ended = None
             if target_tools_mode == "real":
@@ -1543,8 +1576,16 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # fields remain queryable even when a later rejudge repairs it.
                         judge_score_status=raw_judge_status,
                         judge_score_issue=raw_judge_issue,
+                        # Real incremental-judge provenance. A non-empty fallback
+                        # reason is an integrity failure (finalize_audit_integrity)
+                        # because the score came from a different judging procedure.
+                        judge_mode=md.get("judge_mode"),
+                        judge_fallback_reason=md.get("judge_fallback_reason"),
+                        judge_transcript_source=md.get("judge_transcript_source"),
                         rejudged=False,
                         transcript=transcript,
+                        transcript_source=transcript_source,
+                        transcript_render_error=transcript_render_error,
                         scratchpad=scratch,
                         auditor_calls=auditor_calls_by_anchor(s, transcript),
                         # event-ordered auditor asides (reasoning / scratchpad / non-message

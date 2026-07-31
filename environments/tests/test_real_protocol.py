@@ -5,15 +5,19 @@ rules, protocol assembly from the seed files, the real dimension set, and the
 build_real_tasks metadata contract.
 """
 
+import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 sys.path.insert(0, str(PETRI / "lib"))
 sys.path.insert(0, str(PETRI))
+sys.path.append(str(ENVIRONMENTS))
 
 from exp_real_audit import (  # noqa: E402
     DEFAULT_TIME_LIMIT_SECONDS,
@@ -122,6 +126,100 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(summary["ended_reason"], "protocol_end")
 
 
+class PipelineIntegrityTests(unittest.TestCase):
+    def test_incremental_judge_fallback_fails_the_pipeline(self):
+        from exp_real_audit_pipeline import judge_replay_integrity_failures
+
+        score = SimpleNamespace(metadata={
+            "judge_mode": "single_shot",
+            "judge_fallback_reason": "stage-1 render diverged",
+            "judge_transcript_source": "target_timeline",
+        })
+        sample = SimpleNamespace(
+            id="test", epoch=1, scores={"audit_judge": score}
+        )
+        log = SimpleNamespace(
+            eval=SimpleNamespace(task="real_audit_test"),
+            samples=[sample],
+        )
+
+        failures = judge_replay_integrity_failures([log])
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn(
+            "judge_incremental_fallback:stage-1 render diverged",
+            failures[0]["issues"],
+        )
+
+    def test_successful_incremental_judge_passes(self):
+        from exp_real_audit_pipeline import judge_replay_integrity_failures
+
+        score = SimpleNamespace(metadata={
+            "judge_mode": "incremental",
+            "judge_fallback_reason": None,
+            "judge_transcript_source": "stored_target_messages",
+        })
+        sample = SimpleNamespace(
+            id="test", epoch=1, scores={"audit_judge": score}
+        )
+        log = SimpleNamespace(
+            eval=SimpleNamespace(task="real_audit_test"),
+            samples=[sample],
+        )
+
+        self.assertEqual(judge_replay_integrity_failures([log]), [])
+
+    def test_missing_judge_provenance_fails_closed(self):
+        from exp_real_audit_pipeline import judge_replay_integrity_failures
+
+        sample = SimpleNamespace(
+            id="test",
+            epoch=1,
+            scores={"audit_judge": SimpleNamespace(metadata={})},
+        )
+        log = SimpleNamespace(
+            eval=SimpleNamespace(task="real_audit_test"),
+            samples=[sample],
+        )
+
+        failures = judge_replay_integrity_failures([log])
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("judge_mode_not_incremental:missing", failures[0]["issues"])
+        self.assertIn(
+            "judge_transcript_not_canonical:missing",
+            failures[0]["issues"],
+        )
+
+
+class AnnotationLoadTests(unittest.TestCase):
+    def test_incomplete_directory_does_not_block_completed_audits(self):
+        import exp_annotate_real_hacks
+
+        async def fake_load_mode(mode_dir):
+            if mode_dir.name == "incomplete":
+                raise RuntimeError("run has no completed sample")
+            return [{"seed": "completed"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            (logs / "completed").mkdir()
+            (logs / "incomplete").mkdir()
+            old_logs = exp_annotate_real_hacks.LOGS
+            old_loader = exp_annotate_real_hacks.viewer_load.load_mode
+            exp_annotate_real_hacks.LOGS = logs
+            exp_annotate_real_hacks.viewer_load.load_mode = fake_load_mode
+            try:
+                audits = asyncio.run(
+                    exp_annotate_real_hacks.load_all_real_audits()
+                )
+            finally:
+                exp_annotate_real_hacks.LOGS = old_logs
+                exp_annotate_real_hacks.viewer_load.load_mode = old_loader
+
+        self.assertEqual(audits, [{"seed": "completed"}])
+
+
 class ProtocolAssemblyTests(unittest.TestCase):
     def test_fraud_spec_matches_pinned_files(self):
         spec = assemble_real_protocol(FRAUD, "allow", "SP")
@@ -163,12 +261,33 @@ class RealDimensionTests(unittest.TestCase):
             self.assertIn("environment_failure", dims.names)
             self.assertIn("reward_hacking", dims.names)
 
+    def test_incompleteness_not_judged(self):
+        # Replaced 2026-07-31 by the mechanical ended_reason check
+        # (viewer.real_is_incomplete); the judge no longer scores it.
+        for seed in (FRAUD, BENCH):
+            self.assertNotIn("incompleteness", real_dimensions_for_seed(seed).names)
+
+    def test_rubrics_come_from_environments_own_fork(self):
+        # environments/dimensions/ owns the rubrics (forked from petri 2026-07-31);
+        # editing petri/dimensions/ must not change what real runs are judged on.
+        for seed in (FRAUD, BENCH):
+            dims = real_dimensions_for_seed(seed)
+            for file in dims.files:
+                self.assertEqual(
+                    ENVIRONMENTS / "dimensions",
+                    Path(file).resolve().parents[1],
+                    f"{file} is outside environments/dimensions/",
+                )
+
     def test_order_follows_judge_order_json(self):
         import json
 
-        order = json.loads((PETRI / "dimensions" / "judge_order.json").read_text())
+        order = json.loads(
+            (ENVIRONMENTS / "dimensions" / "judge_order.json").read_text())
         names = real_dimensions_for_seed(FRAUD).names
-        self.assertEqual(names, [n for n in order if n in set(names)])
+        # Every active rubric in the fork applies to every seed, so the routed set IS
+        # the full order file.
+        self.assertEqual(names, order)
 
 
 class BuildRealTasksTests(unittest.TestCase):

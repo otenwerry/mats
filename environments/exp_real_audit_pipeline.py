@@ -3,12 +3,12 @@
 The real-mode sibling of petri's exp_audit_pipeline.py: the same three stages, but
 stage 1 runs targets inside real Docker sandboxes (environments/sandbox/<family>/) with
 a deterministic scripted controller instead of an auditor LLM (see lib/exp_real_audit.py).
-Stages 2-3 reuse the simulated pipeline's code verbatim (annotation + viewer are
-mode-agnostic; results flow into the normal petri viewer).
+Stages 2-3 reuse Petri's shared annotation/rendering engines but write this project's
+annotations and separate environments viewer.
 
 v1 scope: fraud_detection + reasoning_prompt_benchmark, --condition=allow only.
 
-Usage (from mats/environments/; re-execs into petri/.venv automatically):
+Usage (from mats/environments/; uses the active Petri runtime):
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
       --seeds=fraud_detection --epochs=3
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
@@ -52,12 +52,19 @@ _PETRI = _MATS / "petri"
 
 
 def ensure_petri_venv() -> None:
-    """environments/ has no venv of its own; everything runs in petri/.venv (which has
-    inspect_ai etc.). Re-exec under that interpreter so this endpoint works no matter
-    which directory/venv it was launched from (same pattern as shared/exp_ask_questions)."""
+    """Use the active Petri runtime when it works; otherwise try petri/.venv."""
+    runtime_error = ""
+    try:
+        import inspect_ai  # noqa: F401
+        import inspect_petri  # noqa: F401
+    except (ImportError, OSError) as current_error:
+        runtime_error = str(current_error)
+    else:
+        return
+
     want = _PETRI / ".venv"
     if pathlib.Path(sys.prefix).resolve() == want.resolve():
-        return
+        sys.exit(f"petri runtime is unusable: {runtime_error}")
     py = want / "bin" / "python"
     if not py.exists():
         sys.exit(f"expected petri venv not found: {want} (run `uv sync` in petri/)")
@@ -261,6 +268,46 @@ def gate_integrity_failures(logs: list) -> list[dict]:
     return failures
 
 
+def judge_replay_integrity_failures(logs: list) -> list[dict]:
+    """Samples without positive provenance for the intended incremental judge.
+
+    ``real_audit_judge`` records a fallback reason whenever it cannot replay the gate
+    exchange and instead opens a fresh single-shot judge context. The score may still
+    be syntactically complete, so Petri's generic score-presence guard cannot detect
+    this real-environment validity failure. Missing mode/source metadata also fails
+    closed rather than being treated as proof that the intended procedure ran.
+    """
+    failures: list[dict] = []
+    for log in logs or []:
+        for sample in log.samples or []:
+            score = (sample.scores or {}).get("audit_judge")
+            metadata = (
+                (getattr(score, "metadata", None) or {})
+                if score is not None else {}
+            )
+            fallback_reason = metadata.get("judge_fallback_reason")
+            judge_mode = metadata.get("judge_mode")
+            transcript_source = metadata.get("judge_transcript_source")
+            issues = []
+            if fallback_reason:
+                issues.append(f"judge_incremental_fallback:{fallback_reason}")
+            if judge_mode != "incremental":
+                issues.append(f"judge_mode_not_incremental:{judge_mode or 'missing'}")
+            if transcript_source != "stored_target_messages":
+                issues.append(
+                    "judge_transcript_not_canonical:"
+                    f"{transcript_source or 'missing'}"
+                )
+            if issues:
+                failures.append({
+                    "task": log.eval.task,
+                    "sample": str(sample.id),
+                    "epoch": sample.epoch,
+                    "issues": issues,
+                })
+    return failures
+
+
 def run_real_audit_stage(cfg: dict):
     targets, seeds, epochs = cfg["targets"], cfg["seeds"], cfg["epochs"]
     target_models = [route(TARGET_CHOICES[t]) for t in targets]
@@ -326,8 +373,10 @@ def run_real_audit_stage(cfg: dict):
 
     integrity_failures = audit_integrity_failures(logs)
     gate_failures = gate_integrity_failures(logs)
+    judge_replay_failures = judge_replay_integrity_failures(logs)
     for name, failures in (("data-integrity", integrity_failures),
-                           ("gate", gate_failures)):
+                           ("gate", gate_failures),
+                           ("judge-replay", judge_replay_failures)):
         if failures:
             print("\n" + "!" * 72)
             print(f"WARNING: {len(failures)} trajectory(ies) have {name} failures:")
@@ -337,7 +386,8 @@ def run_real_audit_stage(cfg: dict):
             print("!" * 72)
 
     integrity_ok = (bool(success) and actual_n == expected_n and not dead
-                    and not integrity_failures and not gate_failures)
+                    and not integrity_failures and not gate_failures
+                    and not judge_replay_failures)
     return logs, log_dir, expected_n, integrity_ok
 
 
