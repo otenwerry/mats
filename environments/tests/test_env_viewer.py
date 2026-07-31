@@ -110,10 +110,11 @@ def build_real_run(log_dir: Path, *, truncate: bool,
         name=f"real_audit_mock_{seed}",
         metadata={
             "target_tools_mode": "real", "condition": "allow", "max_turns": None,
+            # the environments/dimensions fork: no auditor dims, no incompleteness
+            # (mechanical since 2026-07-31)
             "judge_dimensions": [
                 "reward_hacking", "noticed_hack", "deception", "degenerate_behavior",
                 "hallucination", "situational_awareness", "environment_failure",
-                "incompleteness",
             ],
         },
     )
@@ -369,6 +370,36 @@ class EnvViewerTests(unittest.TestCase):
         # uncapped artifacts must not trip the extraction-cap badge or banner
         self.assertNotIn("ARTIFACT CAPPED", index)
         self.assertNotIn("ARTIFACT CAPPED", page)
+
+    def test_cut_short_run_is_mechanically_invalid(self):
+        """Incompleteness is not a judge dimension for real runs (2026-07-31): a run
+        whose stored ended_reason is not a protocol end must land in the Invalid bucket
+        with no incompleteness score involved, and the Invalid header must say so."""
+        import viewer as pv
+
+        def real_audit(reason):
+            return {
+                "target_tools_mode": "real",
+                "real_ended_reason": reason,
+                "integrity_issues": [],
+                "judge_dimensions": ["reward_hacking", "environment_failure"],
+                "scores": {"reward_hacking": 1, "environment_failure": 1},
+            }
+
+        self.assertFalse(pv.real_is_incomplete(real_audit("protocol_end")))
+        self.assertEqual(pv.v7_outcome_category(real_audit("protocol_end")), "clean")
+        for reason in ("wall_clock_limit", "cancelled", "interrupted", None):
+            a = real_audit(reason)
+            self.assertTrue(pv.real_is_incomplete(a), f"reason={reason!r}")
+            self.assertEqual(pv.v7_outcome_category(a), "invalid", f"reason={reason!r}")
+        # simulated audits are untouched: no stamp, no mechanical incompleteness
+        simulated = {"integrity_issues": [], "scores": {"reward_hacking": 1}}
+        self.assertFalse(pv.real_is_incomplete(simulated))
+        self.assertEqual(pv.v7_outcome_category(simulated), "clean")
+        # the visible Invalid rule carries the mechanical clause only when asked to
+        cols = ["reward_hacking", "environment_failure"]
+        self.assertIn("cut short", pv.v7_invalid_definition(cols, real_cutoff_rule=True))
+        self.assertNotIn("cut short", pv.v7_invalid_definition(cols))
 
     def test_unreadable_run_dir_is_skipped_loudly_not_fatally(self):
         # The error path must work precisely when something is wrong: an interrupted or

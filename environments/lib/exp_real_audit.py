@@ -91,16 +91,14 @@ for _p in (str(_ENVIRONMENTS_ROOT / "lib"),
         sys.path.insert(0, _p)
 
 from petri_paths import PETRI_ROOT, ENV_FILE
-# This project's OWN data root (run dirs, viewer, annotations) -- never petri's.
-from env_paths import DATA, LOGS
+# This project's OWN data root (run dirs, viewer, annotations) and rubric tree --
+# never petri's.
+from env_paths import DATA, ENV_DIMENSIONS, LOGS
 from dimension_routing import (
     AuditDimensionSet,
-    _judge_dimension_order,
-    _parse_dimension_file,
     dimension_provenance,
     dimensions_for_seed,
 )
-from petri_paths import DIMENSIONS_DIR
 from exp_rh_audit import (
     JUDGE,
     REASONING_EFFORT,
@@ -183,8 +181,6 @@ FAMILY_DELIVERABLES = {
     "ml_training_data_misuse": ("predictions.csv", "REPORT.md"),
     "p_hacking": ("analysis.py", "RESULT.md"),
 }
-# Judge dimensions that only make sense with a simulated auditor.
-AUDITOR_ONLY_DIMENSIONS = {"auditor_mistakes", "auditor_nudging"}
 # Per-deliverable cap inside the JUDGE prompt (full 200KB-capped copies remain in
 # metadata/sidecar; truncation here is marked inline).
 JUDGE_ARTIFACT_CAP = 30_000
@@ -293,27 +289,14 @@ def assemble_real_protocol(unit_path: str | Path, condition: str,
 # --------------------------------------------------------------------------- #
 
 def real_dimensions_for_seed(seed_path: str | Path) -> AuditDimensionSet:
-    """The seed's routed dimension set, minus auditor-only rubrics, plus
-    dimensions/real_env/environment_failure.md (the real-mode validity analog)."""
-    base = dimensions_for_seed(seed_path)
-    real_dir = DIMENSIONS_DIR / "real_env"
-    extra_files = sorted(
-        f for f in real_dir.glob("*.md") if f.name.casefold() != "readme.md"
-    )
-    if not extra_files:
-        raise SystemExit(f"{real_dir} holds no rubrics (expected environment_failure.md)")
-    keep = [
-        (dim, file) for dim, file in zip(base.dimensions, base.files)
-        if dim.name not in AUDITOR_ONLY_DIMENSIONS
-    ]
-    keep += [(_parse_dimension_file(f), f) for f in extra_files]
-    order = _judge_dimension_order(DIMENSIONS_DIR)
-    keep.sort(key=lambda pair: order.index(pair[0].name))
-    return AuditDimensionSet(
-        dimensions=tuple(dim for dim, _ in keep),
-        files=tuple(file for _, file in keep),
-        scope_dir=base.scope_dir,
-    )
+    """The seed's routed dimension set from THIS project's own rubric tree
+    (environments/dimensions/, forked from petri's 2026-07-31 and free to drift).
+
+    The fork already reflects real mode, so no post-hoc surgery remains: the auditor-only
+    rubrics were never copied, environment_failure lives in global/, and incompleteness
+    is gone entirely -- replaced by the mechanical ended_reason check (the viewer buckets
+    any non-protocol end as Invalid; see viewer.real_is_incomplete)."""
+    return dimensions_for_seed(seed_path, dimensions_root=ENV_DIMENSIONS)
 
 
 # --------------------------------------------------------------------------- #
@@ -1029,7 +1012,11 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                     "judge": judge_model,
                     "gate_model": gate_model,
                     "nudge": "no_nudge",
-                    **dimension_provenance(unit_path, dims),
+                    **dimension_provenance(
+                        unit_path, dims,
+                        dimensions_root=ENV_DIMENSIONS,
+                        project_root=ENVIRONMENTS_ROOT,
+                    ),
                     # no turn cap in real mode; the wall-clock limit bounds a run
                     "max_turns": None,
                     "target_tools_mode": "real",
