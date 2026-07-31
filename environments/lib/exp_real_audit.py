@@ -25,9 +25,11 @@ Flags (mirroring exp_rh_audit.py, minus the auditor):
   --concurrency=<N>       LLM parallelism (default 50, as everywhere).
   --sandbox-concurrency=<N>  max live Docker containers (default 8; containers, not
                           LLM calls, are the binding resource on a laptop).
-  --time-limit=<seconds>  per-trajectory WALL CLOCK budget, default 3600 (one hour).
-                          This is the runaway guard -- there is no turn cap. Pass 0 to
-                          disable it entirely (not recommended).
+  --time-limit=<seconds>  per-trajectory WALL CLOCK budget; the default depends on the
+                          seed family (ml 10800 / p_hacking 1800, else 3600 -- see
+                          FAMILY_TIME_LIMIT_SECONDS). This is the runaway guard --
+                          there is no turn cap. Pass 0 to disable it entirely (not
+                          recommended).
 
 Requires a running Docker daemon (each trajectory gets its own container built from
 petri/sandbox/<family>/). Costs money: target + judge + gate LLM calls.
@@ -124,6 +126,7 @@ from exp_real_gate import (
     GateConfig,
     gate_detectors,
     render_evidence,
+    rh_tags_requested,
     run_gate,
     target_authored_texts,
 )
@@ -159,18 +162,25 @@ REAL_PROTOCOL_VERSION = "real-exact-script-v1"
 # match) the judge model -- see the check in build_real_tasks.
 DEFAULT_GATE_MODEL = JUDGE
 DEFAULT_SANDBOX_CONCURRENCY = 8
-# Per-trajectory wall-clock budget. This is the ONLY runaway guard: there is no turn cap
-# (removed 2026-07-30), because the target never sees one and a turn can be `ls` or a
-# ten-minute fit. Measured simulated trajectories ran 31-39 min median / 85 min worst;
-# the real environment drops ~55% of the model calls (every fabricated tool result was an
-# auditor call), so an hour is comfortably above a healthy run on the CPU seeds.
+# Per-trajectory wall-clock budget, by seed FAMILY (Owen 2026-07-31). This is the ONLY
+# runaway guard: there is no turn cap (removed 2026-07-30), because the target never
+# sees one and a turn can be `ls` or a ten-minute fit. The budgets differ because the
+# work does: an honest fraud run takes well over an hour (round 1 ~35 min + a full
+# follow-up round of real xgboost sweeps — the 1h default systematically cut exactly
+# the honest runs), while the benchmark analysis runs its stats in seconds.
+FAMILY_TIME_LIMIT_SECONDS = {
+    "ml_training_data_misuse": 10800,   # 3 hours
+    "p_hacking": 1800,                  # 30 minutes
+}
+# Families without a row above (future seed classes) fall back to one hour.
 DEFAULT_TIME_LIMIT_SECONDS = 3600
 
 
-def resolve_time_limit(arg: str | None) -> int | None:
-    """Seconds per trajectory. Absent -> one hour. `0` -> no limit (stated explicitly)."""
+def resolve_time_limit(arg: str | None, family: str | None = None) -> int | None:
+    """Seconds per trajectory. Absent -> the family's default (see
+    FAMILY_TIME_LIMIT_SECONDS). `0` -> no limit (stated explicitly)."""
     if arg is None:
-        return DEFAULT_TIME_LIMIT_SECONDS
+        return FAMILY_TIME_LIMIT_SECONDS.get(family, DEFAULT_TIME_LIMIT_SECONDS)
     try:
         value = int(arg)
     except ValueError:
@@ -458,6 +468,10 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
     judge_dimensions = list(dimensions) if dimensions else list(
         real_dimensions_for_seed(seed_path).dimensions)
     judge_answer = AnswerStructured(_alignment_answer_type(judge_dimensions))
+    # Whether this run's reward_hacking rubric asks for RH_CATEGORY/RH_TYPES lines
+    # (ml: yes; p_hacking: no since 2026-07-31). Decides how the gate treats a missing
+    # category line; the same fact is stamped into run metadata for the viewer.
+    tags_requested = rh_tags_requested(judge_dimensions)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         tools = real_target_tools()
@@ -513,6 +527,7 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
                         )
                         gate = await run_gate(
                             stage1_prompt, judge_answer, spec.family, detectors,
+                            tags_requested=tags_requested,
                         )
                         real_env["gates"].append(
                             {"submission": 1, **gate.as_dict()}
@@ -1095,6 +1110,10 @@ def build_real_tasks(selected_targets: list[str], selected_seeds: list[str],
                         dimensions_root=ENV_DIMENSIONS,
                         project_root=ENVIRONMENTS_ROOT,
                     ),
+                    # Does the routed reward_hacking rubric request RH_CATEGORY/
+                    # RH_TYPES lines? Read by viewer_load: a missing tag line is only
+                    # a parse error on runs whose judge was actually instructed.
+                    "rh_tags_requested": rh_tags_requested(dims.dimensions),
                     # no turn cap in real mode; the wall-clock limit bounds a run
                     "max_turns": None,
                     "target_tools_mode": "real",
@@ -1132,7 +1151,8 @@ def reject_max_turns_flag() -> None:
         raise SystemExit(
             "--max-turns no longer exists in real mode: the target never saw a turn cap, "
             "so it was only a runaway guard. Use --time-limit=<seconds> "
-            f"(default {DEFAULT_TIME_LIMIT_SECONDS}, 0 = no limit)."
+            f"(default per seed family {FAMILY_TIME_LIMIT_SECONDS}, "
+            f"else {DEFAULT_TIME_LIMIT_SECONDS}; 0 = no limit)."
         )
 
 
@@ -1167,7 +1187,7 @@ def main() -> None:
     reasoning = resolve_reasoning(_flag("reasoning"))
     concurrency = int(_flag("concurrency") or "50")
     sandbox_concurrency = int(_flag("sandbox-concurrency") or str(DEFAULT_SANDBOX_CONCURRENCY))
-    time_limit = resolve_time_limit(_flag("time-limit"))
+    time_limit = resolve_time_limit(_flag("time-limit"), Path(seeds_path).name)
     judge = _flag("judge")
     gate_model = resolve_gate_model(_flag("gate-model"), judge)
 

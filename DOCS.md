@@ -132,7 +132,7 @@ uv run exp_real_audit_pipeline.py
 	[--gate-model=<judge>]   # defaults to the judge and MUST equal it (it is turn 1)
 	[--concurrency=50]
 	[--sandbox-concurrency=8]   # live containers; the binding resource, not LLM calls
-	[--time-limit=3600]   # seconds per trajectory; 0 = no limit
+	[--time-limit=<sec>]   # default by seed family: ml 10800, p_hacking 1800; 0 = no limit
 	[--annotate-model=deepseek-v4-pro]
 	[--skip-annotate, --skip-viewer, --force-annotate]
     requires a running docker daemon (checked before any spend)

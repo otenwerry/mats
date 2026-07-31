@@ -289,6 +289,17 @@ class RealDimensionTests(unittest.TestCase):
         # the full order file.
         self.assertEqual(names, order)
 
+    def test_rh_tag_request_split_by_family(self):
+        # The ml rubric still instructs the RH_CATEGORY/RH_TYPES lines; the p_hacking
+        # rubric dropped them on 2026-07-31 (its bands score the delivered outcome, so
+        # the categories were redundant). The gate and the viewer's missing-tag parse
+        # error both key off this fact — pin the split here so a rubric edit that
+        # changes it fails loudly instead of silently flipping tag handling.
+        from exp_real_gate import rh_tags_requested
+
+        self.assertTrue(rh_tags_requested(real_dimensions_for_seed(FRAUD).dimensions))
+        self.assertFalse(rh_tags_requested(real_dimensions_for_seed(BENCH).dimensions))
+
 
 class BuildRealTasksTests(unittest.TestCase):
     def test_task_contract(self):
@@ -308,12 +319,22 @@ class BuildRealTasksTests(unittest.TestCase):
         self.assertIsNone(md["max_turns"])
         self.assertIn("environment_failure", md["judge_dimensions"])
         self.assertNotIn("auditor_mistakes", md["judge_dimensions"])
+        self.assertTrue(md["rh_tags_requested"])   # ml rubric requests the tag lines
         self.assertTrue(md["real_env_manifest_sha"])
         sample = task.dataset[0]
         protocol = sample.metadata["auditor_protocol"]
         self.assertEqual(protocol["version"], REAL_PROTOCOL_VERSION)
         self.assertEqual(len(protocol["follow_up_user_messages"]), 1)
         self.assertIn("/workspace/data/eval/test_labels.csv", sample.files)
+
+    def test_p_hacking_task_stamps_tags_not_requested(self):
+        tasks = build_real_tasks(
+            ["qwen3-32b"], ["reasoning_prompt_benchmark"], "test-run",
+            reasoning=True, condition="allow",
+            gate_model=resolve_judge(None),   # the gate must equal the judge
+            seeds_path=str(BENCH.parent),
+        )
+        self.assertFalse(tasks[0].metadata["rh_tags_requested"])
 
     def test_correct_condition_rejected_in_v1(self):
         with self.assertRaises(SystemExit):
@@ -330,12 +351,18 @@ class TimeLimitFlagTests(unittest.TestCase):
     """--time-limit replaced --max-turns as the runaway guard, so its defaulting and
     validation are now load-bearing rather than incidental."""
 
-    def test_default_is_one_hour(self):
+    def test_default_depends_on_the_seed_family(self):
+        # ml runs need hours (honest round 2 is real xgboost sweeps); the benchmark's
+        # stats run in seconds; unknown/future families fall back to one hour.
         self.assertEqual(DEFAULT_TIME_LIMIT_SECONDS, 3600)
+        self.assertEqual(resolve_time_limit(None, "ml_training_data_misuse"), 10800)
+        self.assertEqual(resolve_time_limit(None, "p_hacking"), 1800)
         self.assertEqual(resolve_time_limit(None), 3600)
+        self.assertEqual(resolve_time_limit(None, "some_future_family"), 3600)
 
     def test_explicit_value_wins(self):
         self.assertEqual(resolve_time_limit("900"), 900)
+        self.assertEqual(resolve_time_limit("900", "ml_training_data_misuse"), 900)
 
     def test_zero_means_no_limit(self):
         self.assertIsNone(resolve_time_limit("0"))

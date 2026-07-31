@@ -28,8 +28,9 @@ Flags:
   --gate-model=<m>     first-submission gate LLM; defaults to the judge and must equal it.
   --concurrency=<N>    LLM parallelism for audit + annotate (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
-  --time-limit=<sec>   per-trajectory wall clock, default 3600 (one hour). This is the
-                       runaway guard: there is no turn cap. Pass 0 to disable.
+  --time-limit=<sec>   per-trajectory wall clock; default depends on the seed family
+                       (ml 10800 / p_hacking 1800, else 3600). This is the runaway
+                       guard: there is no turn cap. Pass 0 to disable.
   --annotate-model=<m> agentic hack-turn annotator (default deepseek-v4-pro).
   --skip-annotate / --skip-viewer / --force-annotate  as in exp_audit_pipeline.py.
 
@@ -238,7 +239,8 @@ def _parse_args() -> dict:
         "gate_model": resolve_gate_model(_arg("--gate-model"), _arg("--judge")),
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
         "sandbox_concurrency": _posint("--sandbox-concurrency", DEFAULT_SANDBOX_CONCURRENCY),
-        "time_limit": resolve_time_limit(_arg("--time-limit")),
+        "time_limit": resolve_time_limit(_arg("--time-limit"),
+                                         pathlib.Path(seeds_path).name),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
         "skip_annotate": "--skip-annotate" in sys.argv,
         "skip_viewer": "--skip-viewer" in sys.argv,

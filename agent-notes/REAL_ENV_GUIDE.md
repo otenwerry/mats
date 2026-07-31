@@ -160,7 +160,10 @@ directly comparable. Results render in THIS project's own viewer, from its own d
 experimental parameter the auditor budgets against; here the target never saw it, so it
 was only ever a runaway guard, and a turn can be `ls` or a ten-minute fit).
 
-`--time-limit` is the guard now, defaulting to **3600s** (one hour). Owen's reference:
+`--time-limit` is the guard now, defaulting PER SEED FAMILY since 2026-07-31 (Owen):
+**ml 10800s / p_hacking 1800s**, one hour for any future family
+(FAMILY_TIME_LIMIT_SECONDS; an explicit flag always wins). The 1h flat default
+systematically cut honest fraud runs — see the 220847 note below. Owen's reference:
 simulated petri runs took ~31-39 min median, 85 min worst, and the real environment cuts
 ~55% of the model calls because every fabricated tool result used to be an auditor call.
 `--time-limit=0` disables it.
