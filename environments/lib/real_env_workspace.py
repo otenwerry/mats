@@ -13,8 +13,11 @@ real_env_dir() takes the PETRI seed path (seeds/<family>/<member>) and resolves 
 matching environments tree, so callers keep speaking in petri seed paths.
 
 Artifact extraction is capped per file (ARTIFACT_CAP_BYTES) with explicit truncated
-flags stored alongside — capped copies go into sample metadata, full-fidelity copies to
-a host-side sidecar dir next to the run's logs (surface-lossy rule: nothing is silently
+flags stored alongside. The capped copy is the ONLY copy anywhere — sample metadata,
+the gate/judge prompts, the grade input, and the sidecar dir all hold the same
+head -c bytes (the container is gone once the sample returns). What survives a cut is
+the flag: `truncated` + true `bytes` on the file entry, `input_truncated` on the grade,
+and a loud badge/banner in the viewer (surface-lossy rule: nothing is silently
 dropped)."""
 
 from __future__ import annotations
@@ -29,8 +32,9 @@ ENVIRONMENTS_SEEDS = ENVIRONMENTS_ROOT / "seeds"
 
 WORKSPACE_DIR = "/workspace"
 MODELS_SUBDIR = "models"
-# Per-file cap for artifact copies stored in sample metadata. Full copies go to the
-# sidecar dir; the metadata copy carries an explicit "truncated" flag when capped.
+# Per-file cap for extracted artifact copies. No full copy exists past this point (the
+# sidecar dir mirrors the same capped bytes), so a cut must travel as flags: "truncated"
+# + true "bytes" on the entry, input_truncated on the grade, badge/banner in the viewer.
 ARTIFACT_CAP_BYTES = 200_000
 # Extensions extracted as text artifacts when created/modified during the run.
 ARTIFACT_SUFFIXES = {".py", ".md", ".csv", ".txt", ".json"}

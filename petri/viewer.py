@@ -2819,6 +2819,57 @@ def truncation_flag(a: dict) -> str:
     )
 
 
+def artifact_cap_cuts(a: dict) -> list[dict]:
+    """Extracted workspace files whose stored copy was clipped by the per-file
+    extraction cap (real-environment runs only; entries carry truncated + true bytes).
+    Distinct from truncation_summary: that is what the TARGET saw of its own tool
+    output mid-run; this is what WE kept of the final workspace."""
+    files = (((a.get("real_env") or {}).get("artifacts") or {}).get("files")) or []
+    return [f for f in files if f.get("truncated")]
+
+
+def artifact_cap_warning(a: dict) -> str:
+    """LOUD trajectory-page banner when an extracted artifact was clipped.
+
+    The run itself was untouched (the full file existed in the container); what is
+    partial is OUR record — the stored copy, what the gate/judge read, and, if the
+    clipped file is predictions.csv, the grade input (grade.input_truncated)."""
+    cuts = artifact_cap_cuts(a)
+    if not cuts:
+        return ""
+    detail = ", ".join(
+        f"{esc(str(c.get('path', '?')).rpartition('/')[2])} "
+        f"({_fmt_bytes(c.get('bytes'))} raw)"
+        for c in cuts
+    )
+    graded_cut = any(str(c.get("path", "")).endswith("/predictions.csv") for c in cuts)
+    grade_note = (
+        " The clipped file includes <b>predictions.csv</b>, so the stored grade was "
+        "computed on a partial file (grade.input_truncated)."
+        if graded_cut else ""
+    )
+    return (
+        '<div class="deadbanner">&#9888; <b>ARTIFACT CAPPED AT EXTRACTION</b> &mdash; '
+        f"{len(cuts)} workspace file(s) exceeded the per-file extraction cap, so the "
+        f"stored copy (what the gate and judge read) is only a prefix ({detail}). "
+        f"The run itself was unaffected; our record of its output is partial.{grade_note}"
+        "</div>"
+    )
+
+
+def artifact_cap_flag(a: dict) -> str:
+    """Compact index-table badge mirroring artifact_cap_warning."""
+    cuts = artifact_cap_cuts(a)
+    if not cuts:
+        return ""
+    return (
+        f' <span class="hacktag" title="{len(cuts)} extracted workspace file(s) '
+        'exceeded the per-file extraction cap; the stored copies (gate/judge/grade '
+        'input) are prefixes">'
+        f"&#9888; ARTIFACT CAPPED &times;{len(cuts)}</span>"
+    )
+
+
 # How a REAL-environment run ended (metadata.real_env.protocol.ended_reason), split into
 # the ones that mean "the scripted protocol ran to its end" and the ones that mean "we cut
 # it off". Real mode has no turn cap, so anything in the second group is a partial
@@ -3208,6 +3259,7 @@ def write_trajectory_page(a: dict, name: str, *, title: str, doc_title: str,
 {'<div class="hackcaveat">&#9888; <b>CRASHED RUN</b> &mdash; the auditor lost the ability to operate the harness mid-run (its trailing tool calls all failed, e.g. sending a non-string tool result) and the conversation stalled without an end_conversation or a genuine turn-cap. The judge scored a <b>truncated</b> conversation; treat these scores (especially incompleteness) as artifacts, not evidence about the target.</div>' if a.get('crashed') else ''}
 {integrity_warning(a)}
 {truncation_warning(a)}
+{artifact_cap_warning(a)}
 {real_cutoff_warning(a)}
 {auditor_protocol_warning(a)}
 {annotation_coverage_warning(ann)}
@@ -3466,6 +3518,8 @@ def write_table(title: str, definition: str, count: str, audits: list[dict],
         flag += auditor_protocol_flag(a)
         # truncated tool output: the target saw a partial view of its own command output
         flag += truncation_flag(a)
+        # real runs only: an extracted workspace file was clipped by the per-file cap
+        flag += artifact_cap_flag(a)
         # real runs only: the protocol never reached its end (wall clock / cancel / error)
         flag += real_cutoff_flag(a)
         comp_flag = ' <span class="comptag">&#9888; COMPACTED</span>' if a.get("compactions") else ""

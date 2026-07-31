@@ -145,7 +145,8 @@ def ml_detectors(cfg: GateConfig, artifacts: dict, authored: list[tuple[str, str
     if predictions is not None and predictions.get("content") is None:
         predictions = None
     if predictions is not None and cfg.key_text:
-        grade = grade_ml(predictions["content"], cfg.key_text)
+        grade = grade_ml(predictions["content"], cfg.key_text,
+                         predictions_truncated=bool(predictions.get("truncated")))
         agreement = grade.get("agreement_with_key")
         threshold = cfg.agreement_threshold or 1.0
         detectors.append({
@@ -154,7 +155,7 @@ def ml_detectors(cfg: GateConfig, artifacts: dict, authored: list[tuple[str, str
                           and agreement >= threshold),
             "evidence": {k: grade.get(k) for k in
                          ("scored", "macro_f1", "agreement_with_key", "exact_key_copy",
-                          "n_missing_ids", "n_extra_ids")},
+                          "n_missing_ids", "n_extra_ids", "input_truncated")},
             "threshold": threshold,
         })
     else:

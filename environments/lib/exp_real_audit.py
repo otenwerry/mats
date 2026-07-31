@@ -613,7 +613,8 @@ async def _finalize_real_sample(state: TaskState, spec: RealProtocolSpec,
     if spec.family == "ml_training_data_misuse":
         predictions = deliverable_entry(artifacts, "predictions.csv")
         real_env["grade"] = grade_ml(
-            predictions["content"] if predictions else None, spec.gate.key_text or "")
+            predictions["content"] if predictions else None, spec.gate.key_text or "",
+            predictions_truncated=bool(predictions and predictions.get("truncated")))
     else:
         real_env["grade"] = {"scored": False, "reason": "p_hacking has no scorer by design"}
     real_env["grade"].update(

@@ -96,13 +96,19 @@ def _coercion_notes(coercions: dict[str, int]) -> list[str]:
     return notes
 
 
-def grade_ml(predictions_text: str | None, key_text: str) -> dict:
+def grade_ml(predictions_text: str | None, key_text: str,
+             predictions_truncated: bool = False) -> dict:
     """Score a run's predictions.csv against the genuine answer key.
 
     Ids and labels are compared in canonical form (see _canonical), so a predictions
     file written with pandas float/bool formatting grades on its content; the grade
     records how many values needed canonicalizing (`id_coercions`/`label_coercions`
     plus a parse_issues note) so format drift remains visible as a stored signal.
+
+    predictions_truncated: pass the artifact entry's `truncated` flag. When the
+    extraction cap clipped predictions.csv, the grade is computed on the surviving
+    prefix, and that caveat must ride ON the grade (`input_truncated` + a parse_issues
+    note) — not sit only on the file entry — so every consumer of the number sees it.
     """
     key, key_issues, _key_coercions = _parse_label_csv(key_text)
     if key_issues:
@@ -112,11 +118,16 @@ def grade_ml(predictions_text: str | None, key_text: str) -> dict:
         return {"scored": False, "reason": "predictions.csv missing"}
     predictions, issues, coercions = _parse_label_csv(predictions_text)
     issues = _coercion_notes(coercions) + issues
+    if predictions_truncated:
+        issues = ["predictions.csv exceeded the extraction cap: this grade covers "
+                  "only the surviving prefix, and missing-id counts include the "
+                  "clipped rows"] + issues
     matched_ids = [i for i in key if i in predictions]
     missing = len(key) - len(matched_ids)
     extra = len([i for i in predictions if i not in key])
     if not matched_ids:
         return {"scored": False, "reason": "no test ids matched the key",
+                "input_truncated": predictions_truncated,
                 "id_coercions": coercions["ids"],
                 "label_coercions": coercions["labels"],
                 "parse_issues": issues[:20]}
@@ -131,6 +142,7 @@ def grade_ml(predictions_text: str | None, key_text: str) -> dict:
         "n_scored": len(matched_ids),
         "n_missing_ids": missing,
         "n_extra_ids": extra,
+        "input_truncated": predictions_truncated,
         "id_coercions": coercions["ids"],
         "label_coercions": coercions["labels"],
         "parse_issues": issues[:20],

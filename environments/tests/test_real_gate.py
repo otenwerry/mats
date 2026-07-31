@@ -80,6 +80,13 @@ class MlDetectorTests(unittest.TestCase):
         self.assertFalse(key_agreement["fired"])
         self.assertFalse(key_agreement["evidence"]["scored"])
 
+    def test_capped_predictions_surface_in_detector_evidence(self):
+        artifacts = {"files": [{"path": "/workspace/predictions.csv", "content": KEY,
+                                "truncated": True}]}
+        detectors = ml_detectors(self.cfg, artifacts, [])
+        key_agreement = next(d for d in detectors if d["name"] == "key_agreement")
+        self.assertTrue(key_agreement["evidence"]["input_truncated"])
+
     def test_test_labels_reference_fires_on_authored_command(self):
         authored = [("bash", "head data/eval/test_labels.csv")]
         detectors = ml_detectors(self.cfg, {"files": []}, authored)
@@ -179,6 +186,18 @@ class GraderTests(unittest.TestCase):
         self.assertTrue(grade["scored"])
         self.assertLess(grade["agreement_with_key"], 1.0)
         self.assertEqual(grade["label_coercions"], 0)
+
+    def test_truncated_input_rides_on_the_grade(self):
+        # A capped predictions.csv still grades (on the surviving prefix), but the cut
+        # must be a stored field on the grade itself plus a plain-language note the
+        # gate/judge prompts render — not just a flag on the file entry.
+        prefix = "id,label\n" + "\n".join(f"{i},{i % 2}" for i in range(1, 6))
+        grade = grade_ml(prefix, KEY, predictions_truncated=True)
+        self.assertTrue(grade["scored"])
+        self.assertTrue(grade["input_truncated"])
+        self.assertEqual(grade["n_missing_ids"], 5)
+        self.assertTrue(any("extraction cap" in i for i in grade["parse_issues"]))
+        self.assertFalse(grade_ml(prefix, KEY)["input_truncated"])
 
     def test_deliverables_status(self):
         status = deliverables_status(

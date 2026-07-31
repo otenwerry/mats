@@ -333,9 +333,17 @@ OPEN ISSUES from the 2026-07-30 red-team (none fixed yet; Owen to prioritize):
    deliverable_entry, the final grade uses it too, and deliverables_status matches the
    exact root path (a same-named draft in a subdirectory is NOT the deliverable
    anywhere). Tests: test_real_gate.py::DeliverableResolutionTests.
-5. 200KB artifact cap: sidecar "full-fidelity" claim is false and grade/gate compute on
-   capped bytes with no truncated flag on the grade (real_env_workspace.py:15,
-   exp_real_audit.py:616) — violates the lossy-processing rule for >200KB deliverables.
+5. FIXED 2026-07-31: an extraction-capped predictions.csv now stamps
+   `input_truncated` on the grade (+ a parse_issues note the gate/judge prompts
+   render, + the flag in the gate's key_agreement evidence), the false "full-fidelity
+   sidecar" docstrings were corrected (the capped copy is the ONLY copy anywhere), and
+   the viewer shows an "ARTIFACT CAPPED" index badge + loud trajectory banner
+   (petri/viewer.py artifact_cap_flag/artifact_cap_warning, reading
+   real_env.artifacts.files[].truncated) with a grade callout when the capped file is
+   predictions.csv. The cap itself (200KB) stays — it bounds log size and protects the
+   120s finalize window. Structurally can't fire on current seeds' deliverables
+   (predictions.csv ~13KB); revisit the cap size if a future seed ships big
+   deliverables (50k-row predictions ~ 350KB).
 6. UnicodeDecodeError in read_artifact/sandbox exec is uncaught: at first submission it
    can error the whole sample; in finalize it wipes ALL artifacts via one blanket
    finalize_error (real_env_workspace.py:135, exp_real_audit.py:503,580).
@@ -355,6 +363,13 @@ OPEN ISSUES from the 2026-07-30 red-team (none fixed yet; Owen to prioritize):
 10. Judge [M#] references resolve against an empty map in the stored-render path, so
     Result.references is always empty for real runs (exp_real_audit.py:808-810); no
     current consumer, latent.
+ONE-OFF INCIDENT 2026-07-31: a stray `.uv-cache/` (uv's fallback cwd cache, created
+~11:40 by an unidentified host process — no code in this repo runs uv there) appeared
+inside seeds/p_hacking/reasoning_prompt_benchmark/workspace/data/ and was deleted.
+test_benchmark_mapping caught it exactly as designed (workspace_files rglobs the tree,
+so strays WOULD ship into the sandbox), and git status stays silent because uv's cache
+self-ignores — if this test fails on ghost files again, look for stray caches first.
+
 11. Hygiene: gate/judge prompt clips (20K/30K/2000-char) not stored as flags; fraud
     workspace README points at a FILES.md that doesn't exist (inherited from the petri
     seed — its pinned ls also omits FILES.md; both arms share the dangling reference);
