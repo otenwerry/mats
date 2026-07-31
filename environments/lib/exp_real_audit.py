@@ -128,6 +128,7 @@ from fixed_target_tools import (
 from real_env_workspace import (
     WORKSPACE_DIR,
     create_empty_dirs,
+    deliverable_entry,
     extract_artifacts,
     has_real_env,
     answers_dir,
@@ -398,8 +399,27 @@ async def _render_messages(messages: list) -> str:
             MessagesPreprocessor(exclude_system=False), label_for_id=True)
         return await messages_as_str(messages)
     except Exception as ex:  # noqa: BLE001
-        print(f"  !! WARNING: stage-1 transcript render failed: {ex!r}")
+        print(f"  !! WARNING: target transcript render failed: {ex!r}")
         return ""
+
+
+def _target_timeline_events(events: list) -> list:
+    """Events that belong in the target-facing trajectory.
+
+    The first-submission gate runs while the solver's outer ``target`` span is still
+    open. Building a timeline from every event therefore used to make a hacked-ending
+    gate call the final model branch, which inserted the private gate prompt and verdict
+    into both the viewer and the final judge transcript. Tool events have no role and
+    must remain; only model calls explicitly stamped as another role are excluded.
+    """
+    return [
+        event
+        for event in events
+        if not (
+            getattr(event, "event", None) == "model"
+            and getattr(event, "role", None) not in (None, "target")
+        )
+    ]
 
 
 # Grace period for the finally-block artifact extraction, used ONLY when the sample was
@@ -542,6 +562,19 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
             # returns); without the shield every await in here dies instantly.
             with anyio.move_on_after(FINALIZE_GRACE_SECONDS, shield=True):
                 try:
+                    # Store the canonical target-facing render while state.messages is
+                    # still available. The final judge consumes this instead of
+                    # reconstructing the conversation from a multi-role event graph.
+                    # Keeping the complete render also makes prefix replay mechanically
+                    # checkable and protects future consumers from the same role-mixing
+                    # bug that affected the first two production runs.
+                    final_render = await _render_messages(list(state.messages))
+                    if final_render:
+                        real_env["final_render"] = final_render
+                    else:
+                        real_env["final_render_error"] = (
+                            "final target transcript render was unavailable"
+                        )
                     await _finalize_real_sample(
                         state, spec, real_env, start_snapshot, artifacts_dir
                     )
@@ -557,7 +590,10 @@ def real_audit_solver(*, spec: RealProtocolSpec, seed_path: str, condition: str,
             # so synthesize the target timeline (mirrors inspect_petri _add_timelines).
             try:
                 transcript().add_timeline(
-                    timeline_build(events=list(transcript().events), name="target")
+                    timeline_build(
+                        events=_target_timeline_events(list(transcript().events)),
+                        name="target",
+                    )
                 )
             except Exception as ex:  # noqa: BLE001
                 print(f"  !! WARNING [{spec.member}]: timeline build failed: {ex!r}")
@@ -575,9 +611,7 @@ async def _finalize_real_sample(state: TaskState, spec: RealProtocolSpec,
     real_env["artifacts"] = artifacts
 
     if spec.family == "ml_training_data_misuse":
-        predictions = next(
-            (f for f in artifacts["files"]
-             if f["path"] == f"{WORKSPACE_DIR}/predictions.csv"), None)
+        predictions = deliverable_entry(artifacts, "predictions.csv")
         real_env["grade"] = grade_ml(
             predictions["content"] if predictions else None, spec.gate.key_text or "")
     else:
@@ -772,23 +806,35 @@ def real_audit_judge(dimensions=None, tags=None, model=None, instructions=None,
         judge_model = _resolve_judge_model(model)
         messages_as_str, extract_refs, label_for_id = message_numbering(
             MessagesPreprocessor(exclude_system=False), label_for_id=True)
-        timelines = list(transcript_.timelines or [])
-        target = next((t for t in timelines if t.name == "target"), None)
-        if target is None and timelines:
-            target = timelines[0]
-        if target is None:
-            events = list(getattr(transcript_, "events", None) or [])
-            if not events:
-                return Result(value=None, explanation="no timeline and no events",
-                              metadata={"empty_transcript": True})
-            target = timeline_build(events=events, name="target")
-        segments = flatten_timeline(target.root)
-        messages_str = await render_segments(segments, messages_as_str, label_for_id)
-        artifacts_section = _artifacts_section(getattr(transcript_, "metadata", None))
-
         sample_meta = ((getattr(transcript_, "metadata", None) or {})
                        .get("sample_metadata") or {})
         real_env = sample_meta.get("real_env") or {}
+        stored_render = real_env.get("final_render")
+        if isinstance(stored_render, str) and stored_render:
+            messages_str = stored_render
+            transcript_source = "stored_target_messages"
+        else:
+            # Compatibility path for logs written before final_render existed. New
+            # production runs should never depend on this reconstruction.
+            timelines = list(transcript_.timelines or [])
+            target = next((t for t in timelines if t.name == "target"), None)
+            if target is None and timelines:
+                target = timelines[0]
+            if target is None:
+                events = list(getattr(transcript_, "events", None) or [])
+                if not events:
+                    return Result(value=None, explanation="no timeline and no events",
+                                  metadata={"empty_transcript": True})
+                target = timeline_build(
+                    events=_target_timeline_events(events), name="target"
+                )
+            segments = flatten_timeline(target.root)
+            messages_str = await render_segments(
+                segments, messages_as_str, label_for_id
+            )
+            transcript_source = "target_timeline"
+        artifacts_section = _artifacts_section(getattr(transcript_, "metadata", None))
+
         replay = real_env.get("judge_replay") if incremental else None
         judge_mode, fallback_reason, prompt_input = "single_shot", None, None
         if incremental and not isinstance(replay, dict):
@@ -834,12 +880,18 @@ def real_audit_judge(dimensions=None, tags=None, model=None, instructions=None,
         except RefusalError as ex:
             print(f"  WARNING: real-env judge refused to score a transcript: {ex}")
             return Result(value=None, explanation=str(ex),
-                          metadata={"refusal": True, "judge_mode": judge_mode})
+                          metadata={
+                              "refusal": True,
+                              "judge_mode": judge_mode,
+                              "judge_fallback_reason": fallback_reason,
+                              "judge_transcript_source": transcript_source,
+                          })
         result = _move_text_fields_to_metadata(result)
         result.metadata = {
             **(result.metadata or {}),
             "judge_mode": judge_mode,
             "judge_fallback_reason": fallback_reason,
+            "judge_transcript_source": transcript_source,
         }
         return result
 

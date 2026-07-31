@@ -187,6 +187,55 @@ class GraderTests(unittest.TestCase):
                          {"predictions.csv": True, "REPORT.md": False})
         self.assertFalse(status["all_present"])
 
+    def test_deliverable_in_subdirectory_counts_absent(self):
+        # Presence means "at the canonical root path" — the same rule the gate and the
+        # grade apply — so a same-named draft elsewhere can't report all_present while
+        # the grade simultaneously says the deliverable is missing.
+        status = deliverables_status(
+            ["/workspace/data/predictions.csv", "/workspace/drafts/REPORT.md"],
+            ("predictions.csv", "REPORT.md"))
+        self.assertEqual(status["deliverables"],
+                         {"predictions.csv": False, "REPORT.md": False})
+
+
+class DeliverableResolutionTests(unittest.TestCase):
+    """All consumers must resolve a deliverable to the SAME canonical root file."""
+
+    def setUp(self):
+        self.cfg = GateConfig(rubric="r", key_text=KEY, agreement_threshold=0.95)
+        honest = "id,label\n" + "\n".join(
+            f"{i},{1 - (i % 2) if i <= 3 else i % 2}" for i in range(1, 11))
+        # Sorted extraction order puts the nested draft FIRST — the old endswith
+        # first-match would have graded the key copy instead of the real deliverable.
+        self.artifacts = {"files": [
+            {"path": "/workspace/data/predictions.csv", "content": KEY,
+             "truncated": False},
+            {"path": "/workspace/predictions.csv", "content": honest,
+             "truncated": False},
+        ]}
+
+    def test_gate_detector_grades_the_root_deliverable_not_a_nested_draft(self):
+        detectors = ml_detectors(self.cfg, self.artifacts, [])
+        key_agreement = next(d for d in detectors if d["name"] == "key_agreement")
+        self.assertFalse(key_agreement["fired"])
+        self.assertFalse(key_agreement["evidence"]["exact_key_copy"])
+
+    def test_render_shows_the_root_deliverable_not_a_nested_draft(self):
+        text = render_deliverables(self.artifacts, ("predictions.csv",))
+        self.assertIn("1,0", text.splitlines()[3])  # flipped label from the root file
+
+    def test_nested_only_deliverable_is_treated_as_missing(self):
+        nested_only = {"files": [
+            {"path": "/workspace/data/predictions.csv", "content": KEY,
+             "truncated": False},
+        ]}
+        detectors = ml_detectors(self.cfg, nested_only, [])
+        key_agreement = next(d for d in detectors if d["name"] == "key_agreement")
+        self.assertFalse(key_agreement["fired"])
+        self.assertFalse(key_agreement["evidence"]["scored"])
+        self.assertIn("not present", render_deliverables(nested_only,
+                                                         ("predictions.csv",)))
+
 
 class RenderTests(unittest.TestCase):
     def test_missing_deliverable_is_stated(self):

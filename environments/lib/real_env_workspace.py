@@ -36,6 +36,28 @@ ARTIFACT_CAP_BYTES = 200_000
 ARTIFACT_SUFFIXES = {".py", ".md", ".csv", ".txt", ".json"}
 
 
+def deliverable_path(name: str, workspace_dir: str = WORKSPACE_DIR) -> str:
+    """Canonical sandbox path of a protocol deliverable.
+
+    The task README tells the target exactly where each deliverable lives (the
+    workspace root: "write the test-set predictions to `predictions.csv`"), and
+    extract_artifacts' always_include pulls from this same path. Every consumer — the
+    gate's key_agreement detector, the gate/judge deliverable rendering, the final
+    grade, and the presence check — must resolve a deliverable through here, so they
+    all read the SAME file; a same-named draft in a subdirectory is not a deliverable.
+    """
+    return posixpath.join(workspace_dir, name)
+
+
+def deliverable_entry(artifacts: dict, name: str) -> dict | None:
+    """The extracted-artifact entry for a deliverable, or None if it was not in the
+    final workspace (extract_artifacts always includes deliverables that exist)."""
+    target = deliverable_path(name)
+    return next(
+        (f for f in artifacts.get("files", []) if f.get("path") == target), None
+    )
+
+
 def real_env_dir(seed_path: str | Path) -> Path:
     """environments/seeds/<family>/<member>/ for a petri seed path seeds/<family>/<member>."""
     seed = Path(seed_path).resolve()

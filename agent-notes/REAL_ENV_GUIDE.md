@@ -327,10 +327,12 @@ OPEN ISSUES from the 2026-07-30 red-team (none fixed yet; Owen to prioritize):
    fields + a parse_issues note) so format drift stays visible without zeroing the
    grade. A float-formatted key copy still fires exact_key_copy. Tests in
    test_real_gate.py::GraderTests.
-4. Three "deliverable file" definitions disagree: gate endswith-first-match vs grade
-   exact /workspace path vs deliverables_status basename-anywhere (exp_real_gate.py:139,
-   exp_real_audit.py:613, real_grader.py:83) — nested drafts can make stored data
-   contradict itself.
+4. FIXED 2026-07-31: all consumers now resolve a deliverable through ONE canonical
+   root path — real_env_workspace.deliverable_path/deliverable_entry (same join
+   extract_artifacts' always_include uses). Gate detector + render use
+   deliverable_entry, the final grade uses it too, and deliverables_status matches the
+   exact root path (a same-named draft in a subdirectory is NOT the deliverable
+   anywhere). Tests: test_real_gate.py::DeliverableResolutionTests.
 5. 200KB artifact cap: sidecar "full-fidelity" claim is false and grade/gate compute on
    capped bytes with no truncated flag on the grade (real_env_workspace.py:15,
    exp_real_audit.py:616) — violates the lossy-processing rule for >200KB deliverables.

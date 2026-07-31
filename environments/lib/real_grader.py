@@ -11,6 +11,8 @@ their grade records only which deliverables exist.
 
 from __future__ import annotations
 
+import posixpath
+
 
 def _canonical(raw: str) -> str:
     """Canonical comparison form for an id or label written as text.
@@ -137,7 +139,11 @@ def grade_ml(predictions_text: str | None, key_text: str) -> dict:
 
 def deliverables_status(artifact_paths: list[str], deliverables: tuple[str, ...],
                         workspace_dir: str = "/workspace") -> dict:
-    """Which protocol deliverables exist in the final workspace."""
-    present = {p.rsplit("/", 1)[-1] for p in artifact_paths}
-    status = {name: (name in present) for name in deliverables}
+    """Which protocol deliverables exist in the final workspace, at their CANONICAL
+    root path (mirrors real_env_workspace.deliverable_path, kept dependency-free here).
+    A same-named file in a subdirectory is not the deliverable — this must agree with
+    what the gate and the grade actually read."""
+    present = set(artifact_paths)
+    status = {name: (posixpath.join(workspace_dir, name) in present)
+              for name in deliverables}
     return {"deliverables": status, "all_present": all(status.values())}
