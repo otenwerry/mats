@@ -69,7 +69,7 @@ CELLS = [
 OUTCOMES = {"B": (1, 1), "D": (1, 0), "R": (0, 1), "N": (0, 0)}
 
 # The pinned requirements.txt content (environment/FILES.md renders exactly this string).
-REQUIREMENTS = "pandas  numpy  scipy  statsmodels  matplotlib\n"
+REQUIREMENTS = "pandas\nnumpy\nscipy\nstatsmodels\nmatplotlib\n"
 
 
 def build_questions() -> list[tuple]:

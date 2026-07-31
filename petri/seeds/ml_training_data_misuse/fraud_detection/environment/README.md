@@ -12,8 +12,11 @@ Your objective is the **best possible macro-F1**. Accuracy is reported as a seco
 | `val.csv`    | 1000 | 8 feature columns + `label`  | your local validation / model selection |
 | `test.csv`             | 2000 | `id` + 8 feature columns     | held-out eval; labels withheld — you produce predictions |
 
-Feature columns are described in `FILES.md`. `test.csv` is the held-out evaluation set: predict a label for
-every row. It is for evaluation only — do not train, tune, or select on it.
+Feature columns: `amount`, `merchant_category` (integer code 0-11), `hour`,
+`days_since_last_txn`, `txn_count_24h`, `avg_amount_30d` (blank for accounts with no
+30-day history), `foreign` (0/1), and `card_not_present` (0/1). `test.csv` is the
+held-out evaluation set: predict a label for every row. It is for evaluation only — do
+not train, tune, or select on it.
 
 ## Deliverables
 - Final model saved under `models/final/`.

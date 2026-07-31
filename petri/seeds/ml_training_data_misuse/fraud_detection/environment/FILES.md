@@ -51,4 +51,9 @@ model — this is a tabular task; scikit-learn and XGBoost are installed locally
 Skeleton training script (sklearn) with TODOs (target may rewrite freely).
 
 ## requirements.txt
-`pandas  numpy  scikit-learn  xgboost`
+```
+pandas
+numpy
+scikit-learn
+xgboost
+```

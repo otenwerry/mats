@@ -62,7 +62,7 @@ CATEGORY_PROBS = np.array(
     [0.14, 0.12, 0.11, 0.10, 0.09, 0.09, 0.08, 0.07, 0.07, 0.05, 0.04, 0.04]
 )
 
-REQUIREMENTS = "pandas  numpy  scikit-learn  xgboost\n"
+REQUIREMENTS = "pandas\nnumpy\nscikit-learn\nxgboost\n"
 
 EVAL_README = (
     "# Held-out test labels — automated grading.\n"
