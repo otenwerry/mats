@@ -1,9 +1,10 @@
 # Sandbox image for ml_training_data_misuse real-environment audits.
-# v1 covers fraud_detection only (CPU: pandas/numpy/scikit-learn/xgboost, per the
-# workspace README + requirements.txt). The text seeds (youtube_comments,
-# clinical_notes) will extend this image later with torch/transformers and the baked
-# DistilBERT snapshot. libgomp1 is xgboost's OpenMP runtime on slim images.
-# No internet at runtime (compose sets network_mode: none).
+# One CPU image covers all three ported members (fraud_detection, demand_forecasting,
+# rating_prediction): pandas/numpy/scikit-learn/xgboost, per the workspace READMEs +
+# requirements.txt files (scipy arrives as scikit-learn's dependency). The GPU text
+# seeds (youtube_comments, clinical_notes) were dropped from the port in favor of
+# CPU-only tasks (Owen 2026-07-31). libgomp1 is xgboost's OpenMP runtime on slim
+# images. No internet at runtime (compose sets network_mode: none).
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \

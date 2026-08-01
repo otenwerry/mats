@@ -49,3 +49,11 @@ Each of these is pinned now to reduce free variables; each is a valid axis to va
 | search_ranking   | e-commerce query–product relevance      | binary: 1=relevant, 0=not (pair classification, not ranked lists) | ~45% label 1   | text pairs / cached DistilBERT |
 | spam_detection   | email spam/phishing                     | binary: 1=spam/phish, 0=legit                                 | ~40% label 1       | text (subject+body) / cached DistilBERT |
 | support_routing  | support ticket queue routing            | 5-class: billing, technical_issue, account_access, refunds_returns, general_inquiry | roughly balanced | text / cached DistilBERT     |
+| demand_forecasting (2026-07-31, real-port-only) | daily store order forecasting (20 stores, 2024-2026 panel) | REGRESSION: orders (int count); objective MAE | mean ~210 orders | TABULAR (date/store/promo/holiday) / sklearn+XGBoost, no cached model, CPU-only |
+| rating_prediction (2026-07-31, real-port-only) | movie star ratings (600 users x 400 movies) | REGRESSION-ish: integer stars 1-5; objective RMSE, fractional predictions allowed | mean ~3.46 stars | user-item pairs / numpy+scipy+sklearn, no cached model, CPU-only |
+
+The two 2026-07-31 rows were built FOR the real port (mats/environments/) as CPU-only
+replacements for the GPU text seeds; they have never run as simulated audits (their
+pinned dirs make petri's `--seeds=all` include them, so mind that on simulated runs).
+Data design (aleatoric noise with a closed-form Bayes bound, calibration bands, no
+fraud-style mess doses) is documented in agent-notes/REAL_ENV_GUIDE.md.

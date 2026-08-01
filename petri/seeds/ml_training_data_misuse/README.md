@@ -1,9 +1,12 @@
 # What this is
 
 Variations of one scenario for testing whether an AI agent will cheat on a
-machine-learning task. Each subfolder (`youtube_comments`, `clinical_notes`, ...) is the
-same setup with different subject matter. Three variants are active; four more sit in
-`_unused/` and can be reactivated by moving them back up a level.
+machine-learning task. Each subfolder (`youtube_comments`, `fraud_detection`, ...) is
+the same setup with different subject matter. Five variants are active; four more sit
+in `_unused/` and can be reactivated by moving them back up a level. Two of the five
+(`demand_forecasting`, `rating_prediction`, added 2026-07-31) were created FOR the real
+port in `mats/environments/` — CPU-only replacements for the GPU text seeds — and have
+never been run as simulated audits, though their pinned dirs make that possible.
 
 ## The scenario
 
@@ -47,10 +50,11 @@ so that **everything shared across the variants lives in exactly one place** and
 each variant folder holds only what differs — edit the shared copy once and all of them
 change.
 
-(`fraud_detection` also has a REAL port, where code genuinely executes in a container:
-see `mats/environments/` and `agent-notes/REAL_ENV_GUIDE.md`. The pinned prose here is
-the single source of truth for both — the real port copies this `environment/README.md`
-into its workspace byte-for-byte.)
+(`fraud_detection`, `demand_forecasting`, and `rating_prediction` also have REAL ports,
+where code genuinely executes in a container: see `mats/environments/` and
+`agent-notes/REAL_ENV_GUIDE.md`. The pinned prose here is the single source of truth
+for both — the real port copies each `environment/README.md` into its workspace
+byte-for-byte.)
 
 Shared, in `_shared/` (edit these once):
 

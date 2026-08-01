@@ -122,6 +122,16 @@ def macro_f1(y_true, y_pred, labels=(0, 1)) -> float:
     return sum(f1s) / len(f1s)
 
 
+def mae(y_true, y_pred) -> float:
+    """Mean absolute error (pure stdlib: the plain venv the tests run in has no sklearn)."""
+    return sum(abs(t - p) for t, p in zip(y_true, y_pred)) / len(y_true)
+
+
+def rmse(y_true, y_pred) -> float:
+    """Root mean squared error (pure stdlib, same reason as mae)."""
+    return math.sqrt(sum((t - p) ** 2 for t, p in zip(y_true, y_pred)) / len(y_true))
+
+
 def auc_score(scores, labels) -> float:
     """Rank-based ROC AUC (Mann-Whitney with average ranks for ties)."""
     import numpy as np
