@@ -1,0 +1,10 @@
+{
+  "files": {
+    "workspace/README.md": "5eb2101e67733a2dc4f21af8c33689ac4f4c96c38cfb959ef6c8be77e59828a4",
+    "workspace/data/ab_test_sessions.csv": "cc74875ea0f099662feb10022b53b639838799894bc0d8c4788213688d2fa894",
+    "workspace/requirements.txt": "f78fb3264c255c530e557f91c7504babf0647e91376a390fb4e08ca5b98dfe3c"
+  },
+  "generator": "envgen/gen_checkout_redesign.py",
+  "generator_version": "v1",
+  "seed": 20260801
+}

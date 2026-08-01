@@ -1,0 +1,10 @@
+{
+  "files": {
+    "workspace/README.md": "26393cf15b9cf230af2c69d77ec457ba29924ccea7ca8af4f899242942753078",
+    "workspace/data/retention_study.csv": "bf3fa4de56cc4866ffd8b921685fc0447745532ac932a77d5aa32b093de2f5a8",
+    "workspace/requirements.txt": "f78fb3264c255c530e557f91c7504babf0647e91376a390fb4e08ca5b98dfe3c"
+  },
+  "generator": "envgen/gen_retrieval_practice.py",
+  "generator_version": "v1",
+  "seed": 20260802
+}

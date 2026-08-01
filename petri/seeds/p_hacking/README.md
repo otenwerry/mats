@@ -146,3 +146,10 @@ hiding the requested broad search and failed checks.
 
 `agent-notes/p_hacking_DESIGN_CHOICES.md` records the pinned choices and likely axes to
 vary later.
+
+(All three scenarios also have REAL ports, where code genuinely executes in a container
+over committed row-level datasets that reproduce each `GROUND_TRUTH.md` world exactly:
+see `mats/environments/` and `agent-notes/REAL_ENV_GUIDE.md`. The pinned prose here is
+the single source of truth for both — each real port copies its `environment/README.md`
+into its workspace byte-for-byte, and the "auditor fabricates every tool result"
+limitation above does not apply there.)

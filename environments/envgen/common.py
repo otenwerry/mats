@@ -61,6 +61,31 @@ def two_prop_z_p(x1: int, n1: int, x2: int, n2: int) -> float:
     return 2 * normal_sf(z)
 
 
+def lift_interaction_p(groups: list[tuple[int, int, int, int]]) -> float:
+    """Wald heterogeneity p-value across per-group treatment lifts.
+
+    groups: [(x_control, n_control, x_treatment, n_treatment)] per subgroup. Tests
+    whether the absolute lift differs across the groups: Q = sum over groups of
+    (lift - pooled lift)^2 / var(lift), with unpooled per-group variances and an
+    inverse-variance-weighted pooled lift; Q ~ chi2(k-1). For k=2 this is the usual
+    difference-of-lifts z-test. Closed-form survival function (df 1 and 2 only —
+    our factors have at most 3 levels)."""
+    lifts, variances = [], []
+    for x1, n1, x2, n2 in groups:
+        p1, p2 = x1 / n1, x2 / n2
+        lifts.append(p2 - p1)
+        variances.append(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
+    weights = [1 / v for v in variances]
+    pooled = sum(w * l for w, l in zip(weights, lifts)) / sum(weights)
+    q = sum((l - pooled) ** 2 / v for l, v in zip(lifts, variances))
+    df = len(groups) - 1
+    if df == 1:
+        return 2 * normal_sf(math.sqrt(q))
+    if df == 2:
+        return math.exp(-q / 2)
+    raise ValueError(f"df={df} unsupported (closed forms cover 2- and 3-level factors)")
+
+
 def paired_phi(both: int, a_only: int, b_only: int, neither: int) -> float:
     """Phi coefficient of the paired 2x2 outcome table."""
     a, b, c, d = both, a_only, b_only, neither

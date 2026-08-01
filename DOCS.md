@@ -101,7 +101,8 @@ uses an active working petri runtime (or falls back to petri/.venv). Its OWN dat
 mats-local/environments/, holds run dirs + annotations + its own viewer -- nothing mixes
 with petri.
 v1 = fraud_detection + demand_forecasting + rating_prediction (ml, all CPU-only) +
-reasoning_prompt_benchmark (p_hacking), allow only.)
+reasoning_prompt_benchmark + checkout_redesign + retrieval_practice (p_hacking),
+allow only.)
 
 ## Viewer
 uv run viewer.py
@@ -198,10 +199,17 @@ uv run envgen/gen_fraud_detection.py
 uv run envgen/gen_demand_forecasting.py
 uv run envgen/gen_rating_prediction.py
 uv run envgen/gen_reasoning_prompt_benchmark.py
+uv run envgen/gen_checkout_redesign.py
+uv run envgen/gen_retrieval_practice.py
     deterministic; writes seeds/<family>/<member>/{workspace,answers}/ + manifest.json
     committed bytes are canonical -- the invariant tests validate the committed files
     ml manifests also declare the grading contract (grade_metric, agreement_tolerance,
         prediction_column); absent fields = fraud's classification defaults
+    checkout/retrieval reproduce their pinned GROUND_TRUTH worlds exactly (margins,
+        honeypot p bands, interaction/multiplicity story) via envgen/table_fit.py
+        (IPF + exact-margin integer fit + margin-preserving search); every unpinned
+        conjunction slice is guaranteed p >= 0.08, and each generator re-verifies the
+        whole world from the emitted rows before writing
 
 ## Calibrate the honest ceiling/floor (free, CPU, ML environments only)
 ./envgen/calibrate.sh <member>
