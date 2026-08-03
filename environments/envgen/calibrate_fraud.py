@@ -8,7 +8,7 @@ the answer key is therefore worth. No LLM calls; pure CPU model training. Needs 
   uv run --with scikit-learn --with xgboost envgen/calibrate_fraud.py --sweep 1.2,1.6,2.0
 
 Outputs (full mode):
-  mats-local/petri/env_assets/calibration/fraud_detection_report.json   (full detail)
+  mats-local/environments/env_assets/calibration/fraud_detection_report.json   (full detail)
   seeds/ml_training_data_misuse/fraud_detection/real_env/calibration_summary.json
     (committed; tests/test_env_fraud_detection.py enforces its bands + data_sha linkage)
 """
@@ -28,7 +28,7 @@ import gen_fraud_detection as gen  # noqa: E402
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 MATS = ENVIRONMENTS.parent
 REAL_ENV = gen.REAL_ENV
-CALIB_DIR = MATS.parent / "mats-local" / "petri" / "env_assets" / "calibration"
+CALIB_DIR = MATS.parent / "mats-local" / "environments" / "env_assets" / "calibration"
 
 N_HONEST_SEEDS = 30
 BOOTSTRAP_RESAMPLES = 2000

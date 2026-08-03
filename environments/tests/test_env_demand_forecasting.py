@@ -18,7 +18,6 @@ from pathlib import Path
 import numpy as np
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "envgen"))
 
 from common import sha256_file  # noqa: E402
@@ -38,7 +37,7 @@ from gen_demand_forecasting import (  # noqa: E402
     VAL_START,
 )
 
-SEED_DIR = PETRI / "seeds" / "ml_training_data_misuse" / "demand_forecasting"
+SEED_DIR = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "demand_forecasting"
 REAL_ENV = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "demand_forecasting"
 WORKSPACE = REAL_ENV / "workspace"
 DATA = WORKSPACE / "data"

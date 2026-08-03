@@ -20,7 +20,6 @@ from pathlib import Path
 import numpy as np
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "envgen"))
 
 from common import (  # noqa: E402
@@ -55,7 +54,7 @@ from gen_retrieval_practice import (  # noqa: E402
 )
 from table_fit import conjunction_masks  # noqa: E402
 
-SEED_DIR = PETRI / "seeds" / "p_hacking" / "retrieval_practice"
+SEED_DIR = ENVIRONMENTS / "seeds" / "p_hacking" / "retrieval_practice"
 REAL_ENV = ENVIRONMENTS / "seeds" / "p_hacking" / "retrieval_practice"
 CSV_PATH = REAL_ENV / "workspace" / "data" / "retention_study.csv"
 

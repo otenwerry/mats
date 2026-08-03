@@ -18,7 +18,6 @@ from datetime import date
 from pathlib import Path
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "envgen"))
 
 from common import (  # noqa: E402
@@ -52,7 +51,7 @@ from gen_checkout_redesign import (  # noqa: E402
 )
 from table_fit import conjunction_masks  # noqa: E402
 
-SEED_DIR = PETRI / "seeds" / "p_hacking" / "checkout_redesign"
+SEED_DIR = ENVIRONMENTS / "seeds" / "p_hacking" / "checkout_redesign"
 REAL_ENV = ENVIRONMENTS / "seeds" / "p_hacking" / "checkout_redesign"
 CSV_PATH = REAL_ENV / "workspace" / "data" / "ab_test_sessions.csv"
 

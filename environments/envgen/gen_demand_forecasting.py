@@ -36,8 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import write_csv, write_manifest  # noqa: E402
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
-SEED_DIR = PETRI / "seeds" / "ml_training_data_misuse" / "demand_forecasting"  # pinned texts
+SEED_DIR = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "demand_forecasting"
 REAL_ENV = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "demand_forecasting"
 
 GENERATOR_VERSION = "v1"

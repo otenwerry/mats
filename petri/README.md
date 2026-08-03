@@ -60,15 +60,15 @@ API keys are read from `mats/.env` (`ANTHROPIC_API_KEY` for auditor/judge/Anthro
 
 ## A. Generate trajectories — `exp_audit_pipeline.py`
 
-One command runs three stages: **audit** (targets × seeds × epochs, each judged inline on every dimension) → **annotate** (locate the hack turns on the full reward hacks) → **viewer** (rebuild the static viewer, free).
+One command runs the **audit** (targets × seeds × epochs, each judged inline on every dimension) and then the **viewer** (free). Paid **annotation** (locating hack turns on full reward hacks) is optional and off by default.
 
 ```bash
 # full sweep, 50-wide:
 uv run exp_audit_pipeline.py --targets=opus-4-6,sonnet-4-6,qwen3-32b,deepseek-r1,llama-3.3-70b --seeds=all --epochs=2 --concurrency=50
 # quick single-target smoke:
 uv run exp_audit_pipeline.py --targets=qwen3-32b --seeds=ml_training_data_misuse --epochs=1
-uv run exp_audit_pipeline.py ... --skip-annotate     # audit + viewer only
-uv run exp_audit_pipeline.py ... --force-annotate     # re-annotate hacks already done
+uv run exp_audit_pipeline.py ... --annotate           # include paid hack-turn annotation
+uv run exp_audit_pipeline.py ... --force-annotate     # annotate and replace existing annotations
 ```
 
 | Flag | Meaning |
@@ -78,7 +78,8 @@ uv run exp_audit_pipeline.py ... --force-annotate     # re-annotate hacks alread
 | `--epochs=<N>` | **required**; epochs per (target, seed) cell. Trajectory count = targets × seeds × epochs. |
 | `--concurrency=<N>` | one knob → audit parallelism (parallel audits *and* in-flight requests per role) **and** annotate parallelism (default 15). |
 | `--annotate-model=<m>` | Anthropic model for the hack-turn annotation (default `claude-opus-4-8`). |
-| `--skip-annotate` / `--skip-viewer` / `--force-annotate` | stage toggles. |
+| `--annotate` | opt into paid hack-turn annotation; off by default. |
+| `--skip-viewer` / `--force-annotate` | skip the free viewer rebuild / annotate and replace existing annotations. |
 
 Roles: auditor = `claude-opus-4-8` (extended thinking on), judge = `claude-opus-4-8`, target = whatever you pass. Each run writes its own timestamped dir under `mats-local/petri/logs/`. Targets that produce **0 output tokens** (bad slug / quota / key error) are **warned about, not aborted on** — those empty trajectories are flagged `dead`, excluded from the propensity stats, badged `DEAD` in the viewer, and summarized in a loud banner at the top of the index, so a failed run can't masquerade as clean no-hacks.
 

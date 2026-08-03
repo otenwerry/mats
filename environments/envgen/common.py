@@ -1,6 +1,6 @@
 """Shared helpers for the real-environment data generators and their invariant tests.
 
-Everything here is dependency-light on purpose: the petri venv has numpy/pandas but no
+Everything here is dependency-light on purpose: the environments runtime has numpy/pandas but no
 scipy/statsmodels, and the invariant tests must run in the plain venv. Statistical
 functions are exact or closed-form implementations in stdlib Python.
 

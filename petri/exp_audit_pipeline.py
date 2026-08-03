@@ -1,15 +1,15 @@
-"""End-to-end reward-hacking audit pipeline: audit -> annotate -> viewer, in one run.
+"""End-to-end reward-hacking audit pipeline: audit -> optional annotate -> viewer.
 
 Thinks of the whole thing as a function: inputs are (targets, seeds, epochs); output
-is the static viewer with every trajectory judged on 5 dims, every FULL reward hack
-secondarily annotated for its hack turns, and everything linked up. The three stages,
+is the static viewer with every trajectory judged on its routed dimensions and
+everything linked up. Hack-turn annotation is an opt-in post-stage. The three stages,
 each reusing the standalone scripts' code (single source of truth):
 
   1. AUDIT     (exp_rh_audit.build_tasks + run_eval): targets x seeds x epochs
                trajectories, each judged inline on its global + seed-scoped dimensions.
                -> one timestamped
                log dir under mats-local/petri/logs/.
-  2. ANNOTATE  (exp_annotate_hacks.run_annotation): secondary turn-level judging of
+  2. ANNOTATE  (OPTIONAL; exp_annotate_hacks.run_annotation): secondary turn-level judging of
                exactly the FULL reward hacks (the binary definition / first viewer
                category), run with the SAME parallelism as the audit. -> annotations.json.
   3. VIEWER    (viewer.main, FREE): rebuild the static viewer, auto-attaching
@@ -40,7 +40,7 @@ Usage:
   uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse --seeds=youtube_comments,fraud_detection --condition=allow --epochs=1 --max-turns=200
   # a single pinned seed dir still works too:
   uv run exp_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse/youtube_comments --seeds=all --condition=allow --epochs=1 --max-turns=200
-  uv run exp_audit_pipeline.py ... --skip-annotate     # audit + viewer only
+  uv run exp_audit_pipeline.py ... --annotate          # include paid hack-turn annotation
   uv run exp_audit_pipeline.py ... --force-annotate     # re-annotate hacks already in annotations.json
 
 Flags:
@@ -84,12 +84,12 @@ Flags:
                        provider/model string; stamped per task as `judge`.
   --annotate-model=<m> model for the secondary hack-turn annotation
                        (default deepseek-v4-pro; see lib/exp_annotate_agent.py).
-  --skip-annotate      stop after the audit (still rebuilds the viewer).
+  --annotate           run paid hack-turn annotation (off by default).
   --skip-viewer        don't rebuild the viewer at the end.
-  --force-annotate     re-annotate FULL hacks even if already in annotations.json.
+  --force-annotate     run annotation and replace existing FULL-hack annotations.
 
-Costs money (Anthropic + OpenRouter for the audit; Anthropic for the annotation).
-The viewer stage is free.
+Costs money (Anthropic + OpenRouter for the audit, plus the annotation model only when
+annotation is enabled). The viewer stage is free.
 """
 
 import asyncio
@@ -136,7 +136,9 @@ _VALUE_FLAGS = {
     "--auditor-thinking", "--condition", "--concurrency", "--max-turns",
     "--judge", "--annotate-model",
 }
-_SWITCH_FLAGS = {"--skip-annotate", "--skip-viewer", "--force-annotate"}
+_SWITCH_FLAGS = {
+    "--annotate", "--skip-viewer", "--force-annotate",
+}
 
 
 def _validate_cli_args() -> None:
@@ -164,6 +166,10 @@ def _parse_args() -> dict:
     # malformed argument. This must happen before resolving seeds or constructing tasks.
     reject_fixed_sp_flag()
     _validate_cli_args()
+
+    annotation_requested = (
+        "--annotate" in sys.argv or "--force-annotate" in sys.argv
+    )
 
     # --targets REQUIRED (no default).
     targets_arg = _arg("--targets")
@@ -271,7 +277,7 @@ def _parse_args() -> dict:
         # None -> the shared default judge (lib/judge_models.py, $PETRI_JUDGE aware)
         "judge": _arg("--judge"),
         "annotate_model": _arg("--annotate-model", DEFAULT_ANNOTATE_MODEL),
-        "skip_annotate": "--skip-annotate" in sys.argv,
+        "annotate": annotation_requested,
         "skip_viewer": "--skip-viewer" in sys.argv,
         "force_annotate": "--force-annotate" in sys.argv,
     }
@@ -475,7 +481,7 @@ async def run_post_audit_stages(cfg: dict) -> bool:
     """Stages 2 (annotate) and 3 (viewer). Each is wrapped so a failure in one
     doesn't prevent the other; the viewer always runs last."""
     ok = True
-    if not cfg["skip_annotate"]:
+    if cfg["annotate"]:
         print("\n" + "=" * 72)
         print("STAGE 2/3  ANNOTATE  (secondary hack-turn judging of FULL reward hacks)")
         print("=" * 72)
@@ -494,7 +500,7 @@ async def run_post_audit_stages(cfg: dict) -> bool:
             print(f"\n!! ANNOTATE STAGE FAILED (continuing to viewer): {type(e).__name__}: {e}")
             traceback.print_exc()
     else:
-        print("\n(skipping STAGE 2 annotate: --skip-annotate)")
+        print("\n(skipping STAGE 2 annotate: off by default; pass --annotate to enable)")
 
     if not cfg["skip_viewer"]:
         print("\n" + "=" * 72)

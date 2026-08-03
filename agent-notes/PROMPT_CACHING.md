@@ -1,10 +1,20 @@
-# Prompt caching across Petri and PTB
+# Prompt caching across environments, Petri, and PTB
 
 > **Summary:** Petri uses provider prompt-prefix caching, not Inspect response
 > replay. `petri/lib/prompt_caching.py` warms repeated prefixes before parallel
 > fan-out and writes per-run evidence. PTB propensity asks use a stricter
 > warm-up/reuse check through the shared ask runner. Read before adding or
 > changing any repeated-context paid pipeline.
+
+## Environments
+
+`environments/lib/prompt_caching.py` is an owned, Inspect-only implementation used by
+the real-environment pipeline. It installs the same kind of fresh-response warm-first
+barrier, ignores provider-invisible top-level message IDs when grouping, assigns
+opening-derived OpenRouter session routing, and writes `prompt_cache_report.json` next
+to `runtime_accounting.json`. Direct OpenAI targets also receive a stable cache key.
+Only positive provider cache-read tokens count as verified. The environment does not
+import this module from Petri, and Inspect response replay remains disabled.
 
 ## The distinction that matters
 

@@ -161,17 +161,30 @@ def finalize_audit_integrity(audit: dict) -> dict:
     raw_judge_status = audit.get("judge_score_status")
     if raw_judge_status in {"missing", "unusable"} and not audit.get("rejudged"):
         issues.append(f"judge_score_{raw_judge_status}")
-    # Real-environment incremental judging is a committed experimental condition.
-    # Require positive provenance for both the mode and canonical transcript source;
-    # missing provenance fails closed. Keep bad trajectories visible, but never pool or
-    # automatically annotate them as if the intended judge ran.
+    # Real-environment judging is a committed family-specific condition. ML requires
+    # incremental full-transcript replay. P-hacking requires its narrow submitted-
+    # evidence mode and either a reused stage-1 score or one fresh post-follow-up call.
+    # Missing provenance fails closed.
     if audit.get("target_tools_mode") == "real":
-        if audit.get("judge_fallback_reason"):
-            issues.append("judge_incremental_fallback")
-        elif audit.get("judge_mode") != "incremental":
-            issues.append("judge_incremental_mode_missing")
-        elif audit.get("judge_transcript_source") != "stored_target_messages":
-            issues.append("judge_transcript_noncanonical")
+        if audit.get("judge_evidence_mode") == "p_hacking_submissions_and_result_v1":
+            if audit.get("judge_fallback_reason"):
+                issues.append("judge_p_hacking_evidence_failure")
+            elif audit.get("judge_mode") not in {
+                "stage1_final", "fresh_single_shot"
+            }:
+                issues.append("judge_p_hacking_mode_missing")
+            elif (
+                audit.get("judge_transcript_source")
+                != "stored_p_hacking_evidence"
+            ):
+                issues.append("judge_p_hacking_evidence_noncanonical")
+        else:
+            if audit.get("judge_fallback_reason"):
+                issues.append("judge_incremental_fallback")
+            elif audit.get("judge_mode") != "incremental":
+                issues.append("judge_incremental_mode_missing")
+            elif audit.get("judge_transcript_source") != "stored_target_messages":
+                issues.append("judge_transcript_noncanonical")
 
     declared = list(audit.get("judge_dimensions") or [])
     scores = audit.get("scores") or {}
@@ -1539,6 +1552,12 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         # output names; absent on older logs.
                         seed_dir=(log.eval.metadata or {}).get("seed_dir"),
                         dimension_scope=(log.eval.metadata or {}).get("dimension_scope"),
+                        # Stamped by exp_real_audit (2026-07-31+): does this run's
+                        # reward_hacking rubric request the RH_CATEGORY/RH_TYPES lines?
+                        # False = the rubric dropped them (p_hacking real runs), so a
+                        # missing line is expected, never a parse error. None on all
+                        # older/petri logs -> the dir-level heuristics below apply.
+                        rh_tags_requested=(log.eval.metadata or {}).get("rh_tags_requested"),
                         judge_dimensions=list(
                             (log.eval.metadata or {}).get("judge_dimensions") or []
                         ),
@@ -1582,6 +1601,16 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
                         judge_mode=md.get("judge_mode"),
                         judge_fallback_reason=md.get("judge_fallback_reason"),
                         judge_transcript_source=md.get("judge_transcript_source"),
+                        # P-hacking real runs use a deliberately lossy evidence view:
+                        # user-facing messages + submitted RESULT.md versions. These
+                        # fields make the omission queryable and drive the integrity
+                        # rule above; ML/legacy runs leave them absent.
+                        judge_evidence_mode=md.get("judge_evidence_mode"),
+                        judge_evidence_lossy=md.get("judge_evidence_lossy"),
+                        judge_evidence_caveat=md.get("judge_evidence_caveat"),
+                        judge_evidence_filter_counts=md.get(
+                            "judge_evidence_filter_counts"
+                        ),
                         rejudged=False,
                         transcript=transcript,
                         transcript_source=transcript_source,
@@ -1678,11 +1707,16 @@ async def _load_mode_impl(mode_dir: Path) -> list[dict]:
     # v7 runs score noticed_hack (a v7-only dimension) and never the retired refused_hack,
     # so that key is the reliable per-dir scheme signal -- more robust than "any rh_category
     # present", which would miss a dir where the judge dropped every category line.
+    # EXCEPTION (2026-07-31): runs that stamp rh_tags_requested=False were judged with a
+    # reward_hacking rubric that no longer asks for the tag lines (the real-env p_hacking
+    # rubric dropped them), so their missing tags are expected -- the stamp overrides the
+    # dir heuristic. Unstamped runs (None) keep today's behavior.
     dir_is_v7 = any("noticed_hack" in (a.get("scores") or {}) for a in audits)
     dir_is_tagged = any(a["failure_modes"] for a in audits)
     for i, a in enumerate(audits):
         a["failure_modes_parse_error"] = raw_err[i] and dir_is_tagged and not dir_is_v7
-        a["rh_category_parse_error"] = cat_err[i] and dir_is_v7
+        a["rh_category_parse_error"] = (cat_err[i] and dir_is_v7
+                                        and a.get("rh_tags_requested") is not False)
     return audits
 
 

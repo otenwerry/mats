@@ -2,7 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 PETRI_ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +27,33 @@ class AuditPipelineArgTests(unittest.TestCase):
 
         self.assertEqual(config["max_turns"], 70)
         self.assertEqual(config["epochs"], 7)
+        self.assertFalse(config["annotate"])
         self.assertEqual(
             config["seeds"],
             ["checkout_redesign", "reasoning_prompt_benchmark", "retrieval_practice"],
         )
+
+    def test_annotation_is_opt_in(self):
+        base_argv = [
+            "exp_audit_pipeline.py",
+            "--targets=gpt-5.5",
+            "--seed-dir=p_hacking",
+            "--seeds=all",
+            "--epochs=1",
+            "--max-turns=200",
+        ]
+        with patch.object(sys, "argv", [*base_argv, "--annotate"]):
+            self.assertTrue(exp_audit_pipeline._parse_args()["annotate"])
+        with patch.object(sys, "argv", [*base_argv, "--force-annotate"]):
+            config = exp_audit_pipeline._parse_args()
+            self.assertTrue(config["annotate"])
+            self.assertTrue(config["force_annotate"])
+
+    def test_retired_skip_annotate_flag_is_rejected(self):
+        argv = ["exp_audit_pipeline.py", "--skip-annotate"]
+        with patch.object(sys, "argv", argv):
+            with self.assertRaisesRegex(SystemExit, "unknown argument.*--skip-annotate"):
+                exp_audit_pipeline._parse_args()
 
     def test_pinned_collection_defaults_to_allow(self):
         argv = [
@@ -212,6 +235,20 @@ class AuditPipelineArgTests(unittest.TestCase):
             ),
             [],
         )
+
+
+class AuditPipelinePostStageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_post_stages_do_not_call_annotation(self):
+        cfg = {"annotate": False, "skip_viewer": True}
+        annotation_loader = AsyncMock()
+        with patch.object(
+            exp_audit_pipeline,
+            "load_all_original_audits",
+            annotation_loader,
+        ):
+            self.assertTrue(await exp_audit_pipeline.run_post_audit_stages(cfg))
+
+        annotation_loader.assert_not_awaited()
 
 
 if __name__ == "__main__":

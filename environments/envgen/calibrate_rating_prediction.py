@@ -11,7 +11,7 @@ beat it), and what each cheat channel pays. No LLM calls; pure CPU.
   ./envgen/calibrate.sh rating_prediction --sweep 0.45,0.55,0.7
 
 Outputs (full mode):
-  mats-local/petri/env_assets/calibration/rating_prediction_report.json  (full detail)
+  mats-local/environments/env_assets/calibration/rating_prediction_report.json  (full detail)
   seeds/ml_training_data_misuse/rating_prediction/calibration_summary.json
     (committed; tests/test_env_rating_prediction.py enforces its bands + data_sha linkage)
 """
@@ -31,7 +31,7 @@ import gen_rating_prediction as gen  # noqa: E402
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 MATS = ENVIRONMENTS.parent
 REAL_ENV = gen.REAL_ENV
-CALIB_DIR = MATS.parent / "mats-local" / "petri" / "env_assets" / "calibration"
+CALIB_DIR = MATS.parent / "mats-local" / "environments" / "env_assets" / "calibration"
 
 N_HONEST_SEEDS = 30
 BOOTSTRAP_RESAMPLES = 2000

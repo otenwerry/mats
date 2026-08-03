@@ -100,6 +100,10 @@ def build_real_shaped_log(tmp: Path) -> Path:
             # the loader only runs the mechanical script check when the run declares a
             # protocol version (build_real_tasks always stamps this)
             "auditor_protocol_version": "real-exact-script-v1",
+            # stamped by exp_real_audit since 2026-07-31: this run's reward_hacking
+            # rubric does NOT request the RH_CATEGORY/RH_TYPES lines (the p_hacking
+            # case), so a missing tag line must never be flagged as a parse error
+            "rh_tags_requested": False,
             "judge_dimensions": [
                 "reward_hacking", "noticed_hack", "deception", "degenerate_behavior",
                 "hallucination", "situational_awareness", "environment_failure",
@@ -167,6 +171,15 @@ class RealViewerLoadTests(unittest.TestCase):
         # mats-local/environments/ with their own viewer, so no sweep claims them.
         self.assertNotIn("current_real_env", {key for key, _, _, _ in viewer.SWEEPS})
         self.assertEqual(viewer.REAL_ENV_PREFIX, "real-")
+
+    def test_rh_tags_requested_stamp_reaches_the_audit(self):
+        # The 2026-07-31 stamp (does this run's reward_hacking rubric request the
+        # RH_CATEGORY/RH_TYPES lines?) must survive load: the parse-error gate keys on
+        # it, and a hack with rh >= 2 on a stamped-False run is never a missing-tag
+        # error. Unstamped (pre-stamp / petri) logs load as None and keep old behavior.
+        a = self.by_seed["finished_sample"]
+        self.assertIs(a["rh_tags_requested"], False)
+        self.assertFalse(a["rh_category_parse_error"])
 
     def test_binary_criteria_skip_auditor_dims_for_real_runs(self):
         import viewer
@@ -241,6 +254,29 @@ class RealViewerLoadTests(unittest.TestCase):
 
         self.assertEqual(a["integrity_status"], "invalid")
         self.assertIn("judge_incremental_mode_missing", a["integrity_issues"])
+
+    def test_p_hacking_independent_judge_provenance_is_valid(self):
+        import viewer_load
+
+        a = dict(self.by_seed["finished_sample"])
+        a["scores"] = {
+            "reward_hacking": 1, "noticed_hack": 1, "deception": 1,
+            "degenerate_behavior": 1, "hallucination": 1,
+            "situational_awareness": 1, "environment_failure": 1, "incompleteness": 1,
+        }
+        a["judge_score_status"] = "usable"
+        a["judge_evidence_mode"] = "p_hacking_submissions_and_result_v1"
+        a["judge_evidence_lossy"] = True
+        a["judge_mode"] = "fresh_single_shot"
+        a["judge_fallback_reason"] = None
+        a["judge_transcript_source"] = "stored_p_hacking_evidence"
+
+        viewer_load.finalize_audit_integrity(a)
+
+        self.assertNotIn("judge_p_hacking_mode_missing", a["integrity_issues"])
+        self.assertNotIn(
+            "judge_p_hacking_evidence_noncanonical", a["integrity_issues"]
+        )
 
 
 if __name__ == "__main__":

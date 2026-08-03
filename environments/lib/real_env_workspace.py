@@ -1,16 +1,14 @@
 """Real-environment workspace plumbing: host-side trees -> sandbox /workspace, plus
 in-sandbox snapshots and end-of-run artifact extraction.
 
-Each ported seed keeps its materialized tree at environments/seeds/<family>/<member>/
-(a MIRROR of the petri seed path, kept outside petri/ so real-env assets never mix
-into the simulated-audit tree):
+Each ported seed keeps its materialized tree at environments/seeds/<family>/<member>/:
   workspace/    exactly what lands in the sandbox at /workspace (committed bytes)
   answers/      host-side canon (e.g. the test-label key) for the grader/gate; NEVER
                 shipped into the sandbox beyond what workspace/ itself contains
   manifest.json sha256 provenance written by the envgen generator
 
-real_env_dir() takes the PETRI seed path (seeds/<family>/<member>) and resolves the
-matching environments tree, so callers keep speaking in petri seed paths.
+``real_env_dir()`` accepts either that member directory or another path whose last two
+components are ``<family>/<member>``.
 
 Artifact extraction is capped per file (ARTIFACT_CAP_BYTES) with explicit truncated
 flags stored alongside. The capped copy is the ONLY copy anywhere — sample metadata,
@@ -31,6 +29,15 @@ ENVIRONMENTS_ROOT = Path(__file__).resolve().parents[1]
 ENVIRONMENTS_SEEDS = ENVIRONMENTS_ROOT / "seeds"
 
 WORKSPACE_DIR = "/workspace"
+HOST_ONLY_WORKSPACE_PARTS = frozenset({
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".uv-cache",
+    ".venv",
+    "__pycache__",
+})
 MODELS_SUBDIR = "models"
 # Per-file cap for extracted artifact copies. No full copy exists past this point (the
 # sidecar dir mirrors the same capped bytes), so a cut must travel as flags: "truncated"
@@ -63,7 +70,7 @@ def deliverable_entry(artifacts: dict, name: str) -> dict | None:
 
 
 def real_env_dir(seed_path: str | Path) -> Path:
-    """environments/seeds/<family>/<member>/ for a petri seed path seeds/<family>/<member>."""
+    """Return the environments-owned member directory for ``seed_path``."""
     seed = Path(seed_path).resolve()
     return ENVIRONMENTS_SEEDS / seed.parent.name / seed.name
 
@@ -89,7 +96,10 @@ def workspace_files(seed_path: str | Path) -> dict[str, str]:
         )
     mapping: dict[str, str] = {}
     for f in sorted(ws.rglob("*")):
-        if f.is_file() and f.name != ".gitkeep":
+        relative_parts = f.relative_to(ws).parts
+        if any(part in HOST_ONLY_WORKSPACE_PARTS for part in relative_parts):
+            continue
+        if f.is_file() and f.name != ".gitkeep" and f.suffix != ".pyc":
             rel = f.relative_to(ws)
             mapping[posixpath.join(WORKSPACE_DIR, rel.as_posix())] = str(f)
     if not mapping:
@@ -203,11 +213,23 @@ async def extract_artifacts(
             wanted.append(path)
     skipped = [p for p in changed if p not in wanted]
     files = [await read_artifact(p) for p in wanted]
+    for entry in files:
+        entry["sha256"] = end_snapshot.get(entry.get("path"))
+    truncated = [entry.get("path") for entry in files if entry.get("truncated")]
+    lossy_reasons = []
+    if skipped:
+        lossy_reasons.append("changed_non_text_files_not_copied")
+    if truncated:
+        lossy_reasons.append("artifact_content_truncated")
     return {
         "files": files,
         "changed_paths": changed,
         "skipped_non_text": skipped,   # surfaced, not silently dropped
         "models": await models_listing(),
+        "lossy": bool(lossy_reasons),
+        "lossy_reasons": lossy_reasons,
+        "truncated_paths": truncated,
+        "selection": "changed text files plus named deliverables",
     }
 
 

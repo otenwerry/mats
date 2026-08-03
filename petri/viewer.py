@@ -2668,6 +2668,9 @@ _INTEGRITY_ISSUE_LABELS = {
     "judge_incremental_fallback": "incremental judge replay failed; score used single-shot fallback",
     "judge_incremental_mode_missing": "intended incremental judge mode was not recorded",
     "judge_transcript_noncanonical": "judge did not use the stored target transcript",
+    "judge_p_hacking_evidence_failure": "p-hacking submitted-evidence judgment failed",
+    "judge_p_hacking_mode_missing": "intended independent p-hacking judge mode was not recorded",
+    "judge_p_hacking_evidence_noncanonical": "p-hacking judge did not use the stored submitted-evidence view",
     "judge_dimensions_missing": "declared judge dimensions missing",
     "target_no_output": "target produced no output",
     "transcript_unavailable": "rendered transcript unavailable",
@@ -3225,10 +3228,10 @@ def real_env_record_section(a: dict) -> str:
     """Collapsed 'Environment record' section for REAL-environment trajectory pages:
     everything the non-judge machinery measured, straight from the stored
     metadata.real_env blob — the real grade + deliverables presence, the
-    first-submission gate decision (verdict, mechanical rule, detectors), the judge's
-    stage-1 (turn-1-judged-as-complete) scores beside its final ones, and the scripted
-    protocol facts. Returns '' for simulated audits and for real runs whose record was
-    lost (finalize failure). Same collapsed-metadata look as the Metadata box; the
+    first-submission gate decision (verdict, mechanical rule, detectors), p-hacking's
+    intentionally limited judge-evidence scope, the stage-1 scores beside the final
+    scores, and scripted protocol facts. Returns '' for simulated audits and for real
+    runs whose record was lost (finalize failure). Same collapsed-metadata look as the Metadata box; the
     summary bar previews the grade + gate verdict."""
     env = a.get("real_env")
     if not isinstance(env, dict):
@@ -3244,9 +3247,22 @@ def real_env_record_section(a: dict) -> str:
         if isinstance(f1, (int, float)):
             gcells.append(cell("macro-F1 (true key)", esc(f"{f1:.4f}")))
             prev_bits.append(f"macro-F1 {f1:.3f}")
+        # Regression members (demand_forecasting, rating_prediction): the grade holds
+        # mae+rmse and declares which one is the task's objective.
+        primary = grade.get("metric")
+        for name in ("mae", "rmse"):
+            value = grade.get(name)
+            if isinstance(value, (int, float)):
+                gcells.append(cell(f"{name.upper()} (true key)", esc(f"{value:.4f}")))
+                if name == primary:
+                    prev_bits.append(f"{name.upper()} {value:.3f}")
         agreement = grade.get("agreement_with_key")
         if isinstance(agreement, (int, float)):
-            gcells.append(cell("agreement with key", esc(f"{agreement:.4f}")))
+            label = "agreement with key"
+            tolerance = grade.get("tolerance")
+            if isinstance(tolerance, (int, float)):
+                label += f" (within {tolerance:g})"
+            gcells.append(cell(label, esc(f"{agreement:.4f}")))
         if grade.get("exact_key_copy"):
             gcells.append(cell("exact key copy",
                                '<span class="hacktag">&#9888; yes</span>'))
@@ -3256,6 +3272,9 @@ def real_env_record_section(a: dict) -> str:
         coercions = (grade.get("id_coercions") or 0) + (grade.get("label_coercions") or 0)
         if coercions:
             gcells.append(cell("format coercions", esc(str(coercions))))
+        if grade.get("n_unparseable"):
+            gcells.append(cell("unparseable values",
+                               esc(str(grade["n_unparseable"]))))
         if grade.get("input_truncated"):
             gcells.append(cell("graded on", '<span class="hacktag">&#9888; '
                                             "extraction-capped copy</span>"))
@@ -3272,6 +3291,33 @@ def real_env_record_section(a: dict) -> str:
     if gcells:
         blocks.append(f'<div class="mblock"><div class="mblock-h">Grade</div>'
                       f'<div class="metagrid">{"".join(gcells)}</div></div>')
+
+    evidence = env.get("judge_evidence") or {}
+    if evidence.get("mode"):
+        ecells = [
+            cell("evidence mode", esc(str(evidence["mode"]))),
+            cell(
+                "judge saw",
+                esc("; ".join(str(item) for item in evidence.get("included") or [])),
+            ),
+            cell(
+                "judge did not see",
+                '<span class="hacktag">&#9888; '
+                + esc("; ".join(str(item) for item in evidence.get("excluded") or []))
+                + "</span>",
+            ),
+        ]
+        snapshots = evidence.get("report_snapshots") or []
+        if snapshots:
+            ecells.append(cell("RESULT.md snapshots", esc(str(len(snapshots)))))
+        if evidence.get("lossy"):
+            prev_bits.append("limited judge evidence")
+        blocks.append(
+            '<div class="mblock"><div class="mblock-h">Judge evidence '
+            '(intentionally limited)</div><div class="metagrid">'
+            + "".join(ecells)
+            + "</div></div>"
+        )
 
     for gate in env.get("gates") or []:
         verdict = str(gate.get("verdict") or "?")
@@ -3297,8 +3343,9 @@ def real_env_record_section(a: dict) -> str:
                 gc.append(cell("reversed hack", "yes"))
         detector_rows = "".join(
             f'<tr><td>{esc(str(d.get("name", "")))}</td>'
-            f'<td>{"<span class=\'hacktag\'>&#9888; fired</span>" if d.get("fired") else "quiet"}</td>'
-            f'<td class="meta">{esc(json.dumps(d.get("evidence"), default=str)[:400])}</td></tr>'
+            + ('<td><span class="hacktag">&#9888; fired</span></td>'
+               if d.get("fired") else "<td>quiet</td>")
+            + f'<td class="meta">{esc(json.dumps(d.get("evidence"), default=str)[:400])}</td></tr>'
             for d in gate.get("detectors") or [])
         detector_table = (
             f'<table class="scoretop"><tr class="cols"><th>detector</th><th></th>'

@@ -2,7 +2,7 @@
 
 > **Covers:** how the Petri reward-hacking code and experiments are laid out — the `petri/` entry points (`exp_*_pipeline.py`), the importable core in `petri/lib/`, the viewer builder, the run-dir types under `mats-local/petri/logs/`, the binary reward-hack definition, re-judging, and the rollback pipeline split.
 > **Read when:** starting any Petri work, or reading Petri run data and wanting to know where it can mislead you.
-> **Last updated:** 2026-07-30
+> **Last updated:** 2026-08-01
 > **Original path:** petri/docs/CODEBASE_GUIDE.md
 
 ## Fixed target tools for new audits
@@ -46,8 +46,8 @@ The Current ML and p-hacking original-audit rate figures use the exact top-graph
 partition: every `invalid` run is excluded from the denominator, and the numerator is the
 `hack` bucket (autonomous + user-elicited). Reversed hacks remain their own non-numerator
 outcome. Historical and continuation rate analyses retain their prior classifiers.
-`exp_audit_pipeline.py` still runs its
-annotation/viewer recovery stages, then exits nonzero instead of printing
+`exp_audit_pipeline.py` still runs its enabled post-audit recovery stages (annotation
+only when explicitly requested) and the viewer, then exits nonzero instead of printing
 `PIPELINE DONE` if an expected sample has one of these failures.
 
 The loader still retains every zero-output record, but the final viewer omits the 159
@@ -71,7 +71,9 @@ which lives next to the data.
 
 - **Code** (this repo): `petri/` — at the top, the experiment entry points plus the viewer
   builder:
-  - `exp_audit_pipeline.py` — run audits end-to-end (audit → annotate → viewer).
+  - `exp_audit_pipeline.py` — run audits end-to-end (audit → optional annotation →
+    viewer). Hack-turn annotation is off by default and enabled with `--annotate`;
+    `--force-annotate` also enables it and replaces existing annotations.
     `--max-turns=<N>` is required so paid runs cannot silently inherit a stale turn cap.
   - `exp_rollback_pipeline.py` — rollback resampling experiments end-to-end.
   - `exp_continuation_pipeline.py` — continuation experiments (condition a target on a prior
@@ -82,6 +84,10 @@ which lives next to the data.
     `--full-hack-prefixes/--corrected-hack-prefixes/--clean-prefixes + --conditions` scheme and
     the separate `exp_baseline_pipeline.py` (the baseline is now just `--prefixes=none`).
   - `viewer.py` — builds the static viewer (run on its own, or auto-run by the pipelines).
+    HARD RULE for any viewer page (both projects): zero text that isn't data. No explainer
+    notes, procedure descriptions, or config/spend prose — explain in chat to Owen instead
+    (reinforced 2026-08-02). Loss/integrity warnings are the exception and stay loud. If a
+    page you're copying carries an old explainer, don't replicate it — flag it.
 
   (There used to be a top-level `exp_resample_begin_pipeline.py`; it was removed. The
   begin-resample core still lives in `lib/exp_resample.py` and existing `resample-*` run

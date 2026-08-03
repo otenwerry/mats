@@ -27,8 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import write_csv, write_manifest  # noqa: E402
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
-SEED_DIR = PETRI / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"   # pinned texts
+SEED_DIR = ENVIRONMENTS / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
 REAL_ENV = ENVIRONMENTS / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
 
 GENERATOR_VERSION = "v1"

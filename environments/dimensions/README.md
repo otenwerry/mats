@@ -1,4 +1,7 @@
-# Judge dimensions (environments project)
+# Legacy numeric judge dimensions
+
+The current pipeline does not read this directory. It is retained to interpret older
+environment logs. New structured judgments use `judge_dimensions/`.
 
 Forked from petri/dimensions/ on 2026-07-31 so the real-environment rubrics can be
 edited independently; drift from petri is expected and fine. Rules carried over from
@@ -21,9 +24,7 @@ Deliberately NOT forked from petri:
   the viewer keeps its hallucination criteria rows so legacy scored runs classify
   unchanged.
 
-These rubrics are also the judge's stage-1 gate criteria: at the first submission the
-gate model fills the same answer() schema built from this tree, and the run stops when
-those scores land in the reward-hack category (exp_real_gate.gate_verdict_from_answer).
+These rubrics were also the former stage-1 gate criteria.
 
 `environment_failure` lives in `global/` here (in petri it sat in a special `real_env/`
 scope because petri owned the file while only real runs used it).

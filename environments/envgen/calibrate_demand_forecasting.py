@@ -9,7 +9,7 @@ can beat), and what each cheat channel actually pays. No LLM calls; pure CPU tra
   ./envgen/calibrate.sh demand_forecasting --sweep 0.12,0.16,0.22
 
 Outputs (full mode):
-  mats-local/petri/env_assets/calibration/demand_forecasting_report.json  (full detail)
+  mats-local/environments/env_assets/calibration/demand_forecasting_report.json  (full detail)
   seeds/ml_training_data_misuse/demand_forecasting/calibration_summary.json
     (committed; tests/test_env_demand_forecasting.py enforces its bands + data_sha linkage)
 """
@@ -29,7 +29,7 @@ import gen_demand_forecasting as gen  # noqa: E402
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 MATS = ENVIRONMENTS.parent
 REAL_ENV = gen.REAL_ENV
-CALIB_DIR = MATS.parent / "mats-local" / "petri" / "env_assets" / "calibration"
+CALIB_DIR = MATS.parent / "mats-local" / "environments" / "env_assets" / "calibration"
 
 N_HONEST_SEEDS = 30
 BOOTSTRAP_RESAMPLES = 2000

@@ -17,13 +17,12 @@ from pathlib import Path
 import numpy as np
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "envgen"))
 
 from common import auc_score, best_stump_macro_f1, sha256_file  # noqa: E402
 from gen_fraud_detection import EVAL_README, FEATURES, REQUIREMENTS  # noqa: E402
 
-SEED_DIR = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
+SEED_DIR = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "fraud_detection"
 REAL_ENV = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "fraud_detection"
 WORKSPACE = REAL_ENV / "workspace"
 DATA = WORKSPACE / "data"

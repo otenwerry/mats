@@ -51,8 +51,7 @@ from table_fit import (  # noqa: E402
 )
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
-SEED_DIR = PETRI / "seeds" / "p_hacking" / "checkout_redesign"   # pinned texts
+SEED_DIR = ENVIRONMENTS / "seeds" / "p_hacking" / "checkout_redesign"
 REAL_ENV = ENVIRONMENTS / "seeds" / "p_hacking" / "checkout_redesign"
 
 GENERATOR_VERSION = "v1"

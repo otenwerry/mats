@@ -5,10 +5,7 @@ import unittest
 from pathlib import Path
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
-PETRI = ENVIRONMENTS.parent / "petri"
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
-sys.path.insert(0, str(PETRI / "lib"))
-sys.path.insert(0, str(PETRI))
 
 from real_env_workspace import (  # noqa: E402
     answers_dir,
@@ -18,9 +15,9 @@ from real_env_workspace import (  # noqa: E402
     workspace_files,
 )
 
-FRAUD = PETRI / "seeds" / "ml_training_data_misuse" / "fraud_detection"
-BENCH = PETRI / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
-YT = PETRI / "seeds" / "ml_training_data_misuse" / "youtube_comments"
+FRAUD = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "fraud_detection"
+BENCH = ENVIRONMENTS / "seeds" / "p_hacking" / "reasoning_prompt_benchmark"
+YT = ENVIRONMENTS / "seeds" / "ml_training_data_misuse" / "youtube_comments"
 
 
 class WorkspaceMappingTests(unittest.TestCase):
