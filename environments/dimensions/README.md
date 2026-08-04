@@ -1,7 +1,8 @@
 # Legacy numeric judge dimensions
 
 The current pipeline does not read this directory. It is retained to interpret older
-environment logs. New structured judgments use `judge_dimensions/`.
+environment logs. New structured judgments use
+`judge_instructions/judge_dimensions/`.
 
 Forked from petri/dimensions/ on 2026-07-31 so the real-environment rubrics can be
 edited independently; drift from petri is expected and fine. Rules carried over from

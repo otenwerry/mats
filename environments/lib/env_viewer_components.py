@@ -2,7 +2,8 @@
 
 The evidence navigator is intentionally one flat row per dimension.  Its arrows cycle
 only through that dimension's cited turns, then scroll and briefly highlight the exact
-message.  Artifact citations are separate direct links because they are not turns.
+message.  Artifact citations are separate direct links because they are not turns.  A
+smaller floating navigator repeats only the turns cited in the combined justification.
 """
 
 from __future__ import annotations
@@ -15,11 +16,22 @@ from typing import Any
 
 
 DIMENSION_LABELS = {
+    # Historical structured judgments can still contain this retired field.
     "noticed_honeypot": "Honeypot",
     "environment_failure": "Env failure",
     "reward_hacking": "Reward hack",
     "deception": "Deception",
 }
+
+JUDGE_PROMPT_SECTIONS = (
+    ("overall", ("Overall judge instructions",)),
+    ("dimensions", ("Dimension rubrics",)),
+    # The second name preserves exact rendering for judgments stored before the
+    # Evidence-scope prose moved into the family-specific overall instructions.
+    ("scope", ("Evidence caveats", "Official evidence scope")),
+    ("trajectory", ("Numbered observable trajectory",)),
+    ("artifacts", ("Artifact snapshots",)),
+)
 
 
 def esc(value: Any, *, quote: bool = False) -> str:
@@ -31,6 +43,429 @@ def artifact_dom_id(path: str, snapshot: str) -> str:
     return f"artifact-{digest}"
 
 
+def _cited_message_numbers(text: str, candidates: set[int]) -> set[int]:
+    """Return candidate message numbers named singly, in groups, or by ranges."""
+
+    cited = {
+        int(number) for number in re.findall(r"\bM(\d+)\b", text)
+    }
+    for start_text, end_text in re.findall(
+        r"\bM(\d+)\s*[-–—]\s*M?(\d+)\b", text
+    ):
+        start, end = int(start_text), int(end_text)
+        if start <= end:
+            cited.update(number for number in candidates if start <= number <= end)
+    return cited
+
+
+def split_stored_judge_prompt(prompt: str) -> dict[str, str] | None:
+    """Split only at the fixed headings inside the exact stored prompt.
+
+    Rubric Markdown can contain arbitrary headings, so a generic Markdown parser would
+    be unsafe here. A format mismatch returns ``None`` instead of reconstructing a view
+    from current files and pretending it is what the judge saw.
+    """
+
+    if not isinstance(prompt, str):
+        return None
+    first_key, first_headings = JUDGE_PROMPT_SECTIONS[0]
+    first_heading = first_headings[0]
+    prefix = f"# {first_heading}\n\n"
+    if not prompt.startswith(prefix):
+        return None
+    sections: dict[str, str] = {}
+    current_key = first_key
+    remaining = prompt[len(prefix):]
+    for next_key, next_headings in JUDGE_PROMPT_SECTIONS[1:]:
+        matches = [
+            (remaining.find(delimiter), delimiter)
+            for next_heading in next_headings
+            if (delimiter := f"\n\n# {next_heading}\n\n") in remaining
+        ]
+        if not matches:
+            return None
+        position, delimiter = min(matches, key=lambda match: match[0])
+        body = remaining[:position]
+        remaining = remaining[position + len(delimiter):]
+        sections[current_key] = body
+        current_key = next_key
+    sections[current_key] = remaining
+    return sections
+
+
+def _split_dimensions(text: str) -> list[tuple[str, str]]:
+    matches = list(re.finditer(r"(?m)^## Dimension: ([^\n]+)\n\n", text))
+    if not matches or matches[0].start() != 0:
+        return []
+    dimensions = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end():end]
+        if index + 1 < len(matches) and body.endswith("\n\n"):
+            body = body[:-2]
+        dimensions.append((match.group(1), body))
+    return dimensions
+
+
+def _split_artifacts(text: str) -> list[str]:
+    starts = [match.start() for match in re.finditer(r"(?m)^\[A\d+\] path=", text)]
+    if not starts or starts[0] != 0:
+        return []
+    chunks = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(text)
+        chunk = text[start:end]
+        if index + 1 < len(starts) and chunk.endswith("\n\n"):
+            chunk = chunk[:-2]
+        chunks.append(chunk)
+    return chunks
+
+
+def _exact_text(text: str) -> str:
+    return f'<pre class="judge-exact">{esc(text)}</pre>'
+
+
+def _nested_detail(summary: str, body: str, *, css_class: str = "") -> str:
+    class_name = f"judge-subsection {css_class}".strip()
+    return (
+        f'<details class="{class_name}"><summary>{esc(summary)}</summary>'
+        f'<div class="judge-subsection-body">{body}</div></details>'
+    )
+
+
+def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
+    envelope = judgment.get("envelope") or {}
+    evidence = envelope.get("evidence") or {}
+    source_map = evidence.get("source_message_map") or []
+    count = len(source_map) if isinstance(source_map, list) else 0
+    saved_count = len(audit.get("messages") or [])
+    source_count = evidence.get("source_message_count")
+    omitted_count = evidence.get("omitted_message_count")
+    stage = str(envelope.get("official_stage") or envelope.get("stage") or "unknown")
+    selection = evidence.get("message_selection")
+    complete = selection == "complete_observable_trajectory_for_stage"
+    if complete and stage == "stage_1":
+        scope = "complete trajectory through stage one"
+    elif complete:
+        scope = "complete observable trajectory"
+    else:
+        scope = str(selection or "scope not recorded").replace("_", " ")
+
+    labels = f"M1–M{count}" if count > 1 else "M1" if count == 1 else "no messages"
+    summary = f"Trajectory · {scope} · {labels}"
+    reasoning_policy = str(evidence.get("native_reasoning_policy") or "not recorded")
+    reasoning_messages = evidence.get("native_reasoning_message_count")
+    reasoning_blocks = evidence.get("native_reasoning_block_count")
+    if isinstance(reasoning_messages, int) and isinstance(reasoning_blocks, int):
+        reasoning_detail = (
+            f"{reasoning_policy} · {reasoning_blocks} block(s) in "
+            f"{reasoning_messages} message(s)"
+        )
+    else:
+        reasoning_detail = reasoning_policy
+
+    policies = [
+        ("Messages", f"{scope}; judge labels {labels}"),
+        ("Native reasoning", reasoning_detail),
+        ("System messages", str(evidence.get("system_messages_policy") or "not recorded")),
+        ("Assistant-visible text", str(
+            evidence.get("assistant_visible_text_policy") or "not recorded"
+        )),
+        ("Tool calls", str(evidence.get("tool_calls_policy") or "not recorded")),
+        ("Tool results", str(evidence.get("tool_results_policy") or "not recorded")),
+    ]
+    if isinstance(omitted_count, int) and omitted_count:
+        policies.append((
+            "Messages omitted by policy",
+            f"{omitted_count} source message(s)",
+        ))
+    stage_source_count = source_count if isinstance(source_count, int) else count
+    if saved_count and stage_source_count < saved_count:
+        policies.append((
+            "Later saved messages",
+            f"not part of this {stage} judgment "
+            f"({saved_count - stage_source_count} message(s))",
+        ))
+    facts = "".join(
+        '<div class="judge-scope-fact">'
+        f'<span>{esc(label)}</span><strong>{esc(value)}</strong></div>'
+        for label, value in policies
+    )
+    body = (
+        f'<div class="judge-scope-grid">{facts}</div>'
+        '<a class="judge-trajectory-link" href="#trajectory-record">'
+        'Open the saved trajectory below</a>'
+    )
+    return summary, body
+
+
+def _render_provider_interface(envelope: dict) -> str:
+    provider = envelope.get("provider_request")
+    if isinstance(provider, dict):
+        tools = provider.get("tools") or []
+        tool_rows = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "answer tool")
+            tool_rows.append(_nested_detail(
+                f"{name}() · required",
+                _exact_text(json.dumps(tool, ensure_ascii=False, indent=2, sort_keys=True)),
+                css_class="judge-tool",
+            ))
+        controls = {
+            key: value
+            for key, value in provider.items()
+            if key not in {"initial_messages", "tools"}
+        }
+        return "".join(tool_rows) + _nested_detail(
+            "Request controls",
+            _exact_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True)),
+            css_class="judge-controls",
+        )
+
+    # Early environment-judge logs stored the declared schema but not Scout's resolved
+    # provider tool. Preserve that record without claiming it is the exact API shape.
+    schema = envelope.get("output_schema")
+    if schema is None:
+        return '<div class="judge-unavailable">No response-interface record was stored.</div>'
+    return (
+        '<div class="judge-unavailable">Exact provider tool record was not stored.</div>'
+        + _exact_text(json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True))
+    )
+
+
+def _render_dimension_prompt(text: str) -> tuple[str, int | str]:
+    dimension_parts = _split_dimensions(text)
+    if not dimension_parts:
+        return _exact_text(text), "stored prompt"
+    return "".join(
+        _nested_detail(
+            DIMENSION_LABELS.get(key, key.replace("_", " ")),
+            _exact_text(content),
+            css_class="judge-dimension",
+        )
+        for key, content in dimension_parts
+    ), len(dimension_parts)
+
+
+def _variable_judge_slot(label: str, value: str) -> str:
+    return (
+        '<div class="judge-variable-slot">'
+        f'<span>{esc(label)}</span><strong>{esc(value)}</strong></div>'
+    )
+
+
+def render_generic_judge_stage(
+    *,
+    prompt: str,
+    envelope: dict,
+    summary_label: str | None = None,
+) -> str:
+    """Render current shared prompt bytes with per-trajectory slots made explicit."""
+
+    sections = split_stored_judge_prompt(prompt)
+    stage = str(envelope.get("stage") or "unknown")
+    family = str(envelope.get("family") or "unknown")
+    label = summary_label or stage.replace("_", " ")
+    if sections is None:
+        return (
+            '<details class="judge-view judge-view-unavailable"><summary>'
+            f'<span>{esc(label)}</span><span class="judge-view-pills">'
+            'current template unavailable</span></summary></details>'
+        )
+
+    dimensions, dimension_count = _render_dimension_prompt(sections["dimensions"])
+    evidence = envelope.get("evidence") or {}
+    selection = str(evidence.get("message_selection") or "scope not recorded")
+    reasoning = str(evidence.get("native_reasoning_policy") or "not recorded")
+    if selection == "complete_observable_trajectory_for_stage":
+        trajectory_slot = (
+            f"complete observable messages for this stage; native reasoning {reasoning}"
+        )
+    elif selection == "user_turns_and_assistant_submissions_for_stage":
+        trajectory_slot = (
+            "user turns and assistant submission turns for this stage; "
+            f"native reasoning {reasoning}"
+        )
+    else:
+        trajectory_slot = f"{selection.replace('_', ' ')}; native reasoning {reasoning}"
+    scope = _variable_judge_slot(
+        "Trajectory-specific",
+        "evidence-loss caveats are inserted when the call is built",
+    )
+
+    body = "".join([
+        _nested_detail("Overall instructions", _exact_text(sections["overall"])),
+        _nested_detail(
+            f"Dimensions · {dimension_count}",
+            dimensions,
+            css_class="judge-section-group",
+        ),
+        _nested_detail("Evidence caveats", scope),
+        _nested_detail(
+            "Numbered trajectory",
+            _variable_judge_slot(
+                "Trajectory-specific",
+                trajectory_slot,
+            ),
+        ),
+        _nested_detail(
+            "Artifact snapshots",
+            _variable_judge_slot(
+                "Trajectory-specific",
+                "the exact snapshots available at this stage are inserted for this call",
+            ),
+        ),
+        _nested_detail(
+            "Required response",
+            _render_provider_interface(envelope),
+            css_class="judge-section-group",
+        ),
+    ])
+    return (
+        '<details class="judge-view generic-judge-stage"><summary>'
+        f'<span>{esc(label)}</span>'
+        f'<span class="judge-view-pills">{esc(family)} · current</span></summary>'
+        f'<div class="judge-view-body">{body}</div></details>'
+    )
+
+
+def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
+    """Render the exact stored judge input as compact, nested closed sections.
+
+    The exact numbered trajectory stays inside this view. The broader saved transcript
+    remains a separate record because it can contain reasoning or later-stage messages
+    that were not part of this judge call.
+    """
+
+    audit = audit or {}
+    if not judgment:
+        return ""
+    if judgment.get("format") == "legacy_numeric":
+        real_env = audit.get("real_env") or {}
+        replay = real_env.get("judge_replay") or {}
+        stage_one_prompt = replay.get("stage1_prompt")
+        final_render = real_env.get("final_render")
+        stored_sections = []
+        if isinstance(stage_one_prompt, str) and stage_one_prompt:
+            stored_sections.append(_nested_detail(
+                "Stage-one prompt · exact stored bytes",
+                _exact_text(stage_one_prompt),
+            ))
+        if isinstance(final_render, str) and final_render:
+            stored_sections.append(_nested_detail(
+                "Final evidence rendering · exact stored bytes",
+                _exact_text(final_render),
+            ))
+        if stored_sections:
+            availability = (
+                '<div class="judge-unavailable">This legacy incremental run stored '
+                'the sections shown below. It did not store the complete final provider '
+                'request or response interface, so the viewer does not reconstruct those '
+                'missing parts from current code.</div>'
+            )
+            return (
+                '<details class="judge-view"><summary><span>Judge view</span>'
+                '<span class="judge-view-pills">legacy incremental · stored evidence'
+                '</span></summary><div class="judge-view-body">'
+                + availability + "".join(stored_sections) + '</div></details>'
+            )
+        return (
+            '<details class="judge-view judge-view-unavailable"><summary>'
+            '<span>Judge view</span><span class="judge-view-pills">legacy · '
+            'exact evidence not stored</span></summary>'
+            '<div class="judge-unavailable">This historical numeric run did not store '
+            'its judge replay evidence or response interface. The viewer does not rebuild '
+            'them from current code or rubric files.</div></details>'
+        )
+    if judgment.get("format") != "structured":
+        return ""
+    envelope = judgment.get("envelope") or {}
+    prompt = envelope.get("prompt_passed_to_scout")
+    sections = split_stored_judge_prompt(prompt) if isinstance(prompt, str) else None
+    stage = str(envelope.get("official_stage") or envelope.get("stage") or "unknown")
+    reasoning = ((envelope.get("evidence") or {}).get("native_reasoning_policy"))
+    if sections is None:
+        return (
+            '<details class="judge-view judge-view-unavailable"><summary>'
+            f'<span>Judge view</span><span class="judge-view-pills">{esc(stage)} · '
+            'exact prompt unavailable</span></summary>'
+            '<div class="judge-unavailable">The exact stored judge prompt could not be '
+            'rendered. No prompt was reconstructed from current rubric files.</div></details>'
+        )
+
+    dimensions, dimension_count = _render_dimension_prompt(sections["dimensions"])
+
+    artifact_parts = _split_artifacts(sections["artifacts"])
+    stored_artifacts = ((envelope.get("evidence") or {}).get("artifacts") or [])
+    if artifact_parts:
+        artifacts = []
+        for index, content in enumerate(artifact_parts):
+            artifact = stored_artifacts[index] if index < len(stored_artifacts) else {}
+            path = str(artifact.get("path") or f"Artifact {index + 1}")
+            snapshot = str(artifact.get("snapshot") or "")
+            label = f"{path} · {snapshot}" if snapshot else path
+            anchor = artifact_dom_id(path, snapshot) if snapshot else f"judge-artifact-{index + 1}"
+            artifacts.append(
+                f'<details class="judge-subsection judge-artifact" id="{anchor}">'
+                f'<summary>{esc(label)}</summary><div class="judge-subsection-body">'
+                f'{_exact_text(content)}</div></details>'
+            )
+        artifact_body = "".join(artifacts)
+    else:
+        artifact_body = _exact_text(sections["artifacts"])
+
+    trajectory_summary, trajectory_body = _trajectory_scope_marker(judgment, audit)
+    call_mode = (
+        "stage-one result reused"
+        if envelope.get("reused_stage_one") is True
+        else "fresh call"
+        if envelope.get("fresh_call") is True
+        else None
+    )
+    judgment_role = (
+        "retrospective rejudge"
+        if envelope.get("judgment_role") == "retrospective_rejudge"
+        else None
+    )
+    pills = " · ".join(item for item in (
+        judgment_role,
+        stage,
+        call_mode,
+        f"reasoning {reasoning}" if reasoning else None,
+    ) if item)
+    body = "".join([
+        _nested_detail("Overall instructions", _exact_text(sections["overall"])),
+        _nested_detail(
+            f"Dimensions · {dimension_count}",
+            dimensions,
+            css_class="judge-section-group",
+        ),
+        _nested_detail("Evidence caveats", _exact_text(sections["scope"])),
+        _nested_detail(
+            trajectory_summary,
+            trajectory_body + _exact_text(sections["trajectory"]),
+            css_class="judge-trajectory-scope",
+        ),
+        _nested_detail(
+            f"Artifacts · {len(artifact_parts)} snapshot(s)",
+            artifact_body,
+            css_class="judge-section-group",
+        ),
+        _nested_detail(
+            "Required response",
+            _render_provider_interface(envelope),
+            css_class="judge-section-group",
+        ),
+    ])
+    return (
+        '<details class="judge-view"><summary><span>Judge view</span>'
+        f'<span class="judge-view-pills">{esc(pills)}</span></summary>'
+        f'<div class="judge-view-body">{body}</div></details>'
+    )
+
+
 def _state(dimension: dict) -> str:
     if dimension.get("status") != "ok":
         return str(dimension.get("status") or "invalid")
@@ -38,7 +473,9 @@ def _state(dimension: dict) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
     if dimension.get("key") == "reward_hacking":
-        return "yes" if value else "no"
+        if dimension.get("requires_review"):
+            return "review"
+        return "yes" if dimension.get("is_hack") else "no"
     return "neutral"
 
 
@@ -119,7 +556,7 @@ def render_dimension_navigator(judgment: dict | None) -> str:
         explanation = str(dimension.get("explanation") or "")
         why = (
             '<details class="dimension-why"><summary>why</summary>'
-            f'<span>{link_message_refs(explanation)}</span></details>'
+            f'<span>{link_judge_message_refs(explanation, judgment)}</span></details>'
             if explanation else ""
         )
         issue_count = len(evidence.get("issues") or [])
@@ -145,7 +582,8 @@ def render_dimension_navigator(judgment: dict | None) -> str:
     )
     overall = str(judgment.get("overall_explanation") or "")
     overall_html = (
-        f'<div class="judgment-overall">{link_message_refs(overall)}</div>'
+        f'<div class="judgment-overall">'
+        f'{link_judge_message_refs(overall, judgment)}</div>'
         if overall else ""
     )
     return (
@@ -155,146 +593,137 @@ def render_dimension_navigator(judgment: dict | None) -> str:
     )
 
 
-def render_evidence_caveats(judgment: dict | None, audit: dict | None = None) -> str:
-    """Render every stored judge-input omission or degradation in one visible panel.
+def render_justification_turn_nav(judgment: dict | None) -> str:
+    """Render one compact floating turn navigator per cited judgment dimension.
 
-    The judge builder owns policy caveats.  The loader also supplies upstream target-tool
-    and artifact caps because they happened before the judge assembled its prompt.  We
-    report only stored facts; absence of a caveat is never converted into "complete".
+    Judge citations use prompt-local message numbers.  A dimension's structured
+    evidence supplies both those prompt numbers and their mapped full-trajectory
+    message numbers, so the viewer never has to infer associations from prose.
     """
-    audit = audit or {}
-    envelope = (judgment or {}).get("envelope") or {}
-    evidence = (judgment or {}).get("evidence_scope") or {}
-    if not evidence and isinstance(envelope, dict):
-        evidence = envelope.get("evidence") or {}
-    evidence = evidence if isinstance(evidence, dict) else {}
-    caveats = []
-    for raw in evidence.get("caveats") or []:
-        if not isinstance(raw, dict):
-            caveats.append({
-                "code": "unparsed_judge_caveat",
-                "description": str(raw),
-                "source": "judge_builder",
-            })
-            continue
-        caveats.append(dict(raw))
 
-    # Older/future envelopes may put the same queryable list one level higher.
-    for raw in envelope.get("caveats") or []:
-        if isinstance(raw, dict):
-            caveats.append(dict(raw))
-
-    tool_truncations = audit.get("tool_truncations") or []
-    if tool_truncations and not any(
-        item.get("code") == "tool_output_truncated_upstream" for item in caveats
-    ):
-        caveats.append({
-            "code": "tool_output_truncated_upstream",
-            "description": (
-                f"{len(tool_truncations)} tool result(s) were capped before the target "
-                "and judge could read the full output."
-            ),
-            "source": "upstream",
-        })
-
-    artifacts = ((audit.get("real_env") or {}).get("artifacts") or {}).get("files") or []
-    truncated_artifacts = [item for item in artifacts if item.get("truncated")]
-    if truncated_artifacts and not any(
-        item.get("code") == "artifact_content_truncated_upstream" for item in caveats
-    ):
-        caveats.append({
-            "code": "artifact_content_truncated_upstream",
-            "description": (
-                f"{len(truncated_artifacts)} stored artifact(s) were capped before judging."
-            ),
-            "source": "upstream",
-            "artifacts": [
-                {"path": str(item.get("path") or "unknown"), "snapshot": "final"}
-                for item in truncated_artifacts
-            ],
-        })
-
-    # Exact de-duplication matters when upstream caveats were copied into judge metadata.
-    unique = []
-    seen = set()
-    for item in caveats:
-        key = (
-            str(item.get("code") or "unknown"),
-            str(item.get("description") or ""),
-            json.dumps(item.get("messages") or [], sort_keys=True),
-            json.dumps(item.get("artifacts") or [], sort_keys=True),
-        )
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-
-    policy = evidence.get("native_reasoning_policy")
-    reasoning_messages = evidence.get("native_reasoning_message_count")
-    reasoning_blocks = evidence.get("native_reasoning_block_count")
-    selection = evidence.get("message_selection")
-    builder_truncated = evidence.get("builder_truncated_evidence")
-    facts = []
-    if policy is not None:
-        count_detail = ""
-        if isinstance(reasoning_messages, int) and isinstance(reasoning_blocks, int):
-            count_detail = (
-                f" ({reasoning_blocks} block(s) across {reasoning_messages} message(s))"
-            )
-        facts.append(f"native reasoning: {policy}{count_detail}")
-    if selection is not None:
-        facts.append(f"messages: {str(selection).replace('_', ' ')}")
-    if builder_truncated is not None:
-        facts.append(
-            "judge builder truncation: " + ("yes" if builder_truncated else "no")
-        )
-    facts_html = (
-        '<div class="evidence-scope-facts">'
-        + "".join(f"<span>{esc(fact)}</span>" for fact in facts)
-        + "</div>"
-        if facts else ""
+    if not judgment or judgment.get("format") != "structured":
+        return ""
+    candidate_prompt_numbers = {
+        reference["prompt_number"]
+        for dimension in judgment.get("dimensions") or []
+        for reference in (dimension.get("evidence") or {}).get("messages") or []
+        if isinstance(reference.get("prompt_number"), int)
+    }
+    cited_prompt_numbers = _cited_message_numbers(
+        str(judgment.get("justification") or ""), candidate_prompt_numbers
     )
-    if not unique and not facts:
+    if not cited_prompt_numbers:
         return ""
 
     rows = []
-    for item in unique:
-        code = str(item.get("code") or "unknown_caveat")
-        description = str(item.get("description") or code.replace("_", " "))
-        refs = []
-        for reference in item.get("messages") or []:
-            number = (
-                reference.get("number") if isinstance(reference, dict) else reference
-            )
-            if isinstance(number, int):
-                refs.append(f'<a href="#M{number}">[M{number}]</a>')
-        for artifact in item.get("artifacts") or []:
-            if not isinstance(artifact, dict):
+    for dimension in judgment.get("dimensions") or []:
+        key = str(dimension.get("key") or "unknown")
+        label = DIMENSION_LABELS.get(key, key.replace("_", " "))
+        targets = []
+        seen = set()
+        for reference in (dimension.get("evidence") or {}).get("messages") or []:
+            prompt_number = reference.get("prompt_number")
+            source_number = reference.get("number")
+            if (
+                not isinstance(prompt_number, int)
+                or prompt_number not in cited_prompt_numbers
+                or not isinstance(source_number, int)
+            ):
                 continue
-            path = str(artifact.get("path") or "unknown")
-            snapshot = str(artifact.get("snapshot") or "unknown")
-            refs.append(
-                f'<a href="#{artifact_dom_id(path, snapshot)}">'
-                f'{esc(path)} · {esc(snapshot)}</a>'
-            )
-        ref_html = f'<span class="caveat-refs">{" ".join(refs)}</span>' if refs else ""
+            target = f"M{source_number}"
+            if target not in seen:
+                seen.add(target)
+                targets.append(target)
+        if not targets:
+            continue
+        target_json = esc(json.dumps(targets, separators=(",", ":")), quote=True)
         rows.append(
-            '<li>'
-            f'<code>{esc(code)}</code> {esc(description)} {ref_html}'
-            f'<span class="caveat-source">{esc(item.get("source") or "stored")}</span>'
-            '</li>'
+            f'<div class="justification-nav-row" '
+            f'data-justification-targets="{target_json}">'
+            f'<span class="justification-nav-label">{esc(label)}</span>'
+            f'<button type="button" class="justification-prev" '
+            f'aria-label="previous {esc(label, quote=True)} justification turn">'
+            '&#8592;</button>'
+            f'<span class="justification-position">0 / {len(targets)}</span>'
+            f'<button type="button" class="justification-next" '
+            f'aria-label="next {esc(label, quote=True)} justification turn">'
+            '&#8594;</button></div>'
         )
+    if not rows:
+        return ""
     return (
-        '<section class="evidence-caveats">'
-        '<h2>Judge evidence coverage</h2>'
-        f'{facts_html}'
-        f'{"<ul>" + "".join(rows) + "</ul>" if rows else ""}'
-        '</section>'
+        '<nav class="justification-nav" aria-label="judge justification turns">'
+        f'{"".join(rows)}</nav>'
     )
 
 
 def link_message_refs(text: str) -> str:
     escaped = esc(text)
     return re.sub(r"\[M(\d+)\]", r'<a href="#M\1">[M\1]</a>', escaped)
+
+
+def link_judge_message_refs(text: str, judgment: dict) -> str:
+    """Link simple, grouped, and ranged judge citations to saved trajectory turns."""
+
+    source_map = (
+        ((judgment.get("envelope") or {}).get("evidence") or {})
+        .get("source_message_map") or []
+    )
+    targets = {
+        int(item["number"]): int(item["source_index"]) + 1
+        for item in source_map
+        if isinstance(item, dict)
+        and isinstance(item.get("number"), int)
+        and isinstance(item.get("source_index"), int)
+    }
+    escaped = esc(text)
+
+    def replace_group(match: re.Match) -> str:
+        content = match.group(1)
+        exact = re.fullmatch(r"M(\d+)", content)
+        if exact:
+            local = int(exact.group(1))
+            target = targets.get(local, local)
+            return f'<a href="#M{target}">[M{local}]</a>'
+
+        def replace_number(number_match: re.Match) -> str:
+            local = int(number_match.group(1))
+            target = targets.get(local, local)
+            return f'<a href="#M{target}">M{local}</a>'
+
+        linked = re.sub(r"\bM(\d+)\b", replace_number, content)
+        return f"[{linked}]"
+
+    return re.sub(r"\[([^\]\n]*\bM\d+[^\]\n]*)\]", replace_group, escaped)
+
+
+def render_judge_narrative(judgment: dict | None) -> str:
+    """Render stored judge summary/highlights without reconstructing missing prose."""
+
+    if not judgment:
+        return ""
+    if judgment.get("format") == "legacy_numeric":
+        record = judgment.get("legacy") or {}
+    elif judgment.get("format") == "structured":
+        record = judgment
+    else:
+        return ""
+    sections = []
+    for key, label in (
+        ("summary", "Judge summary"),
+        ("justification", "Judge justification"),
+        ("highlights", "Judge highlights"),
+    ):
+        value = str(record.get(key) or "")
+        if not value:
+            continue
+        sections.append(
+            '<details class="panel judge-narrative" open>'
+            f'<summary>{esc(label)}</summary>'
+            '<div class="judge-narrative-text">'
+            f'{link_judge_message_refs(value, judgment)}</div></details>'
+        )
+    return "".join(sections)
 
 
 def _json_block(value: Any) -> str:
@@ -346,52 +775,15 @@ def render_transcript(messages: list[dict]) -> str:
     return "\n".join(rows)
 
 
-def render_artifacts(artifacts: list[dict]) -> str:
-    """Render stored artifact snapshots using the same IDs as judgment citations."""
-    if not artifacts:
-        return ""
-    rows = []
-    for artifact in artifacts:
-        path = str(artifact.get("path") or "unknown")
-        snapshot = str(
-            artifact.get("snapshot") or artifact.get("submission") or "unknown"
-        )
-        content = artifact.get("content")
-        caveats = []
-        if artifact.get("truncated"):
-            caveats.append("artifact extraction was capped")
-        if artifact.get("omitted"):
-            caveats.append("artifact content was omitted")
-        warning = (
-            f'<div class="artifact-warning">&#9888; {esc("; ".join(caveats))}</div>'
-            if caveats else ""
-        )
-        body = (
-            f'<pre>{esc(content)}</pre>' if isinstance(content, str)
-            else '<p class="muted">No stored text content.</p>'
-        )
-        rows.append(
-            f'<article class="artifact" id="{artifact_dom_id(path, snapshot)}">'
-            f'<header>{esc(path)} <span class="muted">{esc(snapshot)}</span></header>'
-            f'{warning}{body}</article>'
-        )
-    return "\n".join(rows)
-
-
-def render_judge_artifacts(judgment: dict | None) -> str:
-    """Render the exact artifact snapshots recorded in official judge metadata."""
-    scope = (judgment or {}).get("evidence_scope") or {}
-    return render_artifacts(scope.get("artifacts") or [])
-
-
 EVIDENCE_NAV_CSS = r"""
 .judgment-strip{border:1px solid #d8dbe5;border-radius:8px;margin:14px 0;background:#fff}
 .judgment-format{padding:5px 9px;color:#747887;font-size:11px;border-bottom:1px solid #eceef3}
 .judgment-overall{padding:6px 9px;border-bottom:1px solid #eceef3;font-size:12px;color:#4f5360}
+.judge-narrative-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:9px;font-size:12px;line-height:1.5;color:#3f4552}
 .judgment-warning,.evidence-warning{margin-left:8px;color:#9d6300}
 .dimension-row{min-height:32px;display:flex;align-items:center;gap:7px;padding:3px 8px;border-bottom:1px solid #f0f1f5;font-size:13px}
 .dimension-row:last-child{border-bottom:0}.dimension-label{width:92px;color:#555b68;flex:0 0 auto}
-.dimension-value{min-width:92px;font-weight:650;white-space:nowrap}.state-yes{color:#a33}.state-no{color:#17663b}
+.dimension-value{min-width:92px;font-weight:650;white-space:nowrap}.state-yes{color:#a33}.state-no{color:#17663b}.state-review{color:#9d6300}
 .state-missing,.state-invalid{color:#9d6300}.evidence-cycle{display:inline-flex;align-items:center;gap:2px}
 .evidence-cycle button{border:1px solid #d8dbe5;background:#f8f9fb;height:23px;min-width:25px;padding:0 5px;cursor:pointer;color:#343945}
 .evidence-cycle button:hover{background:#eceff5}.evidence-position{min-width:31px;text-align:center;color:#858997;font-size:11px}
@@ -400,19 +792,28 @@ EVIDENCE_NAV_CSS = r"""
 .dimension-why{font-size:11px;margin-left:auto;max-width:52%}.dimension-why summary{cursor:pointer;color:#747887}
 .dimension-why span{display:block;padding:5px 0;color:#4a4e58}.evidence-flash{animation:evidence-flash 1.4s ease-out}
 @keyframes evidence-flash{0%{box-shadow:0 0 0 4px #efc84a;background:#fff8d8}100%{box-shadow:none}}
+.justification-nav{position:fixed;right:14px;bottom:14px;z-index:50;display:flex;flex-direction:column;gap:2px;padding:3px;background:rgba(255,255,255,.95);border:1px solid #dfe2e8;border-radius:6px;box-shadow:0 2px 8px rgba(31,38,55,.12);backdrop-filter:blur(3px)}
+.justification-nav-row{height:25px;display:flex;align-items:center;gap:3px;padding:0 3px;font-size:10.5px;color:#555b68}
+.justification-nav-label{width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.justification-position{min-width:30px;text-align:center;font-variant-numeric:tabular-nums;color:#777d8b}
+.justification-nav button{width:22px;height:20px;padding:0;border:1px solid #d8dbe3;border-radius:4px;background:#f7f8fa;color:#555b68;cursor:pointer;line-height:18px}.justification-nav button:hover{background:#eceef3}
+.message.justification-cited{border-left:3px solid #dfbd58}
 .legacy-judgment{border:1px solid #d8dbe5;border-radius:8px;padding:8px;margin:14px 0}.muted{color:#858997;font-weight:normal}
 .legacy-score-table th{text-align:left;padding-right:20px}.legacy-score-table td{font-variant-numeric:tabular-nums}
-.evidence-caveats{border:1px solid #e1bf6a;background:#fff9e9;border-radius:8px;padding:8px 10px;margin:14px 0}
-.evidence-caveats h2{font-size:14px;margin:0 0 5px}.evidence-caveats ul{margin:5px 0 0;padding-left:22px;font-size:12px}
-.evidence-scope-facts{display:flex;gap:5px;flex-wrap:wrap}.evidence-scope-facts span{font-size:11px;border:1px solid #e1d4ad;border-radius:10px;padding:1px 6px;background:#fff}
-.caveat-refs{margin-left:5px}.caveat-source{color:#8d8068;font-size:10px;margin-left:6px}
 .message{border:1px solid #dfe2e9;border-radius:7px;margin:9px 0;background:#fff;scroll-margin-top:25px}
-.message header,.artifact header{padding:5px 9px;font:600 12px ui-monospace,monospace;background:#f3f4f7;border-bottom:1px solid #e1e3e9}
-.message pre,.artifact pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:9px;font:12px/1.45 ui-monospace,monospace}
+.message header{padding:5px 9px;font:600 12px ui-monospace,monospace;background:#f3f4f7;border-bottom:1px solid #e1e3e9}
+.message pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:9px;font:12px/1.45 ui-monospace,monospace}
 .turn-index{color:#8b90a0;margin-left:4px}.message-reasoning,.unknown-content{padding:5px 9px;color:#696f7d}
 .tool-call{margin:7px 9px;border:1px solid #e0e2e8;border-radius:5px}.tool-call-head{padding:4px 7px;background:#f7f8fa;font-size:11px}
-.message-error,.artifact-warning{color:#9b311e}.artifact{border:1px solid #dfe2e9;border-radius:7px;margin:9px 0}.artifact-warning{padding:6px 9px}
-@media(max-width:700px){.dimension-row{flex-wrap:wrap}.dimension-label{width:82px}.dimension-why{max-width:100%;margin-left:0;width:100%}}
+.message-error{color:#9b311e}
+.judge-view{margin:14px 0;border:1px solid #cfd7e8;border-radius:10px;background:linear-gradient(135deg,#fbfcff,#f5f7fb);box-shadow:0 4px 14px rgba(49,61,90,.06)}
+.judge-view>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:10px 12px;list-style:none;font-size:14px;font-weight:700;color:#333b4f}
+.judge-view>summary::-webkit-details-marker,.judge-subsection>summary::-webkit-details-marker{display:none}.judge-view>summary:before,.judge-subsection>summary:before{content:"›";display:inline-block;color:#818ba0;transition:transform .15s}.judge-view>summary>span:first-of-type{margin-right:auto}.judge-view[open]>summary:before,.judge-subsection[open]>summary:before{transform:rotate(90deg)}
+.judge-view-pills{font-size:10px;font-weight:600;color:#64708a;background:#e9edf6;border-radius:10px;padding:2px 7px;white-space:nowrap}.judge-view-body{border-top:1px solid #dce2ee;padding:8px}
+.judge-subsection{background:#fff;border:1px solid #e0e4ec;border-radius:7px;margin:5px 0}.judge-subsection>summary{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;padding:7px 9px;font-size:12px;font-weight:650;color:#51596b}.judge-subsection[open]>summary{border-bottom:1px solid #eceef3;background:#fafbfc}.judge-subsection-body{padding:7px}.judge-section-group>.judge-subsection-body{background:#f8f9fc}
+.judge-exact{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:9px;background:#f7f8fa;border:1px solid #eceef2;border-radius:5px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#343946}.judge-dimension,.judge-artifact,.judge-tool,.judge-controls{margin:5px}.judge-artifact{scroll-margin-top:25px}
+.judge-scope-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px}.judge-scope-fact{border:1px solid #e6e9ef;border-radius:6px;padding:6px 8px;background:#fafbfc}.judge-scope-fact span{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:#8990a0}.judge-scope-fact strong{display:block;margin-top:2px;font-size:11px;font-weight:600;color:#464d5c}.judge-trajectory-link{display:inline-block;margin:8px 1px 1px;font-size:11px}.judge-unavailable{padding:9px;color:#916320;background:#fff8e8;border:1px solid #ead7a7;border-radius:6px;font-size:11px}.trajectory-panel{scroll-margin-top:20px}.trajectory-panel>summary{padding-bottom:0}.trajectory-panel[open]>summary{padding-bottom:8px;border-bottom:1px solid #eceef3}
+.judge-variable-slot{border:1px dashed #cbd3e2;background:#f8faff;border-radius:6px;padding:9px}.judge-variable-slot span{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#7c879e}.judge-variable-slot strong{display:block;margin-top:3px;font-size:11px;color:#4c566b}.generic-judge-stage{margin-top:10px}
+@media(max-width:700px){.dimension-row{flex-wrap:wrap}.dimension-label{width:82px}.dimension-why{max-width:100%;margin-left:0;width:100%}.justification-nav{right:7px;bottom:7px}}
 """
 
 
@@ -439,6 +840,8 @@ EVIDENCE_NAV_JS = r"""
       var element = document.getElementById(targets[index]);
       update();
       if (!element) return;
+      var parentDetails = element.closest("details");
+      if (parentDetails) parentDetails.open = true;
       element.scrollIntoView({behavior: "smooth", block: "center"});
       element.classList.remove("evidence-flash");
       void element.offsetWidth;
@@ -454,6 +857,51 @@ EVIDENCE_NAV_JS = r"""
     update();
   }
   document.querySelectorAll(".dimension-row").forEach(setup);
+  document.querySelectorAll(".justification-nav-row").forEach(function (row) {
+    var targetIds = parse(row, "data-justification-targets");
+    var targets = targetIds.map(function (id) { return document.getElementById(id); })
+      .filter(function (element) { return Boolean(element); });
+    if (!targets.length) { row.remove(); return; }
+    targets.forEach(function (element) { element.classList.add("justification-cited"); });
+    var index = -1;
+    var position = row.querySelector(".justification-position");
+    position.textContent = "0 / " + targets.length;
+    function go(direction) {
+      index = (index + direction + targets.length) % targets.length;
+      var element = targets[index];
+      var parent = element.closest("details");
+      while (parent) {
+        parent.open = true;
+        parent = parent.parentElement ? parent.parentElement.closest("details") : null;
+      }
+      element.scrollIntoView({behavior: "smooth", block: "center"});
+      element.classList.remove("evidence-flash");
+      void element.offsetWidth;
+      element.classList.add("evidence-flash");
+      position.textContent = (index + 1) + " / " + targets.length;
+    }
+    row.querySelector(".justification-prev").addEventListener("click", function () {
+      go(-1);
+    });
+    row.querySelector(".justification-next").addEventListener("click", function () {
+      go(1);
+    });
+  });
+  var justificationNav = document.querySelector(".justification-nav");
+  if (justificationNav && !justificationNav.querySelector(".justification-nav-row")) {
+    justificationNav.remove();
+  }
+  document.querySelectorAll('a[href^="#"]').forEach(function (link) {
+    link.addEventListener("click", function () {
+      var target = document.getElementById(link.getAttribute("href").slice(1));
+      if (!target) return;
+      var parent = target.closest("details");
+      while (parent) {
+        parent.open = true;
+        parent = parent.parentElement ? parent.parentElement.closest("details") : null;
+      }
+    });
+  });
 })();
 </script>
 """

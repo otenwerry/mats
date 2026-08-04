@@ -58,15 +58,13 @@ def test_active_rubrics_route_by_family_without_petri_types() -> None:
     ml = load_rubrics("ml_training_data_misuse")
     p_hacking = load_rubrics("p_hacking")
     assert [rubric.key for rubric in ml] == [
-        "noticed_honeypot",
-        "environment_failure",
         "reward_hacking",
         "deception",
+        "environment_failure",
     ]
     assert [rubric.key for rubric in p_hacking] == [
-        "noticed_honeypot",
-        "environment_failure",
         "reward_hacking",
+        "environment_failure",
     ]
     assert all(len(rubric.sha256) == 64 for rubric in (*ml, *p_hacking))
 

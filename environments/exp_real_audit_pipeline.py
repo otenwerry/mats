@@ -59,6 +59,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import traceback
 from datetime import datetime
 
@@ -89,6 +90,7 @@ from exp_real_audit import (
 from exp_inspect_runner import dead_targets, run_eval
 from judge_selection import resolve_judge
 from project_paths import DATA_ROOT as DATA, VIEWER_ROOT as OUT
+from real_integrity import integrity_sidecar_records
 from exp_aws_trajectory import (
     DEFAULT_INSTANCE_TYPE,
     DEFAULT_REGION,
@@ -374,6 +376,33 @@ def judge_procedure_integrity_failures(logs: list) -> list[dict]:
     return failures
 
 
+def write_integrity_sidecar(log_dir: pathlib.Path, logs: list) -> list[dict]:
+    """Persist the exact per-sample inclusion verdict consumed by the viewer."""
+
+    records = integrity_sidecar_records(logs)
+    payload = {
+        "schema_version": "environment-pipeline-integrity-v1",
+        "records": records,
+    }
+    log_dir.mkdir(parents=True, exist_ok=True)
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=log_dir, delete=False
+        ) as handle:
+            temporary = pathlib.Path(handle.name)
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, log_dir / "pipeline_integrity.json")
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return records
+
+
 def run_real_audit_stage(cfg: dict):
     targets, seeds, epochs = cfg["targets"], cfg["seeds"], cfg["epochs"]
     target_models = [route(TARGET_CHOICES[t]) for t in targets]
@@ -450,23 +479,23 @@ def run_real_audit_stage(cfg: dict):
     else:
         print(f"\nall {expected_n} trajectories present.")
 
-    integrity_failures = audit_integrity_failures(logs)
-    gate_failures = gate_integrity_failures(logs)
-    judge_failures = judge_procedure_integrity_failures(logs)
-    for name, failures in (("data-integrity", integrity_failures),
-                           ("gate", gate_failures),
-                           ("judge-procedure", judge_failures)):
-        if failures:
-            print("\n" + "!" * 72)
-            print(f"WARNING: {len(failures)} trajectory(ies) have {name} failures:")
-            for failure in failures:
-                print(f"  {failure['task']}/{failure['sample']} epoch {failure['epoch']}: "
-                      f"{', '.join(failure['issues'])}")
-            print("!" * 72)
+    integrity_records = write_integrity_sidecar(log_dir, logs)
+    integrity_failures = [
+        record for record in integrity_records if record["status"] == "excluded"
+    ]
+    if integrity_failures:
+        print("\n" + "!" * 72)
+        print(
+            f"WARNING: {len(integrity_failures)} trajectory(ies) have stored "
+            "integrity failures:"
+        )
+        for failure in integrity_failures:
+            print(f"  {failure['task']}/{failure['sample']} epoch {failure['epoch']}: "
+                  f"{', '.join(failure['issues'])}")
+        print("!" * 72)
 
     integrity_ok = (bool(success) and actual_n == expected_n and not dead
-                    and not integrity_failures and not gate_failures
-                    and not judge_failures)
+                    and not integrity_failures)
     return logs, log_dir, expected_n, integrity_ok
 
 

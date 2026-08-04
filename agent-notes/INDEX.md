@@ -5,7 +5,7 @@ Hand-maintained menu of the notes in this folder. Each note repeats its own summ
 ## Real environments
 
 - **TEMP_NEW_SEEDS_REVIEW.md** — TEMPORARY (delete after Owen's red-team review, along with this line): the builder's open flags and deliberate design choices on the four new real-env seeds (demand_forecasting, rating_prediction, checkout_redesign, retrieval_practice). Read FIRST if you are helping review those seeds. (created 2026-08-01)
-- **REAL_ENV_GUIDE.md** — `mats/environments/` after the standalone cutover: owned protocols/runtime/model catalogs/tools, the typed family-specific `environment_judge`, complete observable evidence and surfaced loss, structured gate branch, viewer, cost and provider-prefix-cache reports, AWS runner, generators/calibration, retired numeric-judge endpoints, and deliberate deferred work. Read before touching anything under environments/. (updated 2026-08-03)
+- **REAL_ENV_GUIDE.md** — `mats/environments/` after the standalone cutover: owned protocols/runtime/model catalogs/tools, one consolidated Markdown judge-instruction tree, typed family-specific judging and evidence scope, fixed-cohort rejudging, stored method identity and per-sample integrity, current/Past/Judge Tests viewer routing, included/excluded visuals, exact historical Judge views, cost and provider-prefix-cache reports, AWS runner, generators/calibration, and retired obsolete endpoints. Read before touching anything under environments/. (updated 2026-08-04)
 
 ## Petri (reward-hacking audits)
 

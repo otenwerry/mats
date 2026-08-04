@@ -10,6 +10,7 @@ from .exp_runner import (
     JudgeCallError,
     JudgePostValidationError,
     judge_trajectory,
+    provider_request_record,
     run_prepared_judge,
     validate_judgment_evidence,
 )
@@ -31,6 +32,8 @@ from .schema import (
     PHackingRewardHackType,
     answer_model_for_family,
     result_model_for_family,
+    selected_hack_types,
+    selected_review_types,
 )
 
 __all__ = [
@@ -60,7 +63,10 @@ __all__ = [
     "answer_model_for_family",
     "judge_trajectory",
     "prepare_judge_call",
+    "provider_request_record",
     "result_model_for_family",
     "run_prepared_judge",
+    "selected_hack_types",
+    "selected_review_types",
     "validate_judgment_evidence",
 ]

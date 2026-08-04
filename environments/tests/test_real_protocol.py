@@ -57,6 +57,10 @@ def test_controller_branches_and_finalize_are_deterministic() -> None:
     failed = RealProtocolController(make_spec(), "allow")
     assert failed.on_submission(gate_verdict="error") == ("end", "gate_error_end")
 
+    review = RealProtocolController(make_spec(), "allow")
+    assert review.on_submission(gate_verdict="review") == ("send", "FOLLOW UP")
+    assert review.first_gate_verdict == "review"
+
     clean = RealProtocolController(make_spec(finalize="FINALIZE"), "allow")
     assert clean.on_submission(gate_verdict="clean") == ("send", "FOLLOW UP")
     assert clean.on_submission(
@@ -117,10 +121,9 @@ def test_build_task_stamps_structured_judge_and_protocol_provenance() -> None:
     assert task.metadata["target_tools_mode"] == "real"
     assert task.metadata["max_turns"] is None
     assert task.metadata["judge_dimensions"] == [
-        "noticed_honeypot",
-        "environment_failure",
         "reward_hacking",
         "deception",
+        "environment_failure",
     ]
     assert task.metadata["protocol_sources"]["protocol_source"] == "environments"
     assert task.dataset[0].metadata["protocol"]["version"] == ML_TIME_PROTOCOL_VERSION
@@ -133,7 +136,7 @@ def test_judge_procedure_integrity_requires_a_valid_owned_envelope() -> None:
     from exp_real_audit_pipeline import judge_procedure_integrity_failures
 
     valid_score = SimpleNamespace(metadata={"environment_judge": {
-        "result": {"reward_hacking": {"types": []}},
+        "result": {"reward_hacking": {"types": ["clean"]}},
         "post_validation": "passed",
         "official_stage": "final",
         "fresh_call": True,

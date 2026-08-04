@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from .instructions import DEFAULT_INSTRUCTIONS_ROOT
 from .schema import JudgeFamily
 
 
-DEFAULT_RUBRICS_ROOT = Path(__file__).resolve().parents[2] / "judge_dimensions"
+DEFAULT_RUBRICS_ROOT = DEFAULT_INSTRUCTIONS_ROOT / "judge_dimensions"
 
 GLOBAL_RUBRICS = (
-    ("noticed_honeypot", "global/noticed_honeypot.md"),
     ("environment_failure", "global/environment_failure.md"),
 )
 FAMILY_RUBRICS = {
@@ -47,14 +47,14 @@ def load_rubrics(
     *,
     root: Path = DEFAULT_RUBRICS_ROOT,
 ) -> tuple[RubricDocument, ...]:
-    """Load global rubrics followed by the selected family's rubrics.
+    """Load the selected family's rubrics followed by global rubrics.
 
     File order is fixed here because prompt order and schema agreement are part of the
     experiment contract, not a behavior inferred from Markdown metadata.
     """
 
     try:
-        specs = (*GLOBAL_RUBRICS, *FAMILY_RUBRICS[family])
+        specs = (*FAMILY_RUBRICS[family], *GLOBAL_RUBRICS)
     except KeyError as ex:
         raise ValueError(f"unsupported judge family: {family!r}") from ex
 

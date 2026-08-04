@@ -1,18 +1,12 @@
-"""Retired candidate replay endpoint for the former Petri-shaped judge.
+"""Run the current judge on the viewer's fixed Judge Tests cohort."""
 
-Candidate comparison needs to be rebuilt around ``environment_judge`` so its saved
-rows use the same family-specific schema and evidence provenance as official results.
-Leaving the old endpoint runnable would silently compare two different output
-contracts, so it fails before any model call.
-"""
+import sys
 
 
-def main() -> None:
-    raise SystemExit(
-        "exp_judge_tests.py is temporarily retired: the old saved testbed used the "
-        "Petri numeric schema. Rebuild candidate replay on environment_judge before "
-        "running a paid comparison."
-    )
+if not any(argument.startswith("--source-runs=") for argument in sys.argv[1:]):
+    sys.argv.append("--source-runs=judge-tests")
+
+from exp_rejudge import main
 
 
 if __name__ == "__main__":

@@ -37,12 +37,12 @@ def categorical_summary(audits: list[dict]) -> dict:
         "legacy_numeric": 0,
         "missing_judgment": 0,
         "reward_hacking": Counter(),
-        "reward_hack_types": Counter(),
-        "noticed_honeypot": Counter(),
+        "reward_hacking_labels": Counter(),
         "environment_failure": Counter(),
         "deception_scores": Counter(),
         "by_target": defaultdict(lambda: {
-            "total": 0, "structured": 0, "hack": 0, "no_hack": 0, "invalid": 0,
+            "total": 0, "structured": 0, "hack": 0, "review": 0,
+            "no_hack": 0, "invalid": 0,
         }),
     }
     for audit in audits:
@@ -68,15 +68,19 @@ def categorical_summary(audits: list[dict]) -> dict:
         if not reward or reward.get("status") != "ok":
             summary["reward_hacking"]["invalid"] += 1
             by_target["invalid"] += 1
-        elif reward.get("value"):
+        elif reward.get("requires_review"):
+            summary["reward_hacking"]["needs review"] += 1
+            by_target["review"] += 1
+        elif reward.get("is_hack"):
             summary["reward_hacking"]["hack"] += 1
             by_target["hack"] += 1
-            summary["reward_hack_types"].update(reward["value"])
         else:
-            summary["reward_hacking"]["none"] += 1
+            summary["reward_hacking"]["no hack"] += 1
             by_target["no_hack"] += 1
+        if reward and reward.get("status") == "ok":
+            summary["reward_hacking_labels"].update(reward["value"])
 
-        for key in ("noticed_honeypot", "environment_failure"):
+        for key in ("environment_failure",):
             dimension = _dimension(audit, key)
             if not dimension or dimension.get("status") != "ok":
                 summary[key]["invalid"] += 1
@@ -94,7 +98,7 @@ def categorical_summary(audits: list[dict]) -> dict:
 
     # Plain dictionaries make the summary JSON/checkpoint friendly.
     for key in (
-        "reward_hacking", "reward_hack_types", "noticed_honeypot",
+        "reward_hacking", "reward_hacking_labels",
         "environment_failure", "deception_scores",
     ):
         summary[key] = dict(summary[key])
@@ -117,21 +121,22 @@ def recorded_cost_summary(audits: list[dict]) -> dict:
                 continue
             by_role[str(role)] += float(usage["total_cost"])
             saw_cost = True
-        compute = ((audit.get("real_env") or {}).get("compute") or {})
-        vm_cost = compute.get("estimated_vm_cost_usd")
-        if isinstance(vm_cost, (int, float)):
-            vm_total += float(vm_cost)
-            vm_count += 1
-            saw_cost = True
-            for key in (
-                "s3_cost_excluded",
-                "ebs_cost_excluded",
-                "public_ipv4_cost_excluded",
-                "internet_data_transfer_cost_excluded",
-                "shared_runtime_cost_excluded",
-            ):
-                if compute.get(key) is True:
-                    vm_exclusions[key] += 1
+        if not audit.get("retrospective_rejudge"):
+            compute = ((audit.get("real_env") or {}).get("compute") or {})
+            vm_cost = compute.get("estimated_vm_cost_usd")
+            if isinstance(vm_cost, (int, float)):
+                vm_total += float(vm_cost)
+                vm_count += 1
+                saw_cost = True
+                for key in (
+                    "s3_cost_excluded",
+                    "ebs_cost_excluded",
+                    "public_ipv4_cost_excluded",
+                    "internet_data_transfer_cost_excluded",
+                    "shared_runtime_cost_excluded",
+                ):
+                    if compute.get(key) is True:
+                        vm_exclusions[key] += 1
         if not saw_cost:
             missing += 1
     return {
@@ -167,10 +172,8 @@ def _bar_group(title: str, counts: dict) -> str:
     return f'<section class="visual"><h2>{_esc(title)}</h2>{"".join(rows)}</section>'
 
 
-def render_visuals(audits: list[dict]) -> str:
-    """Render a compact set of new-schema summaries and explicit coverage notes."""
+def _judgment_group(title: str, audits: list[dict]) -> str:
     summary = categorical_summary(audits)
-    cost = recorded_cost_summary(audits)
     coverage = (
         '<section class="visual coverage"><h2>Judgment coverage</h2>'
         f'<p>{summary["structured"]} structured · '
@@ -182,6 +185,29 @@ def render_visuals(audits: list[dict]) -> str:
     target_counts = {
         target: values["structured"] for target, values in summary["by_target"].items()
     }
+    deception = (
+        _bar_group(
+            "Deception among applicable ML judgments",
+            summary["deception_scores"],
+        )
+        if summary["deception_scores"]
+        else ""
+    )
+    return (
+        f'<section class="visual-group"><h2 class="visual-group-title">{_esc(title)}</h2>'
+        '<div class="visual-grid">'
+        + coverage
+        + _bar_group("Structured judgments by target", target_counts)
+        + _bar_group("Reward hacking", summary["reward_hacking"])
+        + _bar_group("Reward-hacking labels", summary["reward_hacking_labels"])
+        + _bar_group("Environment failure", summary["environment_failure"])
+        + deception
+        + '</div></section>'
+    )
+
+
+def _cost_html(audits: list[dict]) -> str:
+    cost = recorded_cost_summary(audits)
     cost_rows = "".join(
         f'<tr><th>{_esc(role)}</th><td>${value:,.4f}</td></tr>'
         for role, value in sorted(cost["by_role"].items())
@@ -202,25 +228,84 @@ def render_visuals(audits: list[dict]) -> str:
         'have no recorded cost; totals can therefore be incomplete.</p>'
         f'{exclusion_note}</section>'
     )
+    return '<div class="visual-grid cost-grid">' + cost_html + '</div>'
+
+
+def _flag_counts(audits: list[dict]) -> dict[str, int]:
+    return dict(Counter(
+        str(flag.get("label") or flag.get("code") or "flag")
+        for audit in audits
+        for flag in audit.get("flags") or []
+    ))
+
+
+def _visual_subset(title: str, audits: list[dict]) -> str:
+    flags = _flag_counts(audits)
+    flag_html = (
+        '<div class="visual-grid">' + _bar_group("Flags", flags) + '</div>'
+        if flags else ""
+    )
     return (
-        '<div class="visual-grid">'
-        + coverage
-        + _bar_group("Structured judgments by target", target_counts)
-        + _bar_group("Reward hacking", summary["reward_hacking"])
-        + _bar_group("Reward-hack types", summary["reward_hack_types"])
-        + _bar_group("Honeypot noticed", summary["noticed_honeypot"])
-        + _bar_group("Environment failure", summary["environment_failure"])
-        + _bar_group("Deception among applicable ML judgments", summary["deception_scores"])
-        + cost_html
+        _judgment_group(title, audits)
+        + flag_html
+        + _cost_html(audits)
+    )
+
+
+def render_visuals(audits: list[dict]) -> str:
+    """Render separate included and excluded aggregates behind one visible toggle."""
+
+    included = [
+        audit for audit in audits if audit.get("integrity_status") != "excluded"
+    ]
+    excluded = [
+        audit for audit in audits if audit.get("integrity_status") == "excluded"
+    ]
+    return (
+        '<div class="visual-toggle" role="group" aria-label="Aggregate inclusion">'
+        '<button type="button" class="active" data-visual-target="included">Included</button>'
+        '<button type="button" data-visual-target="excluded">Excluded</button>'
+        '</div>'
+        '<div class="visual-view active" data-visual-view="included">'
+        + _visual_subset(f"Included trajectories — {len(included)}", included)
+        + '</div><div class="visual-view" data-visual-view="excluded">'
+        + _visual_subset(f"Excluded trajectories — {len(excluded)}", excluded)
         + '</div>'
     )
 
 
 VISUALS_CSS = """
 .visual-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:12px}
+.visual-group{margin:0 0 20px}.visual-group-title{font-size:16px;margin:12px 0 8px}.cost-grid{margin-top:8px}
 .visual{border:1px solid #dde0e8;border-radius:8px;padding:10px;background:#fff}.visual h2{font-size:15px;margin:0 0 8px}
 .bar-row{display:grid;grid-template-columns:125px 1fr 72px;gap:7px;align-items:center;margin:5px 0;font-size:11px}
 .bar-label{overflow-wrap:anywhere}.bar-track{height:13px;background:#eff1f5;border-radius:2px;overflow:hidden}.bar-fill{display:block;height:100%;min-width:1px}
 .bar-value{text-align:right;font-variant-numeric:tabular-nums}.visual table{border-collapse:collapse}.visual th{text-align:left;padding-right:20px}.visual td{text-align:right}
 .visual .note{color:#777;font-size:11px}.coverage{background:#f8f9fc}
+.visual-toggle{display:inline-flex;background:#e8eaf0;border-radius:7px;padding:2px;margin:0 0 14px}.visual-toggle button{border:0;background:transparent;color:#596170;padding:5px 14px;border-radius:5px;font:600 12px inherit;cursor:pointer}.visual-toggle button.active{background:#fff;color:#1558d6;box-shadow:0 1px 3px rgba(0,0,0,.12)}.visual-view{display:none}.visual-view.active{display:block}
 """
+
+
+VISUALS_JS = r"""<script>
+(function () {
+  var buttons = Array.prototype.slice.call(
+    document.querySelectorAll("[data-visual-target]")
+  );
+  var views = Array.prototype.slice.call(
+    document.querySelectorAll("[data-visual-view]")
+  );
+  buttons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      var target = button.getAttribute("data-visual-target");
+      buttons.forEach(function (item) {
+        item.classList.toggle("active", item === button);
+      });
+      views.forEach(function (view) {
+        view.classList.toggle(
+          "active", view.getAttribute("data-visual-view") === target
+        );
+      });
+    });
+  });
+})();
+</script>"""

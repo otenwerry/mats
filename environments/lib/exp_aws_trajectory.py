@@ -1585,6 +1585,7 @@ def import_campaign_results(state: dict, data_root: Path, clients: dict) -> Path
         remote_cells = staging / "remote_cells"
         remote_cells.mkdir()
         task_compute: dict[str, dict] = {}
+        integrity_records: list[dict] = []
         for cell in completed:
             terminal = cell.get("terminal") or {}
             archive_path = remote_cells / f"{cell['cell_id']}.tar.gz"
@@ -1602,6 +1603,21 @@ def import_campaign_results(state: dict, data_root: Path, clients: dict) -> Path
             if not run_root.is_dir():
                 raise AwsTrajectoryError(f"result has no run directory: {cell['cell_id']}")
             for source in run_root.iterdir():
+                if source.name == "pipeline_integrity.json" and source.is_file():
+                    try:
+                        integrity_payload = json.loads(source.read_text())
+                    except json.JSONDecodeError as ex:
+                        raise AwsTrajectoryError(
+                            f"invalid pipeline integrity sidecar: {cell['cell_id']}: {ex}"
+                        ) from ex
+                    records = integrity_payload.get("records")
+                    if not isinstance(records, list):
+                        raise AwsTrajectoryError(
+                            f"pipeline integrity sidecar has no records: {cell['cell_id']}"
+                        )
+                    integrity_records.extend(
+                        record for record in records if isinstance(record, dict)
+                    )
                 if source.suffix == ".eval":
                     target = staging / source.name
                 elif source.name == "real_artifacts":
@@ -1654,6 +1670,13 @@ def import_campaign_results(state: dict, data_root: Path, clients: dict) -> Path
         (staging / "remote_campaign.json").write_text(
             json.dumps(sidecar_state, indent=2, sort_keys=True) + "\n"
         )
+        if integrity_records:
+            (staging / "pipeline_integrity.json").write_text(
+                json.dumps({
+                    "schema_version": "environment-pipeline-integrity-v1",
+                    "records": integrity_records,
+                }, indent=2, sort_keys=True) + "\n"
+            )
         os.replace(staging, destination)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

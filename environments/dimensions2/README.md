@@ -1,7 +1,7 @@
 # Superseded structured-judge prototype
 
 This was the first candidate replacement for `dimensions/`. Nothing in the experiment
-or viewer reads it. The completed typed system lives in `judge_dimensions/` and
+or viewer reads it. The completed typed system lives in `judge_instructions/` and
 `lib/environment_judge/`; this directory is retained as design history.
 
 The candidate keeps only four concepts:

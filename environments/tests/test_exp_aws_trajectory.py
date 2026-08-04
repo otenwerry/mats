@@ -344,16 +344,33 @@ class ResultIntegrityTests(unittest.TestCase):
             root = Path(tmp)
             eval_file = root / "task.eval"
             eval_file.write_bytes(b"eval bytes")
-            manifest = {"files": [{
-                "path": "payload/run/task.eval",
-                "sha256": hashlib.sha256(b"eval bytes").hexdigest(),
-            }]}
+            integrity_file = root / "pipeline_integrity.json"
+            integrity_file.write_text(json.dumps({
+                "schema_version": "environment-pipeline-integrity-v1",
+                "records": [{
+                    "task": "real_audit_task_cell", "sample": "seed", "epoch": 1,
+                    "status": "included", "issues": [],
+                }],
+            }))
+            manifest = {"files": [
+                {
+                    "path": "payload/run/task.eval",
+                    "sha256": hashlib.sha256(b"eval bytes").hexdigest(),
+                },
+                {
+                    "path": "payload/run/pipeline_integrity.json",
+                    "sha256": hashlib.sha256(integrity_file.read_bytes()).hexdigest(),
+                },
+            ]}
             manifest_file = root / "manifest.json"
             manifest_file.write_text(json.dumps(manifest))
             archive = root / "remote.tar.gz"
             with tarfile.open(archive, "w:gz") as output:
                 output.add(manifest_file, arcname="manifest.json")
                 output.add(eval_file, arcname="payload/run/task.eval")
+                output.add(
+                    integrity_file, arcname="payload/run/pipeline_integrity.json"
+                )
             archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
             cell = {
                 "status": "completed", "cell_id": "cell", "campaign_id": "campaign",
@@ -385,6 +402,9 @@ class ResultIntegrityTests(unittest.TestCase):
                 archive.read_bytes(),
             )
             sidecar = json.loads((destination / "remote_campaign.json").read_text())
+            integrity = json.loads(
+                (destination / "pipeline_integrity.json").read_text()
+            )
             compute = sidecar["task_compute"]["real_audit_task_cell"]
             self.assertAlmostEqual(compute["estimated_vm_cost_usd"], 0.4)
             self.assertTrue(compute["s3_cost_excluded"])
@@ -393,6 +413,7 @@ class ResultIntegrityTests(unittest.TestCase):
             self.assertTrue(compute["internet_data_transfer_cost_excluded"])
             self.assertTrue(compute["shared_runtime_cost_excluded"])
             self.assertEqual(compute["root_volume_gb"], 16)
+            self.assertEqual(integrity["records"][0]["status"], "included")
             self.assertFalse(any(path.name.startswith(".campaign.")
                                  for path in destination.parent.iterdir()))
 

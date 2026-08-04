@@ -1,23 +1,36 @@
-"""The old Petri-shaped candidate replay endpoint must fail before spending money."""
+"""The Judge Tests endpoint must target only the saved viewer cohort."""
 
 from __future__ import annotations
 
-import pathlib
-import subprocess
+import runpy
 import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
-ENVIRONMENTS = pathlib.Path(__file__).resolve().parents[1]
+ENVIRONMENTS = Path(__file__).resolve().parents[1]
 
 
-def test_retired_candidate_replay_fails_before_importing_a_model() -> None:
-    result = subprocess.run(
-        [sys.executable, str(ENVIRONMENTS / "exp_judge_tests.py")],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def test_judge_tests_defaults_to_fixed_cohort_without_running_it() -> None:
+    main = Mock()
+    with patch.object(sys, "argv", ["exp_judge_tests.py", "--dry-run"]), patch.dict(
+        sys.modules, {"exp_rejudge": SimpleNamespace(main=main)}
+    ):
+        runpy.run_path(str(ENVIRONMENTS / "exp_judge_tests.py"), run_name="__main__")
+        arguments = list(sys.argv)
 
-    assert result.returncode != 0
-    assert "temporarily retired" in (result.stdout + result.stderr)
+    assert "--source-runs=judge-tests" in arguments
+    main.assert_called_once_with()
 
+
+def test_explicit_source_selection_is_preserved() -> None:
+    main = Mock()
+    with patch.object(
+        sys, "argv", ["exp_judge_tests.py", "--source-runs=one", "--dry-run"]
+    ), patch.dict(sys.modules, {"exp_rejudge": SimpleNamespace(main=main)}):
+        runpy.run_path(str(ENVIRONMENTS / "exp_judge_tests.py"), run_name="__main__")
+        arguments = list(sys.argv)
+
+    assert arguments.count("--source-runs=one") == 1
+    assert "--source-runs=judge-tests" not in arguments
