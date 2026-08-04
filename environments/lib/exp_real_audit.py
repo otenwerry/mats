@@ -763,12 +763,13 @@ def build_real_tasks(
             target_slug,
             reasoning_on=reasoning,
             effort=REASONING_EFFORT,
+            # OpenAI rejects prompt_cache_key values longer than 64 chars.
             prompt_cache_key="environments-target-" + stable_key(
                 "target-v1",
                 target_slug,
                 reasoning,
                 unit_sp,
-            ),
+            )[:40],
         )
         target_role = target_build.model
         reasoning_enabled = target_build.reasoning_enabled

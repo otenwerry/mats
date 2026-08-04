@@ -12,7 +12,10 @@
 the real-environment pipeline. It installs the same kind of fresh-response warm-first
 barrier, ignores provider-invisible top-level message IDs when grouping, assigns
 opening-derived OpenRouter session routing, and writes `prompt_cache_report.json` next
-to `runtime_accounting.json`. Direct OpenAI targets also receive a stable cache key.
+to `runtime_accounting.json`. Direct OpenAI targets also receive a stable cache key;
+OpenAI rejects `prompt_cache_key` values longer than 64 chars, so the sha256 digest is
+truncated to 40 chars (`exp_real_audit.py`; full 84-char keys 400-ed every gpt-5.5
+request on 2026-08-04).
 Only positive provider cache-read tokens count as verified. The environment does not
 import this module from Petri, and Inspect response replay remains disabled.
 
