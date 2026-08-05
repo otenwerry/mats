@@ -175,9 +175,9 @@ uv run viewer.py
         cost per trajectory by model stacked by component, spend by role, per-trajectory
         cost spread; roles display as Target, First judge (the stored gate role), Second
         judge (the stored judge role), and VM estimate; missing-cost and AWS-exclusion
-        caveats stay visible); an Included/Excluded toggle keeps integrity-failed
-        aggregates separate;
-        excluded aggregates bucket by judgment, ignoring the exclusion itself
+        caveats stay visible); a Filtered/All-trajectories toggle: Filtered removes
+        integrity-excluded runs, All trajectories pools every run and buckets
+        integrity-excluded ones by their judgment
     retrospective rows link to their original trajectory
     rejudge cost includes only the new judge usage; copied source VM cost is not counted again
     recorded cost combines stored LLM cost and AWS VM estimates; missing prices and

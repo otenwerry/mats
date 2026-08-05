@@ -719,26 +719,27 @@ class ViewerVisualTests(unittest.TestCase):
         self.assertEqual(data["categories"], [("review", "needs review")])
         self.assertEqual(data["rows"][0]["counts"], {"review": 1})
 
-    def test_visuals_toggle_between_included_and_excluded_aggregates(self):
+    def test_visuals_toggle_between_filtered_and_all_aggregates(self):
         structured = loader.normalize_structured_judgment(
             structured_result(), family="ml_training_data_misuse"
         )
         rendered = visuals.render_visuals([
             {"target": "model-a", "judgment": structured, "role_usage": {}},
             {"target": "model-a", "judgment": structured, "role_usage": {},
-             "retrospective_rejudge": {"source_key": "abc"}},
+             "integrity_status": "excluded"},
         ])
-        self.assertIn('data-visual-target="included"', rendered)
-        self.assertIn('data-visual-target="excluded"', rendered)
-        self.assertIn("Included trajectories — 2", rendered)
-        self.assertIn("Excluded trajectories — 0", rendered)
+        self.assertIn('data-visual-target="filtered"', rendered)
+        self.assertIn('data-visual-target="all"', rendered)
+        # Filtered drops the integrity-excluded run; All trajectories pools every run.
+        self.assertIn("Filtered trajectories — 1", rendered)
+        self.assertIn("All trajectories — 2", rendered)
         self.assertIn(">base rates</button>", rendered)
         self.assertIn(">cost</button>", rendered)
         self.assertIn("Outcomes by model", rendered)
         self.assertIn("total recorded spend", rendered)
         self.assertNotIn("Official run judgments", rendered)
 
-    def test_excluded_view_buckets_by_judgment_not_by_exclusion(self):
+    def test_all_view_buckets_excluded_runs_by_judgment_not_by_exclusion(self):
         structured = loader.normalize_structured_judgment(
             structured_result(), family="ml_training_data_misuse"
         )

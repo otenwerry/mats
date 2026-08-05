@@ -341,8 +341,10 @@ linked to the source trajectory ID. Main pages contain only rows whose stored
 `judge_method_sha256` equals the method built from today's instructions, rubrics, schema,
 and Scout interface. All other rows render in Past. (A `PINNED_METHOD_SHAS` escape hatch
 briefly existed on 2026-08-04 to surface older-method rows on main pages; Owen had it
-removed the same day — don't reintroduce it without asking.) Included and excluded aggregate
-visuals are separate sides of one toggle. Rejudge cost includes its new judge usage but
+removed the same day — don't reintroduce it without asking.) The visuals toggle is
+Filtered vs All trajectories (renamed from Included/Excluded on 2026-08-04, Owen):
+Filtered removes integrity-excluded runs; All trajectories pools every run rather than
+showing the excluded ones alone. Rejudge cost includes its new judge usage but
 never counts the source trajectory's copied VM estimate a second time.
 
 Since 2026-08-04 the visuals are matplotlib inline-SVG figures ported from
@@ -353,12 +355,14 @@ buckets = the index categories via `trajectory_category`, exported from
 `env_viewer_visuals.py` and shared with viewer.py's sections) and `cost` (total-spend
 headline box, all-in mean cost per trajectory by model stacked by target/gate/judge/VM
 components, spend by role, per-trajectory box+strip spread; missing-cost and
-AWS-exclusion caveats as visible `costgap` lines). Cost-role display labels since
+AWS-exclusion caveats as visible `costgap` lines). The All-trajectories side buckets
+integrity-excluded runs by their judgment (`respect_exclusion=False`), so a
+provider-failed run with a stored hack judgment shows as a hack there, not as a grey
+"excluded" bar. Cost-role display labels since
 2026-08-04 (Owen): gate renders as "First judge" (the stage-one call at the first
 submission) and judge as "Second judge" (the fresh final call); stored role keys are
 unchanged. NB: in petri "second judge" colloquially means the hack-turn annotator —
-different thing, doesn't exist here. The excluded side buckets by judgment
-with `respect_exclusion=False`. The old coverage/labels/deception/flags bar sections were
+different thing, doesn't exist here. The old coverage/labels/deception/flags bar sections were
 dropped on Owen's "two tabs for now" instruction. `target_label` (catalog pretty names)
 also lives in `env_viewer_visuals.py` now and viewer.py imports it.
 

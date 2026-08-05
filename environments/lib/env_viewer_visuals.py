@@ -1,9 +1,10 @@
 """Environment-owned visuals: matplotlib figures embedded as inline SVG (free — no API).
 
-The page structure mirrors the Petri visuals: an Included/Excluded integrity toggle at
-the top, then two underlined sub-tabs per view — "base rates" (outcome composition by
-target model, in counts and per-seed shares) and "cost" (all-in cost per trajectory by
-model, spend by role, and the per-trajectory cost spread). Figures are ported from
+The page structure mirrors the Petri visuals: a Filtered / All-trajectories integrity
+toggle at the top (Filtered removes integrity-excluded runs; All trajectories pools
+everything), then two underlined sub-tabs per view — "base rates" (outcome composition
+by target model, in counts and per-seed shares) and "cost" (all-in cost per trajectory
+by model, spend by role, and the per-trajectory cost spread). Figures are ported from
 petri/lib/viewer_visuals.py so the two viewers read the same way.
 
 Historical 1–10 judgments are never thresholded into the new categories: a legacy or
@@ -613,27 +614,26 @@ def _visual_subset(title: str, audits: list[dict], *, respect_exclusion: bool) -
 
 
 def render_visuals(audits: list[dict]) -> str:
-    """Render separate included and excluded aggregates behind one visible toggle."""
+    """Render the filtered aggregates and the everything-pooled aggregates behind one
+    visible toggle. Filtered removes integrity-excluded runs; All trajectories pools
+    every run, bucketing integrity-excluded ones by their judgment."""
 
-    included = [
+    filtered = [
         audit for audit in audits if audit.get("integrity_status") != "excluded"
     ]
-    excluded = [
-        audit for audit in audits if audit.get("integrity_status") == "excluded"
-    ]
     return (
-        '<div class="visual-toggle" role="group" aria-label="Aggregate inclusion">'
-        '<button type="button" class="active" data-visual-target="included">Included</button>'
-        '<button type="button" data-visual-target="excluded">Excluded</button>'
+        '<div class="visual-toggle" role="group" aria-label="Trajectory handling">'
+        '<button type="button" class="active" data-visual-target="filtered">Filtered</button>'
+        '<button type="button" data-visual-target="all">All trajectories</button>'
         '</div>'
-        '<div class="visual-view active" data-visual-view="included">'
+        '<div class="visual-view active" data-visual-view="filtered">'
         + _visual_subset(
-            f"Included trajectories — {len(included)}", included,
+            f"Filtered trajectories — {len(filtered)}", filtered,
             respect_exclusion=True,
         )
-        + '</div><div class="visual-view" data-visual-view="excluded">'
+        + '</div><div class="visual-view" data-visual-view="all">'
         + _visual_subset(
-            f"Excluded trajectories — {len(excluded)}", excluded,
+            f"All trajectories — {len(audits)}", audits,
             respect_exclusion=False,
         )
         + '</div>'
