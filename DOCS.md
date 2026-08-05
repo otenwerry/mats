@@ -172,9 +172,11 @@ uv run viewer.py
     visuals are matplotlib SVG figures over current structured judgments in two sub-tabs
         per view: base rates (outcome composition by target model in counts, plus
         seed-by-model percentage small multiples) and cost (total-spend headline, all-in
-        cost per trajectory by model stacked by target/gate/judge/VM components, spend by
-        role, per-trajectory cost spread; missing-cost and AWS-exclusion caveats stay
-        visible); an Included/Excluded toggle keeps integrity-failed aggregates separate;
+        cost per trajectory by model stacked by component, spend by role, per-trajectory
+        cost spread; roles display as Target, First judge (the stored gate role), Second
+        judge (the stored judge role), and VM estimate; missing-cost and AWS-exclusion
+        caveats stay visible); an Included/Excluded toggle keeps integrity-failed
+        aggregates separate;
         excluded aggregates bucket by judgment, ignoring the exclusion itself
     retrospective rows link to their original trajectory
     rejudge cost includes only the new judge usage; copied source VM cost is not counted again

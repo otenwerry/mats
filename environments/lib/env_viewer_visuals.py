@@ -311,7 +311,9 @@ def _base_rates_section(audits: list[dict], *, respect_exclusion: bool = True) -
 # cost — what each trajectory costs and where the money goes
 # --------------------------------------------------------------------------- #
 ROLE_ORDER = ("target", "gate", "judge")
-ROLE_LABEL = {"target": "Target", "gate": "Gate", "judge": "Judge"}
+# Display names only; stored role keys stay gate/judge. The gate is the stage-one
+# judge call at the first submission, the judge role is the fresh final call.
+ROLE_LABEL = {"target": "Target", "gate": "First judge", "judge": "Second judge"}
 # the Petri role palette (orange target, green judge); gate takes the blue slot
 ROLE_COLOR = {"target": "#DD8452", "gate": "#4C72B0", "judge": "#55A868"}
 VM_KEY = "vm"

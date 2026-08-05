@@ -353,7 +353,11 @@ buckets = the index categories via `trajectory_category`, exported from
 `env_viewer_visuals.py` and shared with viewer.py's sections) and `cost` (total-spend
 headline box, all-in mean cost per trajectory by model stacked by target/gate/judge/VM
 components, spend by role, per-trajectory box+strip spread; missing-cost and
-AWS-exclusion caveats as visible `costgap` lines). The excluded side buckets by judgment
+AWS-exclusion caveats as visible `costgap` lines). Cost-role display labels since
+2026-08-04 (Owen): gate renders as "First judge" (the stage-one call at the first
+submission) and judge as "Second judge" (the fresh final call); stored role keys are
+unchanged. NB: in petri "second judge" colloquially means the hack-turn annotator —
+different thing, doesn't exist here. The excluded side buckets by judgment
 with `respect_exclusion=False`. The old coverage/labels/deception/flags bar sections were
 dropped on Owen's "two tabs for now" instruction. `target_label` (catalog pretty names)
 also lives in `env_viewer_visuals.py` now and viewer.py imports it.
