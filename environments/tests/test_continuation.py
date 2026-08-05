@@ -518,6 +518,57 @@ def test_continuations_page_shows_base_rate_and_treatments() -> None:
     assert "No continuation runs yet" in page_empty
 
 
+# --------------------------------------------------------------------------- #
+# NQ prefix builder (free parts: selection determinism + payload assembly)
+# --------------------------------------------------------------------------- #
+def test_nq_question_selection_is_deterministic_without_repeats() -> None:
+    sys.path.insert(0, str(ENVIRONMENTS))
+    import exp_nq_prefix as nq
+
+    questions = [f"question {index}" for index in range(1000)]
+    first = nq.select_questions(questions, 1234, 50)
+    second = nq.select_questions(questions, 1234, 50)
+    other_seed = nq.select_questions(questions, 99, 50)
+    assert first == second
+    assert first != other_seed
+    indices = [index for index, _question in first]
+    assert len(indices) == len(set(indices)) == 50
+
+
+def test_nq_payload_assembles_a_valid_prefix() -> None:
+    sys.path.insert(0, str(ENVIRONMENTS))
+    import exp_nq_prefix as nq
+
+    name = nq.default_name("qwen2.5-72b", 30000, 1234)
+    cfg = {
+        "model": "qwen3-32b", "reasoning": True, "seed": 1234,
+        "tokens": 1000, "name": name, "max_questions": 5,
+    }
+    reasoning_prompt = continuation.expected_system_prompt(True)
+    result = {
+        "messages": [
+            ChatMessageSystem(content=reasoning_prompt),
+            ChatMessageUser(content="who wrote hamlet"),
+            ChatMessageAssistant(content="William Shakespeare."),
+        ],
+        "asked": [{"dataset_index": 7, "question": "who wrote hamlet"}],
+        "context_tokens": 1200,
+        "measurement": "provider_usage",
+        "reached_target_tokens": True,
+        "usage": {"input": 900, "output": 300, "cache_read": 0,
+                  "cache_write": 0, "total_cost": 0.001},
+        "cost": {"cost_usd": 0.001, "exact": True,
+                 "source": "billed_or_direct_list"},
+    }
+    payload = nq.build_payload(cfg, result)
+    assert payload["name"] == name  # dots in the model name became hyphens
+    assert payload["source"]["kind"] == "external"
+    assert payload["source"]["rng_seed"] == 1234
+    spec = continuation.build_prefix_spec(payload)
+    assert spec.boundary_index == 3
+    assert not spec.system_prompt_inserted
+
+
 def test_live_user_turn_count_ignores_the_prefix() -> None:
     viewer = viewer_module()
     record = record_for(prefix_messages(), 3)

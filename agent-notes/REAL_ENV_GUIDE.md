@@ -161,6 +161,15 @@ base rate is the ordinary original trajectories of the same (seed, target).
   in `lib/env_viewer_continuations.py`.
 - `exp_rejudge.py` does NOT discover continuation dirs (`real-v*` only) —
   intentionally deferred.
+- `exp_nq_prefix.py` (2026-08-04, Owen's ask): builds an external prefix by running
+  one growing Q&A conversation over randomly selected `nq_open` questions (HF
+  `google-research-datasets/nq_open`, train; NOT full Natural Questions — too big;
+  choice flagged to Owen). `--seed` (default 1234) fixes question choice/order only;
+  reruns of one command give same questions, fresh answers, new content-addressed
+  file. Stops at provider-reported context >= `--tokens` (overshoot kept). Validates
+  through `build_prefix_spec` before writing; stores question indices, measured
+  tokens, usage, and cost in the payload source. Added the `datasets` dependency;
+  HF cache lives in `mats-local/environments/hf_cache/`.
 - Free checks: `tests/test_continuation.py`; `--dry-run` validates the whole plan.
 
 ## Structured judge
