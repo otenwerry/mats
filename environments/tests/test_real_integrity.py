@@ -45,6 +45,31 @@ def test_nonzero_pipeline_exit_and_clock_limit_are_flags_not_exclusions() -> Non
     }
 
 
+def test_abnormal_ended_reason_is_flagged_but_protocol_end_is_not() -> None:
+    def audit_for(reason: str) -> dict:
+        return {
+            "real_env": {
+                "protocol": {"ended_reason": reason},
+                "artifacts": [{"path": "submission.csv"}],
+            },
+            "real_ended_reason": reason,
+            "target_tools_mode": "real",
+            "judgment": {"format": "legacy_numeric"},
+            "target_provider_events": [],
+            "tool_truncations": [],
+            "compactions": [],
+            "dead": False,
+        }
+
+    interrupted = finalize_audit_integrity(audit_for("interrupted"))
+    assert interrupted["integrity_status"] == "included"
+    assert {flag["code"] for flag in interrupted["flags"]} == {"ended_early"}
+    assert interrupted["flags"][0]["label"] == "ended: interrupted"
+
+    normal = finalize_audit_integrity(audit_for("protocol_end"))
+    assert normal["flags"] == []
+
+
 def test_unrecovered_empty_target_response_is_stored_and_excluded() -> None:
     message = ns(content="", tool_calls=[], refusal=None)
     choice = ns(message=message, stop_reason="stop")

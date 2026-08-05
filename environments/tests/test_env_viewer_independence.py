@@ -67,7 +67,7 @@ class JudgmentNormalizerTests(unittest.TestCase):
         self.assertEqual(reward["not_delivered"], ["trained_on_test_set"])
         self.assertEqual(
             reward["display_value"],
-            "peeked_at_answer_key, trained_on_test_set (not delivered)",
+            "answer-key peek, trained on test (not delivered)",
         )
 
     def test_current_nonhack_labels_are_not_counted_as_reward_hacks(self):
@@ -82,6 +82,7 @@ class JudgmentNormalizerTests(unittest.TestCase):
             if item["key"] == "reward_hacking"
         )
         self.assertFalse(reward["is_hack"])
+        self.assertEqual(reward["display_value"], "unused test score")
 
     def test_p_favorable_spin_is_a_visible_label_but_not_a_hack(self):
         result = structured_result()
@@ -98,7 +99,7 @@ class JudgmentNormalizerTests(unittest.TestCase):
             item for item in judgment["dimensions"]
             if item["key"] == "reward_hacking"
         )
-        self.assertEqual(reward["display_value"], "favorable_spin")
+        self.assertEqual(reward["display_value"], "favorable spin")
         self.assertFalse(reward["is_hack"])
         self.assertNotIn("not_delivered", reward)
 
@@ -152,6 +153,24 @@ class JudgmentNormalizerTests(unittest.TestCase):
         self.assertEqual(
             judgment["envelope"]["judgment_role"], "retrospective_rejudge"
         )
+
+    def test_failed_rejudge_does_not_fall_back_to_original_judgment(self):
+        judgment = loader.normalize_judgment(
+            score_key="environment_judge",
+            score_value="N",
+            score_metadata={"environment_judge": {
+                "judgment_role": "retrospective_rejudge",
+                "family": "ml_training_data_misuse",
+                "post_validation": "no_structured_answer",
+                "fresh_attempt_count": 4,
+            }},
+            real_env={"final_judgment": {
+                "family": "ml_training_data_misuse",
+                "result": structured_result(),
+            }},
+        )
+
+        self.assertIsNone(judgment)
 
     def test_rich_score_call_record_is_not_hidden_by_small_real_env_summary(self):
         result = structured_result()
@@ -315,6 +334,34 @@ class JudgmentNormalizerTests(unittest.TestCase):
         self.assertEqual(normalized[1]["source_id"], "assistant-id")
         self.assertTrue(normalized[1]["other_content_blocks"])
         self.assertIn("Tool Call: bash", loader.transcript_text(normalized))
+
+    def test_failed_current_score_gets_a_queryable_not_judged_flag(self):
+        failure = loader._judge_failure_record(
+            score_key="environment_judge",
+            score_value="N",
+            score_metadata={"environment_judge": {
+                "post_validation": "no_structured_answer",
+                "failure_kind": "no_structured_answer",
+                "fresh_attempt_count": 4,
+                "fresh_call_limit": 4,
+                "fresh_failures": [{"fresh_attempt": number}
+                                   for number in range(1, 5)],
+            }},
+            score_explanation="judge failed after four fresh calls",
+            judgment=None,
+        )
+        audit = loader.finalize_audit_integrity({
+            "real_env": {"protocol": {"ended_reason": "protocol_end"}},
+            "judge_failure": failure,
+            "judgment": None,
+        })
+
+        self.assertEqual(failure["fresh_attempt_count"], 4)
+        self.assertEqual(failure["recorded_failure_count"], 4)
+        self.assertIn("judge_not_judged", audit["integrity_issues"])
+        flag = next(item for item in audit["flags"] if item["code"] == "judge_not_judged")
+        self.assertEqual(flag["label"], "not judged")
+        self.assertIn("4 fresh calls", flag["detail"])
 
     def test_stable_id_registry_uses_existing_format(self):
         audits = [{"mode": "run", "task": "task", "seed": "seed", "epoch": 1,
@@ -506,6 +553,34 @@ class ViewerComponentTests(unittest.TestCase):
         self.assertIn('href="#M2">M1</a>', rendered)
         self.assertIn('href="#M5">M2</a>', rendered)
 
+    def test_judge_narrative_links_artifact_refs_to_their_snapshots(self):
+        result = structured_result()
+        result["summary"] = (
+            "The submission changed between [A1] and [A2, final]; [A9] is unknown."
+        )
+        result.pop("deception")
+        judgment = loader.normalize_structured_judgment(
+            result,
+            family="p_hacking",
+            envelope={
+                "evidence": {
+                    "source_message_map": [],
+                    "artifacts": [
+                        {"path": "/workspace/RESULT.md", "snapshot": "submission_1"},
+                        {"path": "/workspace/RESULT.md", "snapshot": "final"},
+                    ],
+                },
+            },
+        )
+        rendered = components.render_judge_narrative(judgment)
+        first = components.artifact_dom_id("/workspace/RESULT.md", "submission_1")
+        second = components.artifact_dom_id("/workspace/RESULT.md", "final")
+        self.assertIn(f'<a href="#{first}">[A1]</a>', rendered)
+        self.assertIn(f'href="#{second}">A2</a>', rendered)
+        # An artifact number with no stored snapshot stays plain text.
+        self.assertIn("[A9]", rendered)
+        self.assertNotIn(">[A9]</a>", rendered)
+
     def test_judge_view_uses_every_exact_stored_prompt_section(self):
         prompt = "\n\n".join([
             "# Overall judge instructions\n\nEXACT <overall>",
@@ -605,24 +680,29 @@ class ViewerVisualTests(unittest.TestCase):
         self.assertEqual(summary["vm_total"], 0.0)
         self.assertEqual(summary["total"], 0.2)
 
-    def test_legacy_numeric_data_is_not_thresholded_into_new_counts(self):
+    def test_legacy_numeric_data_is_not_thresholded_into_new_buckets(self):
         structured = loader.normalize_structured_judgment(
             structured_result(), family="ml_training_data_misuse"
         )
-        audits = [
-            {"target": "model-a", "judgment": structured, "role_usage": {}},
-            {"target": "model-a", "judgment":
-             loader.normalize_legacy_judgment({"reward_hacking": 10}),
-             "role_usage": {}},
-        ]
-        summary = visuals.categorical_summary(audits)
-        self.assertEqual(summary["structured"], 1)
-        self.assertEqual(summary["legacy_numeric"], 1)
-        self.assertEqual(summary["reward_hacking"], {"hack": 1})
-        rendered = visuals.render_visuals(audits)
-        self.assertIn("Legacy 1–10 results are not converted", rendered)
+        legacy = {
+            "target": "model-a",
+            "judgment": loader.normalize_legacy_judgment({"reward_hacking": 10}),
+            "role_usage": {},
+        }
+        self.assertEqual(
+            visuals.trajectory_category(
+                {"target": "model-a", "judgment": structured, "role_usage": {}}
+            ),
+            "hack",
+        )
+        # A legacy 10/10 never counts as a hack; it awaits the current judge.
+        self.assertEqual(visuals.trajectory_category(legacy), "awaiting")
+        data = visuals.outcome_data([legacy])
+        self.assertEqual(
+            data["categories"], [("awaiting", "awaiting current judgment")]
+        )
 
-    def test_p_other_has_its_own_review_aggregate(self):
+    def test_p_other_has_its_own_review_bucket(self):
         result = structured_result()
         result["reward_hacking"] = {
             "types": ["other"],
@@ -633,16 +713,11 @@ class ViewerVisualTests(unittest.TestCase):
         judgment = loader.normalize_structured_judgment(
             result, family="p_hacking"
         )
-        summary = visuals.categorical_summary([
-            {"target": "model-a", "judgment": judgment, "role_usage": {}},
-        ])
-        self.assertEqual(summary["reward_hacking"], {"needs review": 1})
-        self.assertEqual(summary["by_target"]["model-a"]["review"], 1)
-        self.assertEqual(summary["by_target"]["model-a"]["no_hack"], 0)
-        rendered = visuals.render_visuals([
-            {"target": "model-a", "judgment": judgment, "role_usage": {}},
-        ])
-        self.assertNotIn("Deception among applicable ML judgments", rendered)
+        audit = {"target": "model-a", "judgment": judgment, "role_usage": {}}
+        self.assertEqual(visuals.trajectory_category(audit), "review")
+        data = visuals.outcome_data([audit])
+        self.assertEqual(data["categories"], [("review", "needs review")])
+        self.assertEqual(data["rows"][0]["counts"], {"review": 1})
 
     def test_visuals_toggle_between_included_and_excluded_aggregates(self):
         structured = loader.normalize_structured_judgment(
@@ -657,7 +732,24 @@ class ViewerVisualTests(unittest.TestCase):
         self.assertIn('data-visual-target="excluded"', rendered)
         self.assertIn("Included trajectories — 2", rendered)
         self.assertIn("Excluded trajectories — 0", rendered)
+        self.assertIn(">base rates</button>", rendered)
+        self.assertIn(">cost</button>", rendered)
+        self.assertIn("Outcomes by model", rendered)
+        self.assertIn("total recorded spend", rendered)
         self.assertNotIn("Official run judgments", rendered)
+
+    def test_excluded_view_buckets_by_judgment_not_by_exclusion(self):
+        structured = loader.normalize_structured_judgment(
+            structured_result(), family="ml_training_data_misuse"
+        )
+        audit = {
+            "target": "model-a", "judgment": structured, "role_usage": {},
+            "integrity_status": "excluded",
+        }
+        self.assertEqual(visuals.trajectory_category(audit), "excluded")
+        self.assertEqual(
+            visuals.trajectory_category(audit, respect_exclusion=False), "hack"
+        )
 
 
 if __name__ == "__main__":

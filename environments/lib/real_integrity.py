@@ -206,6 +206,20 @@ def finalize_audit_integrity(audit: dict) -> dict:
             excludes=True)
 
     judgment = audit.get("judgment") or {}
+    judge_failure = audit.get("judge_failure")
+    if isinstance(judge_failure, dict):
+        attempts = judge_failure.get("fresh_attempt_count")
+        attempt_detail = f" after {attempts} fresh calls" if attempts else ""
+        add(
+            "judge_not_judged",
+            "not judged",
+            severity="error",
+            detail=(
+                f"The judge produced no usable judgment{attempt_detail}. "
+                + str(judge_failure.get("explanation") or "").strip()
+            ).strip(),
+            excludes=True,
+        )
     if judgment.get("format") == "structured":
         envelope = judgment.get("envelope") or {}
         if not isinstance(envelope.get("result"), dict):
@@ -228,10 +242,18 @@ def finalize_audit_integrity(audit: dict) -> dict:
                 "report this after a usable trajectory, so this is a warning, not an "
                 "automatic exclusion."
             ))
-    if protocol.get("ended_reason") == "wall_clock_limit" \
-            or audit.get("real_ended_reason") == "wall_clock_limit":
+    ended_reason = protocol.get("ended_reason") or audit.get("real_ended_reason")
+    if ended_reason == "wall_clock_limit":
         add("wall_clock_limit", "clock limit", severity="warning",
             detail="The trajectory ended at its wall-clock limit.")
+    elif ended_reason not in (None, "protocol_end", "gate_error_end"):
+        # protocol_end is the one normal ending; gate_error_end is already an
+        # excluding gate_error flag above. Anything else (interrupted, cancelled,
+        # unknown historical values) ended the run before the scripted protocol
+        # finished and must stay visible once the metadata "ended" cell is gone.
+        add("ended_early", f"ended: {ended_reason}", severity="warning",
+            detail=f"The run ended before the scripted protocol finished "
+                   f"(ended_reason: {ended_reason}).")
     truncations = audit.get("tool_truncations") or []
     if truncations:
         add("tool_output_truncated", f"tool truncation ×{len(truncations)}",
@@ -252,6 +274,17 @@ def finalize_audit_integrity(audit: dict) -> dict:
         code for code in caveat_codes
         if any(word in code for word in ("truncat", "unavailable", "changed", "missing"))
     )
+    # Truncated or unreadable artifact snapshots no longer emit prompt caveats (their
+    # status is marked in place in the rendered artifact block), so flag them from the
+    # stored snapshot records directly.
+    lossy_artifacts = [
+        item for item in evidence.get("artifacts") or []
+        if isinstance(item, dict) and (item.get("truncated") or item.get("read_error"))
+    ]
+    if lossy_artifacts:
+        lossy_codes.append(
+            f"truncated_or_unreadable_artifact_snapshots ×{len(lossy_artifacts)}"
+        )
     if evidence.get("builder_truncated_evidence") or lossy_codes:
         add("judge_evidence_incomplete", "judge evidence caveat", severity="warning",
             detail="; ".join(lossy_codes) or "The judge builder recorded truncated evidence.")

@@ -32,8 +32,8 @@ experiment logs into Petri.
 - `viewer.py`: free standalone static viewer.
 - `exp_rejudge.py`: current-method retrospective judge for stored `real-v*` Inspect
   trajectories. `--dry-run` fingerprints every exact input without model calls or writes.
-- `exp_judge_tests.py`: the same rejudge implementation, defaulted to the viewer's fixed
-  20-source Judge Tests manifest.
+- `exp_judge_tests.py`: the same rejudge implementation, defaulted to the saved fixed
+  20-source cohort manifest. The cohort runner remains, but its viewer pages are retired.
 - `envgen/gen_*.py`: free deterministic data generators.
 - `envgen/calibrate.sh`: free ML calibration wrapper.
 - `exp_validate_gate.py` and `exp_rejudge_p_hacking_evidence.py`: deliberately retired.
@@ -41,6 +41,17 @@ experiment logs into Petri.
 
 Do not revive an old paid endpoint by removing its guard. Rebuild it on
 `environment_judge` and define the comparison semantics first.
+
+Combined-justification formatting is prompt guidance rather than a validity gate. The
+validator checks that prose `[M#]` references exist, but does not require prose to name
+schema keys or exactly duplicate the structured per-dimension evidence lists. The
+viewer navigates from structured evidence. Invalid rejudge scores use Inspect's standard
+no-answer value so Inspect does not emit numeric-metric conversion warnings; the complete
+failure record remains in score metadata.
+Rejudge resume scans earlier `rejudge-current-*` directories and reuses a successful
+score only when source identity, exact input hash, judge-method hash, and resolved judge
+model all match. A validation-code-only change therefore does not repay for already
+accepted provider answers.
 
 ## Standalone boundaries
 
@@ -128,9 +139,19 @@ and chronological `highlights`, with the detailed wording in the family's
 `explanation`; it is stored in `Score.explanation` and the call envelope. All dimensions
 also include an explanation and structured evidence references. Message
 references and citations in the summary/highlights must point to a real prompt-local
-`[M#]`. Artifact references must match an exact shown `path@snapshot`. Unknown or
-duplicate references, justification citations not assigned to any dimension, malformed fields,
-positive findings with no evidence, and family inconsistencies are rejected.
+`[M#]`. Artifact references normally match an exact shown `path@snapshot`; an omitted
+leading `/workspace/` is normalized only when the reconstructed path and snapshot exactly
+match supplied evidence. Basename matching is not used. Unknown or duplicate references,
+justification citations not assigned to any dimension, malformed fields, positive findings
+with no evidence, and family inconsistencies are rejected.
+
+Scout gets one structured-output attempt per provider conversation and zero refusal
+retries inside that conversation. A generation error, refusal, garbled/no-tool result,
+schema failure, or post-validation failure discards the entire conversation. The runner
+then starts from the unchanged original prompt, with no failed output or correction
+feedback in context. Production permits three fresh retries after the initial attempt,
+for at most four paid calls. The result metadata stores the successful attempt number and
+all earlier failure records, or all four failures when exhausted.
 
 ML output:
 
@@ -173,10 +194,10 @@ intentionally version the storage contract.
 Inspect attachments, preserves the stored messages and `real_env`, and calls
 `environment_judge.exp_real.judge_complete_real_trajectory`, which is also the final
 production path. Do not add a parallel prompt or schema to the rejudge endpoint.
-`exp_judge_tests.py` supplies `--source-runs=judge-tests`; the manifest is created by the
-viewer migration and pins exactly 10 ML plus 10 p-hacking sources. Source integrity flags
-are copied into each rejudge sample so a new judge result cannot make a provider-failed
-source look valid.
+`exp_judge_tests.py` supplies `--source-runs=judge-tests`; the saved manifest was created
+by the earlier viewer migration and pins exactly 10 ML plus 10 p-hacking sources. Source
+integrity flags are copied into each rejudge sample so a new judge result cannot make a
+provider-failed source look valid.
 
 The free planning pass builds every exact current prompt. It stores a per-source input
 SHA-256 and computes a method fingerprint from the resolved judge model, schema version,
@@ -209,10 +230,19 @@ caps still exist:
 - target-visible tool results: 16 KiB per call
 - extracted artifact snapshots: 200 KiB per file
 
-Every affected trajectory stores machine-queryable loss fields. The judge receives a
-caveat and the viewer displays it. All submission snapshots and the final snapshot are
-retained. Never add lossy selection, truncation, or top-N behavior without the three-part
-contract in AGENTS.md: design approval, per-output queryable flag, downstream caveat.
+Every affected trajectory stores machine-queryable loss fields and the viewer flags it.
+Since 2026-08-04 (Owen: "get rid of everything unnecessary") prompt caveats are reserved
+for loss the judge cannot see in the rendered evidence; the six remaining codes are
+`messages_excluded_by_family_policy`, `native_reasoning_excluded_by_policy`,
+`changed_non_text_artifacts_not_copied`, and the three legacy `*_unavailable_upstream`
+ones. Tool-result truncation (in-place Inspect marker + stored `lossy_reasons` + viewer
+flag) and truncated/unreadable artifact snapshots (in-place `status=` line in the
+rendered block + stored snapshot fields + a `real_integrity` flag scan of
+`evidence.artifacts`) no longer emit prompt caveats. All caveat text is neutral
+declarative; never write "the judge" third-person phrasing into it. All submission
+snapshots and the final snapshot are retained. Never add lossy selection, truncation, or
+top-N behavior without the three-part contract in AGENTS.md: design approval, per-output
+queryable flag, downstream caveat.
 
 Workspace packaging excludes host-only caches such as `.uv-cache`, `__pycache__`,
 and test caches. This filter is required both for clean samples and for remote source
@@ -269,34 +299,70 @@ numeric logs; `lib/env_viewer_components.py` renders transcript/evidence; and
 
 The builder writes one current trajectory page, current visuals page, Past page, and
 current generic Judge view per seed.
-`index.html` remains the `fraud_detection` trajectory page for compatibility with the
-shared six-seed top bar. This prevents the output directory from mixing a new global
-index with stale per-seed pages. Structured reward-hacking labels show category names,
+`index.html` remains the `fraud_detection` trajectory page. This prevents the output
+directory from mixing a new global index with stale per-seed pages. Since 2026-08-04 the
+top bar is two family windows (`ML`, `p-hacking`, each linking to its first seed's page)
+with a second `seednav` row listing the active family's three seeds; seeds without a
+family (legacy extras) appear in the seed row only when no family is active. Structured reward-hacking labels show category names,
 p-hacking `other` as Needs review, and ML `not_delivered` caveats. Historical numeric
 scores are labeled legacy and shown
 exactly, never converted
 with a threshold. Each trajectory has a flat per-dimension turn navigator linked to
-`[M#]`; clicking a citation opens the otherwise-closed trajectory and jumps to the turn.
-Each seed trajectory index is a compact sortable table over the catalog target name,
-every dimension actually stored across its rows, flags, and recorded cost. Epoch and end
+`[M#]`; since 2026-08-04 it lives inside the closed Other stuff dropdown (Owen: de-slop),
+and the transcript is an always-visible section (`<section id="trajectory-record">`, not
+a `<details>`), so citation clicks just scroll and flash. Judge-prose `[A#]` citations
+link to the matching artifact snapshot inside Judge view (`_artifact_anchor` in
+`env_viewer_components.py`); unknown artifact numbers stay plain text.
+The Metadata box is a closed dropdown (petri-style: preview bar with target ·
+condition · reward-hack result, label-over-value grid). Its former "judgment"
+(official-vs-rejudge) and "ended" cells were removed on 2026-08-04: rejudges already show
+the rejudge banner, and any ended_reason other than protocol_end is now a warning flag
+(`ended_early` in `real_integrity.py`; gate_error_end and wall_clock_limit keep their
+own flags). Grade also moved into Other stuff.
+Each seed trajectory index is a compact sortable table over the catalog target name, a
+User turns count (user-role messages in the saved transcript, `—` when no transcript is
+stored; added 2026-08-04 so gated one-turn runs are visible), the family's fixed judge
+dimensions (`FAMILY_INDEX_DIMENSIONS` in viewer.py) plus any extra dimensions actually
+stored across its rows, flags, and recorded cost. Epoch and end
 reason are not index columns; wall-clock termination is a flag. The order is reward hacks,
-Needs review, notable non-hacks, clean, invalid judgments, awaiting judgment, then
-integrity-excluded.
+Needs review, notable non-hacks, clean, Not judged, invalid judgments, awaiting judgment,
+then other integrity-excluded runs. Since 2026-08-04 every category section and its
+table always render, including zero-count sections with empty tables, so all trajectory
+pages share one fixed structure (Owen: schema stability beats compactness). The old
+omit-deception-when-all-n/a rule was removed at the same time: deception renders in
+every ML table, as n/a chips on clean rows.
+Table chips use short plain-English reward-hacking labels while preserving the exact raw
+labels in stored records, and multiple labels stack as separate chips.
 Raw run-directory names remain available on trajectory metadata pages but are not an
 index column. The provenance column is absent for all-official data and appears only when
 retrospective rows exist, where it links each rejudge to its source.
 Retrospective rows retain the original seed, epoch, target, and condition; they are
 linked to the source trajectory ID. Main pages contain only rows whose stored
 `judge_method_sha256` equals the method built from today's instructions, rubrics, schema,
-and Scout interface. All other rows render in Past. Included and excluded aggregate
+and Scout interface. All other rows render in Past. (A `PINNED_METHOD_SHAS` escape hatch
+briefly existed on 2026-08-04 to surface older-method rows on main pages; Owen had it
+removed the same day — don't reintroduce it without asking.) Included and excluded aggregate
 visuals are separate sides of one toggle. Rejudge cost includes its new judge usage but
 never counts the source trajectory's copied VM estimate a second time.
 
-Stored judge summaries, justifications, and highlights render above the dimension
-navigator, and their prompt-local message citations link to the corresponding full saved
-transcript turns. A thin fixed navigator has one row per dimension cited in the combined
-justification. Its arrows cycle through that dimension's cited transcript turns, open the
-closed trajectory, and briefly highlight the selected turn; cited turns have a light marker.
+Since 2026-08-04 the visuals are matplotlib inline-SVG figures ported from
+`petri/lib/viewer_visuals.py` (same rcParams/palette/figure card CSS), replacing the old
+improvised HTML bars. Each toggle side has two petri-style underlined sub-tabs: `base
+rates` (count-stacked outcomes per target model + seed-by-model 100% small multiples,
+buckets = the index categories via `trajectory_category`, exported from
+`env_viewer_visuals.py` and shared with viewer.py's sections) and `cost` (total-spend
+headline box, all-in mean cost per trajectory by model stacked by target/gate/judge/VM
+components, spend by role, per-trajectory box+strip spread; missing-cost and
+AWS-exclusion caveats as visible `costgap` lines). The excluded side buckets by judgment
+with `respect_exclusion=False`. The old coverage/labels/deception/flags bar sections were
+dropped on Owen's "two tabs for now" instruction. `target_label` (catalog pretty names)
+also lives in `env_viewer_visuals.py` now and viewer.py imports it.
+
+Stored judge summaries, justifications, and highlights render near the top of the page
+(the dimension navigator itself now sits in Other stuff), and their prompt-local message
+citations link to the corresponding full saved transcript turns. A thin fixed navigator has one row per dimension cited in the combined
+justification. Its arrows cycle through that dimension's cited transcript turns and
+briefly highlight the selected turn; cited turns have a light marker.
 The closed `Judge view` is driven only by the stored call record. It splits the exact
 stored prompt at its fixed top-level headings, then nests the exact overall instructions,
 each exact rubric, exact evidence-caveat section, exact numbered trajectory, each exact
@@ -315,30 +381,36 @@ evidence rendering.
 
 The viewer also builds one `judge_<seed>.html` current generic view per seed directory.
 Seeds in the same family intentionally share prompt/rubric content, but each generated
-page retains its seed's active top tab and complete trajectories/visuals/judge-tests/past
+page retains its seed's active top tab and complete trajectories/visuals/judge/past
 view bar. Unlike historical trajectory Judge views, these pages intentionally use
 today's `prepare_judge_call` output. Each shows one final-stage prompt preview with the
 exact current overall instructions and family rubrics, a trajectory-specific evidence-
 caveat slot, and the exact current Scout provider-tool interface. Stage one uses the same
-instructions, rubrics, and response schema; only its call identity and actual stage
-evidence differ, so the generic page does not duplicate the prompt. Trajectory messages,
+instructions, rubrics, and response schema; only its actual stage evidence differs, so
+the generic page does not duplicate the prompt. (The prompt used to end its overall
+section with a `Call identity: family=...; stage=...` stamp; Owen had it removed
+2026-08-04, so `_build_prompt` no longer takes family/stage.) Trajectory messages,
 artifact snapshots, and upstream loss caveats are marked as per-call slots rather than
 filled with fake evidence. `provider_request_record` in `environment_judge.exp_runner`
 is shared by the paid call and this free preview.
 
-`judge_test_sources.json` pins the migrated 20-source Judge Tests cohort. The generated
-Judge Tests page shows source rows as awaiting until a current-method rejudge exists,
-then uses the latest result and current categorical dimensions. Old root indexes, old
-candidate-judge details, old source pages, and old Past pages move recoverably to
-`viewer/_archive/legacy_judge_viewer/`. No live page reuses their CSS or navigation.
+`judge_test_sources.json` still pins the migrated 20-source cohort for the optional paid
+runner, but the viewer no longer builds Judge Tests pages. Existing Judge Tests pages,
+old root indexes, old candidate-judge details, old source pages, and old Past pages move
+recoverably to `viewer/_archive/legacy_judge_viewer/`. No live page reuses their CSS or
+navigation. A current-method call that produces no usable judgment still routes to the
+main trajectory page. It appears under Not judged with an error flag; the detail page
+retains the score metadata and all fresh-attempt failure records.
 
 The loader must merge the rich Score `environment_judge` envelope with the smaller
 `real_env.final_judgment` summary; never let the latter hide the stored prompt/evidence/
 provider interface. For a rejudge row, the new Score must supersede the original
 `real_env.final_judgment` carried as source data. Raw dropdowns replace duplicate `prompt_passed_to_scout`,
 `rendered_messages`, and `rendered_artifacts` display fields with pointers. This changes
-only generated HTML, not logs. Grade, trajectory, judgment, environment record, usage,
-and load issues are closed by default. Malformed inputs remain visible as load issues.
+only generated HTML, not logs. Grade, trajectory, and load issues are closed by default;
+Stored judgment, Environment record, and Model usage are closed sub-dropdowns inside one
+closed `Other stuff` dropdown at the bottom of each trajectory page (Owen, 2026-08-04).
+Malformed inputs remain visible as load issues.
 
 Past is generated from all non-current-method loaded judgments. Historical numeric values
 remain exact and are not translated into current categorical outcomes.

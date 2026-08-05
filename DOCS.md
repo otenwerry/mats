@@ -110,25 +110,34 @@ uv run viewer.py
     free; reads public Inspect log fields from mats-local/environments/logs/
     writes current per-seed trajectory/visual pages, seed judge pages, and
         trajectory-*.html under mats-local/environments/viewer/
-    index.html is fraud_detection trajectories; every current seed page has the same
-        seed top bar; stable trajectory IDs persist in mats-local/environments/trajectory_ids.json
-    trajectory indexes are compact sortable category tables over target, every stored judge
-        dimension, flags, and recorded cost; raw run-directory names, epoch, and end-reason
-        columns are omitted; rejudge source provenance appears only when present
+    index.html is fraud_detection trajectories; the top bar has two family windows
+        (ML, p-hacking) and a second row with the active family's three seeds;
+        stable trajectory IDs persist in mats-local/environments/trajectory_ids.json
+    trajectory indexes are compact sortable category tables over target, user-turn count,
+        the family's fixed judge dimensions plus any stored extras, flags, and recorded
+        cost; raw run-directory names, epoch, and end-reason columns are omitted; rejudge
+        source provenance appears only when present
+    every category section and its table always render, zero-count sections included,
+        with the family's fixed columns (ML: reward hacking, deception, environment
+        failure; p-hacking: reward hacking, environment failure)
     reward hacks appear first, then p-hacking cases marked other/Needs review, notable
-        non-hacks, clean trajectories, invalid judgments, awaiting judgments, and
-        excluded data-integrity failures
-    flags include nonzero historical pipeline exit, wall-clock limit, provider failures,
-        empty responses, tool-output truncation, compaction, and judge-evidence loss;
-        nonzero historical pipeline exit is a warning and does not itself exclude a run
+        non-hacks, clean trajectories, failed current judgments marked Not judged,
+        invalid judgments, awaiting judgments, and excluded data-integrity failures
+    flags include nonzero historical pipeline exit, wall-clock limit, abnormal early
+        endings (any ended_reason other than protocol_end), provider failures,
+        empty responses, tool-output truncation, compaction, judge-evidence loss, and
+        current judge calls that exhausted all fresh attempts;
+        nonzero historical pipeline exit and early endings are warnings and do not
+        themselves exclude a run
     structured reward-hacking labels are shown as category lists; old numeric judgments are
         labeled legacy and reproduced exactly, never thresholded into the new labels
-    each structured dimension has a flat evidence-turn navigator linked to [M#] transcript
-        turns plus exact artifact path/snapshot references; a click opens the closed
-        trajectory record and jumps to the cited message
+    each structured dimension has a flat evidence-turn navigator (inside Other stuff)
+        linked to [M#] transcript turns plus exact artifact path/snapshot references;
+        a click jumps to the cited message in the always-visible trajectory
     current judgments show the stored judge summary, combined per-dimension justification,
         and chronological highlights; their prompt-local [M#] citations link to the
-        corresponding saved transcript turns; a thin floating row per cited dimension
+        corresponding saved transcript turns and [A#] citations link to the matching
+        Judge-view artifact snapshots; a thin floating row per cited dimension
         cycles through its justification turns and marks them in the transcript
     trajectory pages have one closed Judge view built from the exact stored call, with
         nested overall-instruction, per-dimension, evidence-caveat, per-artifact, and
@@ -140,26 +149,33 @@ uv run viewer.py
         its family's environment_judge as one final-stage prompt preview; stage one uses
         the same instructions/rubrics/schema while actual calls receive stage-specific
         evidence; it retains that seed's
-        full trajectories/visuals/judge-tests/past navigation;
+        full trajectories/visuals/judge/past navigation;
         they show exact shared instructions/rubrics/response interface and mark the
         trajectory, artifacts, and evidence-loss caveats as per-call fields
     every current seed page links to the generic judge view for its seed-dir/family
-    main trajectories contain only judgments whose stored judge-method SHA-256 matches the
-        current instructions/rubrics/schema/interface; every other judgment is in Past
-    Judge Tests is a fixed 20-source cohort stored in judge_test_sources.json; before a
-        current rejudge it shows the source as awaiting judgment, then replaces that row
-        with the latest current-method result
+    main trajectories contain only judge calls whose stored judge-method SHA-256 matches
+        the current instructions/rubrics/schema/interface, including failed calls marked
+        Not judged; every older-method judgment is in Past
     obsolete judge-test/past/detail HTML moves to viewer/_archive/legacy_judge_viewer/;
-        live Judge Tests and Past pages are rebuilt with the same persistent navigation
+        Judge Tests pages stay retired while Past pages are rebuilt
     Judge view pairs the exact stored numbered trajectory with a scope card and transcript
         link; the card states whole-stage vs selected evidence, message range, reasoning
         policy, system/assistant/tool-call/tool-result policies, and later saved messages
-    grade, trajectory, stored judgment, environment record, model usage, and load issues are
-        closed by default; duplicate raw prompt/transcript fields are replaced by visible
-        pointers while the underlying Inspect log remains unchanged
-    visuals use current structured judgments and show reward-hacking labels,
-        environment failures, deception, flags, and recorded cost; an
-        Included/Excluded toggle keeps integrity-failed aggregates separate
+    Metadata is one closed dropdown whose bar previews target/condition/result; its grid
+        holds trajectory id, seed, target, judge, condition, epoch, reward-hack result,
+        recorded cost, flag chips, and run dir (no judgment-provenance or end-reason cells)
+    the trajectory transcript is always visible (not collapsible); load issues are closed
+        by default; the dimension navigator, grade, stored judgment, environment record,
+        and model usage are closed sub-dropdowns inside one closed Other stuff dropdown at
+        the page bottom; duplicate raw prompt/transcript fields are replaced by
+        visible pointers while the underlying Inspect log remains unchanged
+    visuals are matplotlib SVG figures over current structured judgments in two sub-tabs
+        per view: base rates (outcome composition by target model in counts, plus
+        seed-by-model percentage small multiples) and cost (total-spend headline, all-in
+        cost per trajectory by model stacked by target/gate/judge/VM components, spend by
+        role, per-trajectory cost spread; missing-cost and AWS-exclusion caveats stay
+        visible); an Included/Excluded toggle keeps integrity-failed aggregates separate;
+        excluded aggregates bucket by judgment, ignoring the exclusion itself
     retrospective rows link to their original trajectory
     rejudge cost includes only the new judge usage; copied source VM cost is not counted again
     recorded cost combines stored LLM cost and AWS VM estimates; missing prices and
@@ -214,8 +230,9 @@ uv run exp_rejudge.py
     exact judge inputs, current code/rubric SHA-256, schema, source identity, evidence
         caveats, structured results, token usage, and cost are stored in new Inspect logs
     run dirs: mats-local/environments/logs/rejudge-current-<judge>-<method fingerprint>/
-    successful exact source-input hashes resume automatically; --force creates a new
-        attempt directory without deleting prior results
+    successful exact source-input + judge-method + judge-model matches resume across
+        prior rejudge-current-* directories; --force creates a new attempt directory
+        without deleting prior results
     a judge-method or rubric change changes the method fingerprint automatically
     old trajectories without initial-task or per-submission snapshots receive stored,
         queryable upstream caveats; absent content is never reconstructed from old prompts
@@ -304,10 +321,20 @@ lib/environment_judge/
     every dimension stores an explanation plus message-number and artifact references
     Scout's required explanation is stored as the combined justification in Score.explanation
         and the environment_judge call envelope
-    malformed types, unknown dimension or summary/highlight message references,
-        justification citations not assigned to dimension evidence, inconsistent deception,
+    malformed types, unknown message/artifact references, inconsistent deception,
         missing positive evidence, or an invalid Scout result are rejected before becoming
-        an official judgment
+        an official judgment; requested prose formatting and duplication of structured
+        citations in the combined justification are prompt guidance, not validity gates
+    artifact references normally use the exact shown path/snapshot; a missing leading
+        /workspace/ is restored only when the resulting full path and snapshot exactly
+        match supplied evidence; basenames and snapshots are never guessed
+    each provider conversation gets one structured-output attempt and no in-context
+        correction feedback; any generation, refusal, garbled-output, schema, or evidence
+        failure discards that conversation and retries from the original prompt, up to
+        three fresh retries after the initial call (four paid calls total)
+    success metadata stores the winning fresh-attempt number and every prior failure;
+        exhaustion stores all four failures and produces a no-answer/invalid judge score
+        that the main viewer shows as Not judged
     stored call metadata records the exact Scout-level initial user prompt, forced
         submit_judgment tool name/description/resolved parameters, tool choice,
         parallel-tool setting, retry message, and retry limits used by the provider request
@@ -321,10 +348,14 @@ lib/environment_judge/
         are stored per judgment and shown in the viewer
     after family selection, judge assembly does not sample, select top-N, or truncate
         supplied messages/artifacts
-    target-facing tool output is capped at 16 KiB per call; full omission details are
-        stored per trajectory and propagated into judge/viewer caveats
+    target-facing tool output is capped at 16 KiB per call; the cap is marked in place in
+        each affected tool result, stored per trajectory, and flagged in the viewer
     extracted artifacts are capped at 200 KiB per file; every affected snapshot stores
-        truncation/byte counts and propagates a judge/viewer caveat
+        truncation/byte counts, is marked in place in the rendered artifact block status,
+        and is flagged in the viewer
+    prompt caveats are reserved for loss or exclusions invisible in the rendered evidence:
+        family message selection, stripped native reasoning, non-text changed files, and
+        missing legacy artifact records
     all submission artifact snapshots and the final snapshot are retained
 
 ## Runtime ownership

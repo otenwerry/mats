@@ -10,7 +10,6 @@ import asyncio
 import html
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -39,23 +38,25 @@ from env_viewer_load import (  # noqa: E402
     assign_stable_ids,
     link_rejudge_sources,
     load_all,
-    traj_key,
     viewer_build_lock,
 )
-from env_viewer_visuals import VISUALS_CSS, VISUALS_JS, render_visuals  # noqa: E402
+from env_viewer_visuals import (  # noqa: E402
+    VISUALS_CSS,
+    VISUALS_JS,
+    render_visuals,
+    target_label,
+    trajectory_category,
+)
 from environment_judge import (  # noqa: E402
     prepare_judge_call,
     provider_request_record,
 )
-from model_catalog import TARGET_CHOICES, route as route_model  # noqa: E402
 from project_paths import DATA_ROOT, LOGS_ROOT, SEEDS_ROOT, VIEWER_ROOT  # noqa: E402
 
 
 REGISTRY_FILE = DATA_ROOT / "trajectory_ids.json"
 CACHE_ROOT = DATA_ROOT / "viewer_cache"
-JUDGE_TEST_MANIFEST = DATA_ROOT / "judge_test_sources.json"
 GENERIC_JUDGE_FAMILIES = ("ml_training_data_misuse", "p_hacking")
-JUDGE_TEST_SEEDS = frozenset({"fraud_detection", "reasoning_prompt_benchmark"})
 SEED_NAV_ORDER = (
     "fraud_detection",
     "reasoning_prompt_benchmark",
@@ -88,11 +89,16 @@ INDEX_DIMENSION_LABELS = {
     "situational_awareness": "situational awareness",
     "environment_failure": "environment failure",
 }
-_TARGET_LABELS = {
-    route_model(slug): name for name, slug in TARGET_CHOICES.items()
+FAMILY_NAV_LABELS = {
+    "ml_training_data_misuse": "ML",
+    "p_hacking": "p-hacking",
 }
-
-
+# The fixed current judge schema per family. Index tables always show these columns,
+# even before any trajectory exists, so every page keeps one stable structure.
+FAMILY_INDEX_DIMENSIONS = {
+    "ml_training_data_misuse": ("reward_hacking", "deception", "environment_failure"),
+    "p_hacking": ("reward_hacking", "environment_failure"),
+}
 BASE_CSS = r"""
 :root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1a1a2e;background:#f6f7f9}
 *{box-sizing:border-box}body{margin:0;background:#f6f7f9}a{color:#2456a6;text-decoration:none}a:hover{text-decoration:underline}
@@ -100,6 +106,8 @@ main.wrap{max-width:1200px;margin:0;padding:24px}main.wrap.fit{max-width:none;wi
 .pagehead h1{font-size:22px;margin:18px 0}.top{display:flex;align-items:baseline;gap:14px;margin-bottom:14px}.top h1{font-size:20px;margin:0}.top a{font-size:12px}
 .topnav{margin:0 0 8px;display:flex;gap:8px;flex-wrap:wrap}.topnav a{padding:5px 13px;border-radius:6px;background:#eef0f4;font-size:13.5px;font-weight:600}
 .topnav a.active{background:#1558d6;color:#fff}.topnav a:hover{text-decoration:none;background:#e0e3ea}.topnav a.active:hover{background:#0f47b0}
+.seednav{margin:0 0 8px;display:flex;gap:6px;flex-wrap:wrap}.seednav a{padding:4px 11px;border-radius:5px;background:#f1f2f6;font-size:12px;font-weight:600;color:#4d5362}
+.seednav a.active{background:#3f6fd1;color:#fff}.seednav a:hover{text-decoration:none;background:#e0e3ea}.seednav a.active:hover{background:#325cb4}
 .viewnav{display:flex;gap:20px;flex-wrap:wrap;border-bottom:1px solid #dcdfe6;margin:0 0 16px}.viewnav a{padding:3px 1px 8px;font-size:12.5px;font-weight:600;color:#6b7280;border-bottom:2px solid transparent;margin-bottom:-1px}
 .viewnav a.active{color:#1558d6;border-bottom-color:#1558d6}.viewnav a:hover{text-decoration:none;color:#1558d6}
 .panel{background:#fff;border:1px solid #daddE5;border-radius:9px;margin:12px 0;padding:11px}.panel h2{font-size:15px;margin:0 0 8px}
@@ -109,8 +117,10 @@ details.panel>summary:before{content:"›";display:inline-block;margin-right:7px
 .runs th,.runs td{text-align:left;padding:3px 6px;border-bottom:1px solid #e8e8ee;font-size:11px}.runs th{color:#4d5362;background:#eef0f4;font-size:10px;font-weight:600;position:sticky;top:0;white-space:nowrap}
 .runs tr:last-child td{border-bottom:0}.result{font-weight:650}.result.yes{color:#a13c31}.result.no{color:#17663b}.result.review,.result.invalid{color:#a06b00}
 .runs th.sortable-column{cursor:pointer;user-select:none;padding-right:16px}.runs th.sortable-column:hover{background:#e2e5eb}.runs th[data-sort-direction="asc"]:after{content:" ▲";position:absolute;margin-left:3px}.runs th[data-sort-direction="desc"]:after{content:" ▼";position:absolute;margin-left:3px}
-.runs .dimension-cell{white-space:nowrap}.runs .dimension-cell.wide{white-space:normal;max-width:190px}.value-chip{display:inline-block;border-radius:4px;padding:1px 4px;background:#f0f1f4;color:#555d6b}.value-good{background:#d3f3d8;color:#17663b}.value-warn{background:#fff3cd;color:#735e13}.value-concern{background:#ffd6a5;color:#774215}.value-bad{background:#ffadad;color:#7f1d1d;font-weight:650}.value-invalid{background:#fff3cd;color:#8a5a00}.model-name{white-space:nowrap}.raw-title{cursor:help}
-.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:7px}.meta-cell{border:1px solid #e4e6eb;border-radius:5px;padding:6px}.meta-key{font-size:10px;color:#7b8190}.meta-value{font-size:12px;overflow-wrap:anywhere}
+.runs .dimension-cell{white-space:nowrap}.runs .dimension-cell.wide{white-space:normal;max-width:190px}.reward-label-list{display:flex;flex-direction:column;align-items:flex-start;gap:2px}.value-chip{display:inline-block;border-radius:4px;padding:1px 4px;background:#f0f1f4;color:#555d6b}.value-good{background:#d3f3d8;color:#17663b}.value-warn{background:#fff3cd;color:#735e13}.value-concern{background:#ffd6a5;color:#774215}.value-bad{background:#ffadad;color:#7f1d1d;font-weight:650}.value-invalid{background:#fff3cd;color:#8a5a00}.model-name{white-space:nowrap}.raw-title{cursor:help}
+.metagrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:13px 20px;margin:12px 2px 4px}
+.metacell .metakey{font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:#949aa8;font-weight:700;margin-bottom:2px}.metacell .metavalue{font-size:13px;color:#262b36;line-height:1.3;overflow-wrap:anywhere}
+.metaprev{font-weight:400;color:#79808f;margin-left:10px;font-size:12px}
 details.raw summary{font-size:12px;color:#6f7584;cursor:pointer}details.raw pre,.json{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 ui-monospace,monospace;background:#f7f8fa;padding:8px;border-radius:5px}
 .load-error{border:1px solid #d89689;background:#fff2ef;padding:8px;margin:8px 0;font-size:12px}.empty{color:#7b8190;font-size:12px}
 .legacy-banner{border:1px solid #d8bd73;background:#fff9e9;padding:7px;border-radius:6px;font-size:12px}.cost{font-variant-numeric:tabular-nums}
@@ -284,12 +294,29 @@ def _navigation(
     href_prefix: str = "",
 ) -> str:
     families = _seed_families()
+    active_family = families.get(active_seed) if active_seed else None
+    family_links = []
+    for family_name in GENERIC_JUDGE_FAMILIES:
+        members = [seed for seed in seeds if families.get(seed) == family_name]
+        if not members:
+            continue
+        family_links.append(
+            f'<a href="{esc(href_prefix + _seed_filename(members[0]), quote=True)}"'
+            f'{_active_attr(family_name == active_family)}>'
+            f'{esc(FAMILY_NAV_LABELS.get(family_name, family_name))}</a>'
+        )
+    top = f'<div class="topnav">{"".join(family_links)}</div>'
+
+    if active_family is not None:
+        row_seeds = [seed for seed in seeds if families.get(seed) == active_family]
+    else:
+        row_seeds = [seed for seed in seeds if families.get(seed) is None]
     seed_links = "".join(
         f'<a href="{esc(href_prefix + _seed_filename(seed), quote=True)}"'
         f'{_active_attr(seed == active_seed)}>{esc(seed)}</a>'
-        for seed in seeds
+        for seed in row_seeds
     )
-    top = f'<div class="topnav">{seed_links}</div>'
+    seed_row = f'<div class="seednav">{seed_links}</div>' if seed_links else ""
 
     if active_seed is not None:
         family = families.get(active_seed)
@@ -303,10 +330,6 @@ def _navigation(
                 _generic_judge_filename(active_seed),
                 "judge",
             ))
-        if active_seed in JUDGE_TEST_SEEDS:
-            items.append((
-                "judge tests", f"{active_seed}_judge_tests.html", "judge_tests"
-            ))
         items.append((
             "past iterations", f"{active_seed}_past.html", "past"
         ))
@@ -317,7 +340,7 @@ def _navigation(
         f'{_active_attr(key == active_view)}>{esc(label)}</a>'
         for label, href, key in items
     )
-    return top + f'<div class="viewnav">{links}</div>'
+    return top + seed_row + f'<div class="viewnav">{links}</div>'
 
 
 def _display_epoch(audit: dict) -> object:
@@ -331,26 +354,36 @@ def _display_epoch(audit: dict) -> object:
     return original_epoch if original_epoch is not None else audit.get("epoch")
 
 
-def _index_dimension_keys(audits: list[dict]) -> list[str]:
+def _index_dimension_keys(
+    audits: list[dict], *, family: str | None = None
+) -> list[str]:
     present = {
         str(dimension.get("key"))
         for audit in audits
         for dimension in ((audit.get("judgment") or {}).get("dimensions") or [])
         if dimension.get("key")
     }
+    present.update(FAMILY_INDEX_DIMENSIONS.get(family, ()))
     ordered = [key for key in INDEX_DIMENSION_ORDER if key in present]
     return ordered + sorted(present - set(ordered))
 
 
 def _target_display(target: object) -> tuple[str, str]:
     raw = str(target or "unknown")
-    return _TARGET_LABELS.get(route_model(raw), raw), raw
+    return target_label(raw), raw
 
 
 def _sort_attr(value: object | None) -> str:
     if value is None:
         return ""
     return f' data-sort-value="{esc(value, quote=True)}"'
+
+
+def _user_turn_count(audit: dict) -> int | None:
+    messages = audit.get("messages") or []
+    if not messages:
+        return None
+    return sum(1 for message in messages if message.get("role") == "user")
 
 
 def _dimension_sort_type(audits: list[dict], key: str) -> str:
@@ -421,9 +454,27 @@ def _dimension_cell(audit: dict, key: str) -> str:
     if chip_class:
         classes += f" {chip_class}"
     wide = " wide" if key == "reward_hacking" else ""
+    display_values = dimension.get("display_values")
+    if key == "reward_hacking" and isinstance(display_values, list):
+        chips = "".join(
+            f'<span class="{classes}">{esc(item)}</span>'
+            for item in display_values
+        )
+        rendered_value = f'<span class="reward-label-list">{chips}</span>'
+    else:
+        rendered_value = f'<span class="{classes}">{esc(display)}</span>'
     return (
         f'<td class="dimension-cell{wide}"{_sort_attr(sort_value)}>'
-        f'<span class="{classes}">{esc(display)}</span></td>'
+        f'{rendered_value}</td>'
+    )
+
+
+def _flag_chip_list(flags: list[dict]) -> str:
+    return "".join(
+        f'<span class="flag {esc(flag.get("severity") or "warning", quote=True)}" '
+        f'title="{esc(flag.get("detail") or "", quote=True)}">'
+        f'{esc(flag.get("label") or flag.get("code") or "flag")}</span>'
+        for flag in flags
     )
 
 
@@ -431,35 +482,11 @@ def _flags_cell(audit: dict) -> str:
     flags = audit.get("flags") or []
     if not flags:
         return '<td data-sort-value="">—</td>'
-    rendered = "".join(
-        f'<span class="flag {esc(flag.get("severity") or "warning", quote=True)}" '
-        f'title="{esc(flag.get("detail") or "", quote=True)}">'
-        f'{esc(flag.get("label") or flag.get("code") or "flag")}</span>'
-        for flag in flags
-    )
     sort_value = ", ".join(str(flag.get("label") or "") for flag in flags)
     return (
-        f'<td{_sort_attr(sort_value)}><div class="flag-list">{rendered}</div></td>'
+        f'<td{_sort_attr(sort_value)}>'
+        f'<div class="flag-list">{_flag_chip_list(flags)}</div></td>'
     )
-
-
-def _trajectory_category(audit: dict) -> str:
-    if audit.get("integrity_status") == "excluded":
-        return "excluded"
-    judgment = audit.get("judgment") or {}
-    if judgment.get("format") != "structured":
-        return "awaiting"
-    reward = _dimension(audit, "reward_hacking")
-    if not reward or reward.get("status") != "ok":
-        return "invalid"
-    if reward.get("requires_review"):
-        return "review"
-    if reward.get("is_hack"):
-        return "hack"
-    values = reward.get("value") or []
-    if isinstance(values, list) and any(str(value) != "clean" for value in values):
-        return "notable"
-    return "clean"
 
 
 CATEGORY_SECTIONS = (
@@ -467,6 +494,7 @@ CATEGORY_SECTIONS = (
     ("review", "Needs review"),
     ("notable", "Notable behavior without a delivered reward hack"),
     ("clean", "Clean trajectories"),
+    ("unjudged", "Not judged"),
     ("invalid", "Invalid judgments"),
     ("awaiting", "Awaiting current judgment"),
     ("excluded", "Excluded data-integrity failures"),
@@ -497,12 +525,15 @@ def _index_table(audits: list[dict], *, dimension_keys: list[str]) -> str:
         dimensions = "".join(
             _dimension_cell(audit, key) for key in dimension_keys
         )
+        user_turns = _user_turn_count(audit)
         cells.append(
             f'<tr data-id="{int(audit["id"])}">'
             f'<td{_sort_attr(audit["id"])}><a href="trajectory-{int(audit["id"])}.html">'
             f'{int(audit["id"])}</a></td>'
             f'<td class="model-name raw-title" title="{esc(target_raw, quote=True)}"'
             f'{_sort_attr(target_label)}>{esc(target_label)}</td>'
+            f'<td{_sort_attr(user_turns)}>'
+            f'{user_turns if user_turns is not None else "—"}</td>'
             + (
                 f'<td{_sort_attr(source_id)}>{provenance}</td>'
                 if show_provenance else ""
@@ -519,15 +550,14 @@ def _index_table(audits: list[dict], *, dimension_keys: list[str]) -> str:
         for key in dimension_keys
     )
     provenance_header = '<th data-sort-type="text">Source</th>' if show_provenance else ""
-    table = (
+    return (
         '<table class="runs sortable"><thead><tr>'
         '<th data-sort-type="number">ID</th><th data-sort-type="text">Target</th>'
+        '<th data-sort-type="number">User turns</th>'
         f'{provenance_header}{dimension_headers}'
         '<th data-sort-type="text">Flags</th><th data-sort-type="number">Recorded cost</th>'
         f'</tr></thead><tbody>{"".join(cells)}</tbody></table>'
-        if cells else '<p class="empty">No trajectories.</p>'
     )
-    return table
 
 
 def _index(
@@ -540,7 +570,9 @@ def _index(
     title: str | None = None,
     historical: bool = False,
 ) -> str:
-    dimension_keys = _index_dimension_keys(audits)
+    dimension_keys = _index_dimension_keys(
+        audits, family=_seed_families().get(seed)
+    )
     error_html = "".join(
         f'<div class="load-error">{esc(error.get("mode"))}: '
         f'{esc(error.get("error_type"))}: {esc(error.get("error"))}</div>'
@@ -555,7 +587,7 @@ def _index(
         )
     else:
         grouped = {
-            key: [audit for audit in audits if _trajectory_category(audit) == key]
+            key: [audit for audit in audits if trajectory_category(audit) == key]
             for key, _label in CATEGORY_SECTIONS
         }
         sections = "".join(
@@ -564,10 +596,7 @@ def _index(
             + _index_table(grouped[key], dimension_keys=dimension_keys)
             + '</section>'
             for key, label in CATEGORY_SECTIONS
-            if grouped[key]
         )
-        if not sections:
-            sections = '<p class="empty">No trajectories.</p>'
     heading = title or f"{seed} — trajectories"
     body = (
         _navigation(seeds, active_seed=seed, active_view=active_view)
@@ -579,34 +608,53 @@ def _index(
 
 
 def _metadata_panel(audit: dict) -> str:
+    """Collapsed Metadata dropdown at the top of a trajectory page.
+
+    Petri-style: the closed bar previews the target and result so pages stay scannable
+    without expanding; the body is one label-over-value grid. Empty values drop their
+    cell. How the run ended is not shown here — abnormal endings appear as flags.
+    """
     result, _state = _result_cell(audit)
     cost, has_cost = _recorded_cost(audit)
-    values = {
-        "trajectory": audit.get("id"),
-        "seed": audit.get("seed"),
-        "target": audit.get("target"),
-        "judge": audit.get("judge"),
-        "run": audit.get("mode"),
-        "epoch": _display_epoch(audit),
-        "condition": audit.get("condition"),
-        "judgment": (
-            "retrospective rejudge"
-            if audit.get("retrospective_rejudge") else "official run judgment"
+    label, target_raw = _target_display(audit.get("target"))
+    epoch = _display_epoch(audit)
+
+    def cell(key: str, value_html: str) -> str:
+        return (
+            '<div class="metacell">'
+            f'<div class="metakey">{esc(key)}</div>'
+            f'<div class="metavalue">{value_html}</div></div>'
+        ) if value_html else ""
+
+    cells = [
+        cell("trajectory", esc(audit.get("id") or "")),
+        cell("seed", esc(audit.get("seed") or "")),
+        cell(
+            "target",
+            f'<span class="raw-title" title="{esc(target_raw, quote=True)}">'
+            f'{esc(label)}</span>',
         ),
-        "ended": audit.get("real_ended_reason"),
-        "flags": ", ".join(
-            str(flag.get("label") or flag.get("code"))
-            for flag in audit.get("flags") or []
-        ) or "none",
-        "reward hack": result,
-        "recorded cost": f"${cost:.6f}" if has_cost else "unavailable",
-    }
-    return '<section class="panel"><div class="meta-grid">' + "".join(
-        '<div class="meta-cell">'
-        f'<div class="meta-key">{esc(key)}</div><div class="meta-value">{esc(value)}</div>'
-        '</div>'
-        for key, value in values.items()
-    ) + '</div></section>'
+        cell("judge", esc(audit.get("judge") or "")),
+        cell("condition", esc(audit.get("condition") or "")),
+        cell("epoch", esc(epoch) if epoch is not None else ""),
+        cell("reward hack", esc(result)),
+        cell("recorded cost", esc(f"${cost:.6f}") if has_cost else "unavailable"),
+        cell(
+            "flags",
+            f'<div class="flag-list">{_flag_chip_list(audit.get("flags") or [])}</div>'
+            if audit.get("flags") else "none",
+        ),
+        cell("run dir", esc(audit.get("mode") or "")),
+    ]
+    preview_parts = [label]
+    if audit.get("condition"):
+        preview_parts.append(str(audit["condition"]))
+    preview_parts.append(result)
+    return (
+        '<details class="panel metadata"><summary>Metadata'
+        f'<span class="metaprev">{esc(" · ".join(preview_parts))}</span></summary>'
+        f'<div class="metagrid">{"".join(cells)}</div></details>'
+    )
 
 
 def _json_panel(title: str, value: Any) -> str:
@@ -653,6 +701,7 @@ def _trajectory(
     grade = (audit.get("real_env") or {}).get("grade")
     source_id = audit.get("source_trajectory_id")
     retrospective = audit.get("retrospective_rejudge")
+    judge_failure = audit.get("judge_failure")
     rejudge_banner = ""
     if retrospective:
         source_link = (
@@ -676,22 +725,31 @@ def _trajectory(
         + _metadata_panel(audit)
         + rejudge_banner
         + legacy
+        + (
+            _json_panel("Judge failure", {
+                "failure": judge_failure,
+                "score_metadata": audit.get("score_metadata") or {},
+            })
+            if judge_failure else ""
+        )
         + render_judge_narrative(judgment)
-        + render_dimension_navigator(judgment)
         + render_judge_view(judgment, audit)
-        + (_json_panel("Grade", grade) if grade else "")
-        + f'<details class="panel trajectory-panel" id="trajectory-record"><summary>'
-        f'Trajectory · {len(audit.get("messages") or [])} messages</summary>'
+        + f'<section class="panel trajectory-panel" id="trajectory-record"><h2>'
+        f'Trajectory · {len(audit.get("messages") or [])} messages</h2>'
         + render_transcript(audit.get("messages") or [])
-        + '</details>'
-        + _json_panel("Stored judgment", _without_duplicate_judge_payloads(judgment))
+        + '</section>'
         + (_json_panel("Load issues", audit.get("load_issues"))
            if audit.get("load_issues") else "")
+        + '<details class="panel other-stuff"><summary>Other stuff</summary>'
+        + render_dimension_navigator(judgment)
+        + (_json_panel("Grade", grade) if grade else "")
+        + _json_panel("Stored judgment", _without_duplicate_judge_payloads(judgment))
         + _json_panel(
             "Environment record",
             _without_duplicate_judge_payloads(audit.get("real_env") or {}),
         )
         + _json_panel("Model usage", audit.get("model_usage") or {})
+        + '</details>'
         + render_justification_turn_nav(judgment)
     )
     return _page(
@@ -707,7 +765,7 @@ def _visuals(seed: str, audits: list[dict], *, seeds: list[str]) -> str:
         + f'<div class="pagehead"><h1>{esc(seed)} — visuals</h1></div>'
         + render_visuals(audits)
     )
-    return _page(f"{seed} · visuals", body, scripts=VISUALS_JS)
+    return _page(f"{seed} · visuals", body, scripts=VISUALS_JS, fit_content=False)
 
 
 def _generic_judge_filename(seed: str) -> str:
@@ -742,55 +800,6 @@ async def _generic_judge_page(
     )
 
 
-def _legacy_judge_source_key(filename: str) -> str | None:
-    stem = filename.removesuffix(".html")
-    for marker in ("__judge_", "__evidence_rejudge_"):
-        if marker in stem:
-            return stem.split(marker, 1)[0]
-    return None
-
-
-def _judge_test_manifest(audits: list[dict]) -> dict:
-    """Read or migrate the fixed 20-source judge-test cohort."""
-
-    if JUDGE_TEST_MANIFEST.is_file():
-        payload = json.loads(JUDGE_TEST_MANIFEST.read_text())
-        if (
-            payload.get("schema_version") != "environment-judge-test-sources-v1"
-            or not isinstance(payload.get("source_keys"), list)
-        ):
-            raise ValueError(f"invalid judge-test manifest: {JUDGE_TEST_MANIFEST}")
-        return payload
-
-    source_keys: set[str] = set()
-    for path in VIEWER_ROOT.glob("*_judge_tests.html"):
-        text = path.read_text()
-        for filename in re.findall(
-            r'href=["\']pages/([^"\'/?#]+\.html)(?:[?#][^"\']*)?["\']',
-            text,
-        ):
-            source_key = _legacy_judge_source_key(filename)
-            if source_key:
-                source_keys.add(source_key)
-    known = {traj_key(audit) for audit in audits if not audit.get("retrospective_rejudge")}
-    unknown = sorted(source_keys - known)
-    if unknown:
-        raise ValueError(
-            "legacy judge-test pages reference unknown source trajectories: "
-            + ", ".join(unknown[:3])
-        )
-    payload = {
-        "schema_version": "environment-judge-test-sources-v1",
-        "source_keys": sorted(source_keys),
-    }
-    if source_keys:
-        _write_atomic(
-            JUDGE_TEST_MANIFEST,
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        )
-    return payload
-
-
 def _archive_path(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
@@ -823,7 +832,8 @@ def _archive_legacy_viewer_pages() -> int:
     for path in candidates:
         if not path.is_file():
             continue
-        if path.parent == VIEWER_ROOT and _GENERATED_MARKER in path.read_text():
+        generated = path.parent == VIEWER_ROOT and _GENERATED_MARKER in path.read_text()
+        if generated and not path.name.endswith("_judge_tests.html"):
             continue
         relative = path.relative_to(VIEWER_ROOT)
         _archive_path(path, archive_root / relative)
@@ -840,62 +850,19 @@ async def _current_judge_methods() -> dict[str, str]:
         methods[family] = prepared.method_sha256()
     return methods
 
-
 def _is_current_judgment(audit: dict, methods: dict[str, str]) -> bool:
     judgment = audit.get("judgment") or {}
-    if judgment.get("format") != "structured":
-        return False
-    family = str(judgment.get("family") or "")
-    stored = (judgment.get("envelope") or {}).get("judge_method_sha256")
+    if judgment.get("format") == "structured":
+        envelope = judgment.get("envelope") or {}
+        family = str(judgment.get("family") or envelope.get("family") or "")
+    else:
+        score_metadata = audit.get("score_metadata") or {}
+        envelope = score_metadata.get("environment_judge") or {}
+        if not isinstance(envelope, dict):
+            return False
+        family = str(envelope.get("family") or "")
+    stored = envelope.get("judge_method_sha256")
     return bool(stored and stored == methods.get(family))
-
-
-def _judge_test_rows(
-    audits: list[dict], manifest: dict, methods: dict[str, str]
-) -> list[dict]:
-    source_keys = set(manifest.get("source_keys") or [])
-    originals = {
-        traj_key(audit): audit
-        for audit in audits
-        if not audit.get("retrospective_rejudge") and traj_key(audit) in source_keys
-    }
-    missing_sources = sorted(source_keys - set(originals))
-    if missing_sources:
-        raise ValueError(
-            "judge-test manifest sources are missing from loaded logs: "
-            + ", ".join(missing_sources[:3])
-        )
-    identity_to_key = {
-        (
-            audit.get("mode"), audit.get("task"), str(audit.get("seed")),
-            audit.get("epoch"),
-        ): key
-        for key, audit in originals.items()
-    }
-    current_rejudges: dict[str, list[dict]] = defaultdict(list)
-    for audit in audits:
-        retrospective = audit.get("retrospective_rejudge") or {}
-        key = identity_to_key.get((
-            retrospective.get("source_run"), retrospective.get("source_task"),
-            str(retrospective.get("seed")), retrospective.get("epoch"),
-        ))
-        if key in source_keys and _is_current_judgment(audit, methods):
-            current_rejudges[str(key)].append(audit)
-
-    rows = []
-    for key in sorted(source_keys):
-        choices = current_rejudges.get(key) or []
-        if choices:
-            rows.append(max(
-                choices,
-                key=lambda audit: (float(audit.get("mtime") or 0), int(audit.get("id") or 0)),
-            ))
-            continue
-        source = originals[key]
-        pending = dict(source)
-        pending["judgment"] = None
-        rows.append(pending)
-    return rows
 
 
 async def build(*, use_cache: bool = True) -> dict:
@@ -908,7 +875,6 @@ async def build(*, use_cache: bool = True) -> dict:
         assign_stable_ids(audits, REGISTRY_FILE)
         link_rejudge_sources(audits)
         VIEWER_ROOT.mkdir(parents=True, exist_ok=True)
-        manifest = _judge_test_manifest(audits)
         archived_pages = _archive_legacy_viewer_pages()
         current_methods = await _current_judge_methods()
         current_grouped: dict[str, list[dict]] = defaultdict(list)
@@ -921,7 +887,6 @@ async def build(*, use_cache: bool = True) -> dict:
             destination = current_grouped if audit["current_judge_method"] else past_grouped
             destination[seed].append(audit)
         seeds = _ordered_seeds(set(current_grouped) | set(past_grouped))
-        judge_test_rows = _judge_test_rows(audits, manifest, current_methods)
         for seed in seeds:
             current = current_grouped.get(seed, [])
             past = past_grouped.get(seed, [])
@@ -940,18 +905,6 @@ async def build(*, use_cache: bool = True) -> dict:
                     title=f"{seed} — past iterations", historical=True,
                 ),
             )
-            if seed in JUDGE_TEST_SEEDS:
-                rows = [
-                    audit for audit in judge_test_rows
-                    if str(audit.get("seed") or "unknown") == seed
-                ]
-                _write_atomic(
-                    VIEWER_ROOT / f"{seed}_judge_tests.html",
-                    _index(
-                        seed, rows, [], seeds=seeds, active_view="judge_tests",
-                        title=f"{seed} — judge tests",
-                    ),
-                )
         families = _seed_families()
         for seed in seeds:
             family = families.get(seed)
@@ -978,7 +931,6 @@ async def build(*, use_cache: bool = True) -> dict:
         "current_trajectories": sum(map(len, current_grouped.values())),
         "past_trajectories": sum(map(len, past_grouped.values())),
         "load_errors": len(errors),
-        "judge_test_sources": len(manifest.get("source_keys") or []),
         "legacy_pages_archived": archived_pages,
         "output": str(VIEWER_ROOT / "index.html"),
     }

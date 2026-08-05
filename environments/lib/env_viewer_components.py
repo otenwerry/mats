@@ -662,13 +662,27 @@ def link_message_refs(text: str) -> str:
     return re.sub(r"\[M(\d+)\]", r'<a href="#M\1">[M\1]</a>', escaped)
 
 
-def link_judge_message_refs(text: str, judgment: dict) -> str:
-    """Link simple, grouped, and ranged judge citations to saved trajectory turns."""
+def _artifact_anchor(artifacts: list, number: int) -> str | None:
+    """The DOM id of the [A<number>] snapshot section rendered by render_judge_view."""
 
-    source_map = (
-        ((judgment.get("envelope") or {}).get("evidence") or {})
-        .get("source_message_map") or []
-    )
+    if not 1 <= number <= len(artifacts):
+        return None
+    artifact = artifacts[number - 1] if isinstance(artifacts[number - 1], dict) else {}
+    path = str(artifact.get("path") or f"Artifact {number}")
+    snapshot = str(artifact.get("snapshot") or "")
+    return artifact_dom_id(path, snapshot) if snapshot else f"judge-artifact-{number}"
+
+
+def link_judge_message_refs(text: str, judgment: dict) -> str:
+    """Link simple, grouped, and ranged judge citations to saved trajectory turns.
+
+    [M#] references link to transcript messages; [A#] references link to the matching
+    artifact snapshot inside the Judge view. Unknown artifact numbers stay plain text.
+    """
+
+    evidence = (judgment.get("envelope") or {}).get("evidence") or {}
+    source_map = evidence.get("source_message_map") or []
+    artifacts = evidence.get("artifacts") or []
     targets = {
         int(item["number"]): int(item["source_index"]) + 1
         for item in source_map
@@ -678,23 +692,27 @@ def link_judge_message_refs(text: str, judgment: dict) -> str:
     }
     escaped = esc(text)
 
+    def link_token(kind: str, number: int, label: str) -> str:
+        if kind == "M":
+            return f'<a href="#M{targets.get(number, number)}">{label}</a>'
+        anchor = _artifact_anchor(artifacts, number)
+        return f'<a href="#{anchor}">{label}</a>' if anchor else label
+
     def replace_group(match: re.Match) -> str:
         content = match.group(1)
-        exact = re.fullmatch(r"M(\d+)", content)
+        exact = re.fullmatch(r"([MA])(\d+)", content)
         if exact:
-            local = int(exact.group(1))
-            target = targets.get(local, local)
-            return f'<a href="#M{target}">[M{local}]</a>'
+            kind, number = exact.group(1), int(exact.group(2))
+            return link_token(kind, number, f"[{kind}{number}]")
 
         def replace_number(number_match: re.Match) -> str:
-            local = int(number_match.group(1))
-            target = targets.get(local, local)
-            return f'<a href="#M{target}">M{local}</a>'
+            kind, number = number_match.group(1), int(number_match.group(2))
+            return link_token(kind, number, f"{kind}{number}")
 
-        linked = re.sub(r"\bM(\d+)\b", replace_number, content)
+        linked = re.sub(r"\b([MA])(\d+)\b", replace_number, content)
         return f"[{linked}]"
 
-    return re.sub(r"\[([^\]\n]*\bM\d+[^\]\n]*)\]", replace_group, escaped)
+    return re.sub(r"\[([^\]\n]*\b[MA]\d+[^\]\n]*)\]", replace_group, escaped)
 
 
 def render_judge_narrative(judgment: dict | None) -> str:

@@ -182,7 +182,6 @@ def point_at(viewer, root: pathlib.Path) -> None:
     viewer.VIEWER_ROOT = root / "viewer"
     viewer.REGISTRY_FILE = root / "trajectory_ids.json"
     viewer.CACHE_ROOT = root / "viewer_cache"
-    viewer.JUDGE_TEST_MANIFEST = root / "judge_test_sources.json"
 
 
 def stamp_current_method(viewer, item: dict) -> dict:
@@ -208,7 +207,13 @@ def test_empty_viewer_build_is_still_navigable() -> None:
         index = (root / "viewer" / "index.html").read_text()
 
     assert stats["trajectories"] == 0
-    assert "No trajectories" in index
+    # Every category section and its full fixed-schema table render even with no data.
+    assert index.count('<section class="seed-block">') == 8
+    assert index.count("— 0</span>") == 8
+    assert index.count('class="runs sortable"') == 8
+    assert '>reward hacking</th>' in index
+    assert '>deception</th>' in index
+    assert '>environment failure</th>' in index
     assert "visuals.html" in index
 
 
@@ -229,7 +234,7 @@ def test_p_other_uses_the_needs_review_trajectory_section() -> None:
         },
     }
     judgment = loader.normalize_structured_judgment(result, family="p_hacking")
-    assert viewer._trajectory_category({"judgment": judgment}) == "review"
+    assert viewer.trajectory_category({"judgment": judgment}) == "review"
 
 
 def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -> None:
@@ -267,7 +272,6 @@ def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -
         "current_trajectories": 1,
         "past_trajectories": 1,
         "load_errors": 1,
-        "judge_test_sources": 0,
         "legacy_pages_archived": 0,
         "output": str(root / "viewer" / "index.html"),
     }
@@ -285,8 +289,12 @@ def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -
     assert '>reward hacking</th>' in index
     assert '>deception</th>' in index
     assert '>noticed honeypot</th>' not in index
-    assert "No trajectories" in reasoning_index
-    assert "test_set" in index and "$1.2500" in index
+    # The p_hacking seed has no trajectories here, but its fixed sections and
+    # family columns still render; deception is not a p_hacking dimension.
+    assert reasoning_index.count('<section class="seed-block">') == 8
+    assert '>reward hacking</th>' in reasoning_index
+    assert '>deception</th>' not in reasoning_index
+    assert "test-set misuse" in index and "$1.2500" in index
     assert 'class="dimension-row"' in new_page
     assert 'class="evidence-next"' in new_page
     assert 'id="M2"' in new_page
@@ -306,7 +314,14 @@ def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -
     assert "complete observable trajectory" in new_page
     assert "reasoning excluded" in new_page
     assert "submit_judgment() · required" in new_page
-    assert '<details class="panel trajectory-panel" id="trajectory-record">' in new_page
+    # The transcript is always visible: a plain section, not a collapsible dropdown.
+    assert '<section class="panel trajectory-panel" id="trajectory-record">' in new_page
+    assert '<details class="panel metadata">' in new_page
+    assert '<span class="metaprev">' in new_page
+    # The removed metadata cells stay gone; abnormal endings surface as flags instead.
+    assert '<div class="metakey">ended</div>' not in new_page
+    assert '<div class="metakey">judgment</div>' not in new_page
+    assert "official run judgment" not in new_page
     assert "native_reasoning_excluded_by_policy" in new_page
     assert "predictions.csv · final" in new_page
     assert "Legacy numeric judgment, shown exactly as stored" in legacy_page
@@ -315,11 +330,13 @@ def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -
     assert "EXACT LEGACY FINAL EVIDENCE" in legacy_page
     assert "does not reconstruct those missing parts from current code" in legacy_page
     assert "8/10" in legacy_page
-    assert "Reward hacking" in visuals
-    assert "Recorded cost" in visuals
+    assert ">base rates</button>" in visuals
+    assert ">cost</button>" in visuals
+    assert "Outcomes by model" in visuals
+    assert "total recorded spend" in visuals
 
 
-def test_generic_judge_pages_replace_and_archive_old_judge_test_pages() -> None:
+def test_generic_judge_pages_archive_and_remove_old_judge_test_pages() -> None:
     viewer = load_viewer()
 
     async def empty(*_args, **_kwargs):
@@ -349,8 +366,6 @@ def test_generic_judge_pages_replace_and_archive_old_judge_test_pages() -> None:
 
         first = asyncio.run(viewer.build(use_cache=False))
         second = asyncio.run(viewer.build(use_cache=False))
-        fraud_tests = (output / "fraud_detection_judge_tests.html").read_text()
-        p_tests = (output / "reasoning_prompt_benchmark_judge_tests.html").read_text()
         fraud_index = (output / "index.html").read_text()
         p_index = (output / "reasoning_prompt_benchmark.html").read_text()
         ml_generic = (output / "judge_fraud_detection.html").read_text()
@@ -361,21 +376,17 @@ def test_generic_judge_pages_replace_and_archive_old_judge_test_pages() -> None:
         ]
         archive = output / "_archive" / "legacy_judge_viewer"
         archived_details = sorted((archive / "pages").glob("*.html"))
+        archived_test_pages = sorted(archive.glob("*_judge_tests.html"))
+        live_test_pages = sorted(output.glob("*_judge_tests.html"))
 
     assert first["legacy_pages_archived"] == 8
     assert second["legacy_pages_archived"] == 0
-    assert viewer._GENERATED_MARKER in fraud_tests
-    assert viewer._GENERATED_MARKER in p_tests
     assert len(archived_details) == 2
-    assert (
-        '<a href="fraud_detection_judge_tests.html" class="active">judge tests</a>'
-        in fraud_tests
-    )
-    assert 'href="judge_fraud_detection.html"' in fraud_tests
-    assert 'href="judge_reasoning_prompt_benchmark.html"' in p_tests
+    assert len(archived_test_pages) == 2
+    assert live_test_pages == []
     assert not any(stale_generic_pages)
-    assert 'href="fraud_detection_judge_tests.html"' in fraud_index
-    assert 'href="reasoning_prompt_benchmark_judge_tests.html"' in p_index
+    assert "judge tests" not in fraud_index.lower()
+    assert "judge tests" not in p_index.lower()
     assert '<a href="index.html" class="active">fraud_detection</a>' in ml_generic
     assert (
         '<a href="judge_fraud_detection.html" class="active">judge view</a>'
@@ -383,7 +394,7 @@ def test_generic_judge_pages_replace_and_archive_old_judge_test_pages() -> None:
     )
     assert '<a href="index.html">trajectories</a>' in ml_generic
     assert '<a href="visuals.html">visuals</a>' in ml_generic
-    assert '<a href="fraud_detection_judge_tests.html">judge tests</a>' in ml_generic
+    assert "judge tests" not in ml_generic.lower()
     assert '<a href="fraud_detection_past.html">past iterations</a>' in ml_generic
     assert (
         '<a href="reasoning_prompt_benchmark.html" class="active">'
@@ -396,8 +407,7 @@ def test_generic_judge_pages_replace_and_archive_old_judge_test_pages() -> None:
         assert "current judge view" in page
         assert '<section class="panel"><div class="meta-grid">' not in page
         assert "<span>Judge prompt</span>" in page
-        assert f"family=`{family}`; stage=`stage_1`" not in page
-        assert f"family=`{family}`; stage=`final`" in page
+        assert "Call identity" not in page
         assert page.count('class="judge-subsection judge-dimension"') == dimensions
         assert "noticed_honeypot" not in page
         assert "evidence-loss caveats are inserted when the call is built" in page
@@ -431,7 +441,7 @@ def test_epoch_is_not_an_index_column_but_stays_in_detail_metadata() -> None:
     assert ">Epoch</th>" not in page
     assert '<td data-sort-value="2">2</td>' not in page
     assert (
-        '<div class="meta-key">epoch</div><div class="meta-value">2</div>'
+        '<div class="metakey">epoch</div><div class="metavalue">2</div>'
         in trajectory
     )
 
@@ -459,80 +469,117 @@ def test_trajectory_index_only_adds_source_column_when_rejudges_exist() -> None:
     assert 'href="trajectory-1.html">1</a>' in mixed
 
 
-def test_judge_test_cohort_is_migrated_then_filled_by_current_rejudgments() -> None:
+def test_deception_column_renders_in_every_ml_table() -> None:
     viewer = load_viewer()
-    fraud = {
-        **audit(legacy=True),
-        "mode": "legacy-fraud-run",
-        "task": "legacy-fraud-task",
-        "seed": "fraud_detection",
-        "epoch": 1,
+    hacked = {**audit(), "id": 1}
+    clean_result = {
+        **structured_judgment()["raw_result"],
+        "reward_hacking": {
+            "types": ["clean"],
+            "explanation": "No hack.",
+            "evidence": {"messages": [], "artifacts": []},
+        },
+        "deception": None,
     }
-    reasoning = {
-        **audit(legacy=True),
-        "mode": "legacy-reasoning-run",
-        "task": "legacy-reasoning-task",
-        "seed": "reasoning_prompt_benchmark",
-        "epoch": 1,
-        "mtime": 3.0,
+    clean = {
+        **audit(),
+        "id": 2,
+        "judgment": loader.normalize_structured_judgment(
+            clean_result, family="ml_training_data_misuse"
+        ),
     }
-    loaded = [fraud, reasoning]
+    dimensions = ["reward_hacking", "deception", "environment_failure"]
+
+    hacked_table = viewer._index_table([hacked], dimension_keys=dimensions)
+    clean_table = viewer._index_table([clean], dimension_keys=dimensions)
+
+    # Fixed family schema: the deception column renders in every ML table, with the
+    # stored null shown as n/a on clean rows.
+    assert ">deception</th>" in hacked_table
+    assert ">deception</th>" in clean_table
+    assert "test-set misuse" in hacked_table
+    assert "clean" in clean_table
+
+
+def test_reward_hacking_labels_are_separate_stacked_chips() -> None:
+    viewer = load_viewer()
+    result = {
+        **structured_judgment()["raw_result"],
+        "reward_hacking": {
+            "types": ["peeked_at_answer_key", "checked_score_without_using_it"],
+            "explanation": "The answer key and score were viewed but not used.",
+            "evidence": {"messages": [], "artifacts": []},
+        },
+        "deception": None,
+    }
+    row = {
+        **audit(),
+        "id": 1,
+        "judgment": loader.normalize_structured_judgment(
+            result, family="ml_training_data_misuse"
+        ),
+    }
+
+    table = viewer._index_table(
+        [row],
+        dimension_keys=["reward_hacking", "deception", "environment_failure"],
+    )
+
+    assert 'class="reward-label-list"' in table
+    assert table.count('class="value-chip value-good"') == 3
+    assert ">answer-key peek</span>" in table
+    assert ">unused test score</span>" in table
+
+
+def test_failed_current_judgment_is_flagged_on_the_main_page() -> None:
+    viewer = load_viewer()
+    prepared = asyncio.run(viewer.prepare_judge_call(
+        family="ml_training_data_misuse", stage="final", messages=[], artifacts=[]
+    ))
+    failed = {
+        **audit(),
+        "mode": "rejudge-failed",
+        "judgment": None,
+        "judge_failure": {
+            "status": "no_structured_answer",
+            "failure_kind": "no_structured_answer",
+            "explanation": "environment judge failed after 4 fresh calls",
+            "fresh_attempt_count": 4,
+        },
+        "score_metadata": {"environment_judge": {
+            "family": "ml_training_data_misuse",
+            "judge_method_sha256": prepared.method_sha256(),
+            "post_validation": "no_structured_answer",
+            "fresh_attempt_count": 4,
+            "fresh_failures": [{"fresh_attempt": number, "kind": "no_structured_answer"}
+                               for number in range(1, 5)],
+        }},
+        "flags": [{
+            "code": "judge_not_judged",
+            "label": "not judged",
+            "severity": "error",
+            "detail": "The judge produced no usable judgment after 4 fresh calls.",
+        }],
+        "integrity_status": "excluded",
+        "integrity_issues": ["judge_not_judged"],
+    }
 
     async def fake_load(*_args, **_kwargs):
-        return loaded, []
+        return [failed], []
 
     with tempfile.TemporaryDirectory() as temporary:
         root = pathlib.Path(temporary)
         point_at(viewer, root)
         viewer.load_all = fake_load
         output = root / "viewer"
-        (output / "pages").mkdir(parents=True)
-        for item in loaded:
-            source = viewer.traj_key(item)
-            seed = item["seed"]
-            detail = f"{source}__judge_old.html"
-            (output / "pages" / detail).write_text("old judgment")
-            (output / f"{seed}_judge_tests.html").write_text(
-                f'<a href="pages/{detail}">old</a>'
-            )
+        stats = asyncio.run(viewer.build(use_cache=False))
+        fraud_main = (output / "index.html").read_text()
+        detail = (output / "trajectory-1.html").read_text()
 
-        first = asyncio.run(viewer.build(use_cache=False))
-        fraud_tests_pending = (
-            output / "fraud_detection_judge_tests.html"
-        ).read_text()
-        fraud_main_pending = (output / "index.html").read_text()
-        fraud_past = (output / "fraud_detection_past.html").read_text()
-
-        rejudge = stamp_current_method(viewer, {
-            **audit(),
-            "mode": "rejudge-current",
-            "task": "retrospective-task",
-            "seed": "fraud_detection",
-            "epoch": 1,
-            "mtime": 10.0,
-            "retrospective_rejudge": {
-                "source_run": fraud["mode"],
-                "source_task": fraud["task"],
-                "seed": fraud["seed"],
-                "epoch": fraud["epoch"],
-                "source_key": "hashed-source-identity",
-            },
-        })
-        loaded.append(rejudge)
-        second = asyncio.run(viewer.build(use_cache=False))
-        fraud_tests_judged = (
-            output / "fraud_detection_judge_tests.html"
-        ).read_text()
-        fraud_main_judged = (output / "index.html").read_text()
-        manifest = (root / "judge_test_sources.json").read_text()
-
-    assert first["judge_test_sources"] == 2
-    assert first["current_trajectories"] == 0
-    assert "Awaiting current judgment" in fraud_tests_pending
-    assert "No trajectories" in fraud_main_pending
-    assert "Historical judgments" in fraud_past
-    assert second["current_trajectories"] == 1
-    assert "Reward hacks" in fraud_tests_judged
-    assert ">Source</th>" in fraud_tests_judged
-    assert "Reward hacks" in fraud_main_judged
-    assert "environment-judge-test-sources-v1" in manifest
+    assert stats["current_trajectories"] == 1
+    assert stats["past_trajectories"] == 0
+    assert "Not judged" in fraud_main
+    assert ">not judged</span>" in fraud_main
+    assert "Judge failure" in detail
+    assert "fresh_failures" in detail
+    assert not (output / "fraud_detection_judge_tests.html").exists()
