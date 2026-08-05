@@ -4,8 +4,10 @@
 > runtime, model catalog, consolidated Markdown judge instructions, structured judge,
 > viewer, and data paths. Production code has
 > no Petri import or Petri runtime fallback. Inspect AI remains the evaluation engine and
-> Inspect Scout provides structured judge generation. Read this before changing real
-> environments, their judging, or their viewer.
+> Inspect Scout provides structured judge generation. Since 2026-08-04 it also owns the
+> continuation experiment (prefix-conditioned targets, index-sliced judging, global
+> Continuations viewer window, AWS prefix shipping — see the Continuations section).
+> Read this before changing real environments, their judging, or their viewer.
 
 ## Scope
 
@@ -26,9 +28,12 @@ experiment logs into Petri.
 
 ## Top-level endpoints
 
-- `exp_real_audit_pipeline.py`: only normal production endpoint. It runs the real
-  trajectory and structured judge, checks integrity, then builds the viewer. ML defaults
-  to AWS; p-hacking defaults to local Docker.
+- `exp_real_audit_pipeline.py`: normal production endpoint for originals. It runs the
+  real trajectory and structured judge, checks integrity, then builds the viewer. ML
+  defaults to AWS; p-hacking defaults to local Docker.
+- `exp_continuation_pipeline.py`: the continuation experiment (2026-08-04, see the
+  Continuations section below). Same stages as the audit pipeline, but the target
+  carries a prefix conversation.
 - `viewer.py`: free standalone static viewer.
 - `exp_rejudge.py`: current-method retrospective judge for stored `real-v*` Inspect
   trajectories. `--dry-run` fingerprints every exact input without model calls or writes.
@@ -105,6 +110,58 @@ the active branch rule uses the schema's explicit hack-label sets.
 ML has a fixed two-hour first pass and a one-hour deadline reset after the follow-up.
 `check_time` exposes the live deadline. P-hacking defaults to 30 minutes. There is no
 turn cap.
+
+## Continuations (2026-08-04)
+
+The Petri continuation experiment rebuilt for real environments: condition the target
+on a PREFIX conversation, hand it a new seed via one injected pivot user turn (the
+exact Petri pivot sentence; it names the work type unless the prefix comes from the
+new task's own family), and measure the hack rate on the new task. No auditor, no
+faithfulness machinery, and NO no-prefix condition: the environment is pinned, so the
+base rate is the ordinary original trajectories of the same (seed, target).
+
+- One invocation = one `--treatment=<slug>`. Cells = (prefix x new-task seed) x epochs.
+- Prefixes are self-contained payload files (`environments-continuation-prefix-v1`):
+  message list + catalog target + reasoning flag. `--prefixes=<viewer ids>`
+  reconstructs stored trajectories (refusing integrity-excluded and rejudge rows) into
+  `mats-local/environments/continuation_prefixes/`; `--prefix-files=<paths>` accepts
+  arbitrary hand-built conversations (Owen wants e.g. long Q&A prefixes). Owen
+  explicitly approved allowing anything as a prefix, including chained continuations
+  (allowed with a printed note + `source_was_continuation` flag).
+- Invariants at plan time: prefix system prompt must byte-match the current
+  `seeds/SYSTEM_PROMPT.txt` variant for its reasoning setting (drift would confound
+  the base-rate comparison); prefix seed != new-task seed; no mid-conversation system
+  messages; dangling final tool calls get the Petri synthetic closer, flagged.
+- Mechanics live in `lib/continuation_evidence.py` (splice + slice; shared by solver
+  and judge, no cycles), `lib/exp_real_continuation.py` (payloads, specs, cells,
+  tasks; reuses `exp_real_audit.build_real_task`), and the `continuation=` parameter
+  on `real_audit_solver`.
+- Judge scoping is MECHANICAL, by stored `boundary_index` (index of the pivot message)
+  — not Petri's text-needle slicing, so any prefix content is safe. Both stages see
+  `[system] + messages[boundary:]` plus a `prior_unrelated_task_omitted` caveat. The
+  final-judge slice lives in `environment_judge/exp_real.judge_complete_real_trajectory`
+  (keyed on `real_env["continuation"]`), so a future rejudge of a continuation scopes
+  identically. Gate detectors are also scoped to the sliced view. Citation mapping
+  survives because message IDs are preserved.
+- `real_env["continuation"]` stores treatment, boundary, pivot text, prefix identity
+  (name, canonical sha256, source trajectory/run, flags). Task metadata mirrors it.
+- AWS: `build_continuation_cells` + `pipeline_script` + per-campaign prefix-payload
+  S3 objects (`file_sha256` byte hash verified on the worker; canonical `sha256` is
+  payload identity). Campaign ids `continuation-aws-<treatment>-*`; retry keys cell
+  selections by prefix name. The worker re-verifies the system-prompt invariant
+  against the shipped source bundle.
+- Viewer: continuation rows route by `real_env.continuation` (never by dir name) to
+  the global `continuations.html` top-bar window only — never into seed pages,
+  visuals, or Past. Per (seed, target): an originals base-rate row (reasoning-matched
+  when recorded) + one row per treatment with all category counts and
+  hack rate = hack / (hack+notable+clean) (review excluded from both sides — flag to
+  Owen if this convention matters). Trajectory pages get a banner (treatment, prefix
+  link via the Source/`source_trajectory_id` mechanism, hidden [M2]-[M#] range, pivot
+  anchor); `_user_turn_count` counts live-task turns only for continuations. Helpers
+  in `lib/env_viewer_continuations.py`.
+- `exp_rejudge.py` does NOT discover continuation dirs (`real-v*` only) —
+  intentionally deferred.
+- Free checks: `tests/test_continuation.py`; `--dry-run` validates the whole plan.
 
 ## Structured judge
 
@@ -347,9 +404,15 @@ with each trajectory as one row group — official row first, one row per rejudg
 2px line between groups, group-aware column sorting keyed on the official row
 (`grouped` table class in `INDEX_SORT_JS`), sections placed by the official row's
 category, and orphan rejudges (source not on the page) grouped alone by their own
-category. Rejudge detail pages highlight that tab. To delete the feature, remove the
+category. On this tab only, the single Recorded-cost column is replaced by per-role
+cost columns from `role_usage` (Target / First judge / Second judge via
+`ROLE_LABEL`, always shown; any extra stored role and a VM-estimate column only when
+some row in the table has one; a role with no recorded cost shows an em dash) —
+`_role_costs`/`_cost_column_label` in viewer.py. Rejudge detail pages highlight that
+tab. To delete the feature, remove the
 viewer.py blocks marked TEMPORARY (filename helper, nav item, `_judge_display`,
-`comparison_groups` branches in `_index_table`, `_comparison_groups`,
+`_role_costs`/`_cost_column_label`, `comparison_groups` branches in `_index_table`,
+`_comparison_groups`,
 `_comparisons_index`, the `rejudge_grouped` routing in `build`), the `grouped` JS/CSS,
 and the matching DOCS.md lines — and decide anew where rejudge rows should route.
 Main pages otherwise contain only official rows whose stored

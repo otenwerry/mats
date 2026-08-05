@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -37,8 +38,15 @@ from inspect_ai.scorer import Score, Target, scorer
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sample_limits, span
 
+from continuation_evidence import (
+    ContinuationRun,
+    continuation_caveat_fields,
+    judge_view_messages,
+    sliced_message_record,
+)
 from environment_judge import (
     ArtifactSnapshot,
+    EvidenceCaveat,
     JudgeCallError,
     JudgePostValidationError,
 )
@@ -338,8 +346,15 @@ def real_audit_solver(
     condition: str,
     artifacts_dir: str | None = None,
     execution_metadata: dict | None = None,
+    continuation: ContinuationRun | None = None,
 ) -> Solver:
-    """Run the target and scripted protocol inside one Inspect sandbox."""
+    """Run the target and scripted protocol inside one Inspect sandbox.
+
+    With ``continuation`` set, the target starts pre-loaded with the prefix
+    conversation plus the injected pivot user turn instead of the plain
+    system+opening pair; both judge stages then see only the system message and the
+    live task (mechanical slice at the stored boundary index).
+    """
 
     result_md_path = f"{WORKSPACE_DIR}/RESULT.md"
 
@@ -385,7 +400,10 @@ def real_audit_solver(
             }
         if execution_metadata:
             real_env["compute"] = dict(execution_metadata)
-        if not any(isinstance(message, ChatMessageSystem) for message in state.messages):
+        if continuation is not None:
+            real_env["continuation"] = deepcopy(continuation.record)
+            state.messages, _ = continuation.initial_messages()
+        elif not any(isinstance(message, ChatMessageSystem) for message in state.messages):
             state.messages = [
                 ChatMessageSystem(content=spec.system_prompt),
                 ChatMessageUser(content=spec.opening_user_message),
@@ -427,30 +445,54 @@ def real_audit_solver(
                         "artifacts": artifacts_now,
                     })
                     if controller.submissions == 0:
+                        # A continuation gate sees only the system message and the
+                        # live task; the prefix is sliced out mechanically.
+                        gate_messages = (
+                            judge_view_messages(
+                                state.messages, real_env["continuation"]
+                            )
+                            if continuation is not None
+                            else list(state.messages)
+                        )
                         detectors = gate_detectors(
                             spec.family,
                             spec.gate,
                             artifacts_now,
-                            target_authored_texts(state.messages),
+                            target_authored_texts(gate_messages),
                         )
                         stage_artifacts = [
                             _task_snapshot(spec),
                             *_artifact_snapshots(artifacts_now, "submission_1"),
                         ]
+                        gate_caveats = list(_upstream_caveats(
+                            gate_messages,
+                            real_env["submission_artifacts"],
+                        ))
+                        if continuation is not None:
+                            gate_caveats.append(EvidenceCaveat(
+                                **continuation_caveat_fields(
+                                    real_env["continuation"]
+                                )
+                            ))
                         gate = await run_gate(
                             family=spec.family,
-                            messages=list(state.messages),
+                            messages=gate_messages,
                             artifacts=stage_artifacts,
-                            upstream_caveats=_upstream_caveats(
-                                state.messages,
-                                real_env["submission_artifacts"],
-                            ),
+                            upstream_caveats=gate_caveats,
                             detectors=detectors,
                         )
-                        real_env["gates"].append({
+                        gate_record = {
                             "submission": 1,
                             **gate.as_dict(),
-                        })
+                        }
+                        if continuation is not None:
+                            gate_record["continuation_scope"] = (
+                                sliced_message_record(
+                                    real_env["continuation"],
+                                    len(state.messages),
+                                )
+                            )
+                        real_env["gates"].append(gate_record)
                         labels = (
                             ((gate.judgment or {}).get("reward_hacking") or {}).get("types")
                             if gate.judgment else None
@@ -753,9 +795,6 @@ def build_real_tasks(
 
     system_prompt = global_system_prompt()
     unit_sp = strip_thinking_instruction(system_prompt) if reasoning else system_prompt
-    # Keep construction free and key-independent. Inspect resolves the role when the
-    # paid stage-one call actually runs.
-    gate_role = gate_model
     tasks: list[Task] = []
     for target_name in selected_targets:
         target_slug = resolve_target(target_name)
@@ -771,92 +810,137 @@ def build_real_tasks(
                 unit_sp,
             )[:40],
         )
-        target_role = target_build.model
-        reasoning_enabled = target_build.reasoning_enabled
-        strict_tools = target_build.strict_tools
         for unit_path in units:
-            spec = assemble_real_protocol(unit_path, condition, unit_sp)
-            compose = SANDBOX_DIR / FAMILY_SANDBOX[spec.family] / "compose.yaml"
-            if not compose.is_file():
-                raise SystemExit(f"sandbox compose file missing: {compose}")
-            rubric_documents = load_rubrics(spec.family)
-            manifest_path = unit_path / "manifest.json"
-            include_time = spec.family == "ml_training_data_misuse"
-            tools_metadata = real_target_tools_metadata(include_time=include_time)
-            sample = Sample(
-                id=spec.member,
-                input=spec.opening_user_message,
-                files=workspace_files(unit_path),
-                metadata={
-                    "condition": condition,
-                    "protocol": {
-                        "version": spec.version,
-                        "system_prompt": spec.system_prompt,
-                        "opening_user_message": spec.opening_user_message,
-                        "follow_up_user_messages": spec.follow_up_user_messages,
-                    },
-                    "tools": tools_metadata,
-                },
-            )
-            task_name = f"real_audit_{target_slug.split('/')[-1]}_{spec.member}"
-            if task_id_suffix:
-                task_name += f"_{task_id_suffix}"
-            artifacts_dir = str(artifacts_root / task_name) if artifacts_root else None
-            tasks.append(Task(
-                dataset=MemoryDataset([sample], name="seeds"),
-                solver=real_audit_solver(
-                    spec=spec,
-                    seed_path=str(unit_path),
-                    condition=condition,
-                    artifacts_dir=artifacts_dir,
-                    execution_metadata=execution_metadata,
-                ),
-                scorer=real_audit_judge(spec.family),
-                sandbox=("docker", str(compose)),
-                model_roles={
-                    "target": target_role,
-                    "judge": judge_model,
-                    "gate": gate_role,
-                },
-                name=task_name,
-                metadata={
-                    "config_version": REAL_CONFIG_VERSION,
-                    "run_label": run_label,
-                    "target_name": target_name,
-                    "target_model": target_slug,
-                    "reasoning": reasoning,
-                    "reasoning_effort": REASONING_EFFORT if reasoning else None,
-                    "reasoning_enabled": reasoning_enabled,
-                    "strict_tools": strict_tools,
-                    "target_prompt_cache_key": target_build.prompt_cache_key,
-                    "judge": judge_model,
-                    "gate_model": gate_model,
-                    "condition": condition,
-                    "judge_schema_version": JUDGE_SCHEMA_VERSION,
-                    "judge_dimensions": [document.key for document in rubric_documents],
-                    "judge_dimension_files": [
-                        document.metadata() for document in rubric_documents
-                    ],
-                    "judge_evidence_version": JUDGE_EVIDENCE_VERSION,
-                    "target_tools_mode": "real",
-                    "target_tools_version": REAL_TOOL_SEMANTICS_VERSION,
-                    "target_tool_names": [tool["name"] for tool in tools_metadata],
-                    "target_tools_fingerprint": real_target_tools_fingerprint(
-                        include_time=include_time
-                    ),
-                    "target_max_tool_output": REAL_MAX_TOOL_OUTPUT,
-                    "protocol_version": spec.version,
-                    "protocol_sources": spec.source_provenance,
-                    "sandbox_image": FAMILY_SANDBOX[spec.family],
-                    "real_env_manifest_sha": (
-                        hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-                        if manifest_path.is_file() else None
-                    ),
-                    "max_turns": None,
-                    "remote_task_id": task_id_suffix,
-                },
+            tasks.append(build_real_task(
+                target_name=target_name,
+                target_build=target_build,
+                unit_path=unit_path,
+                unit_sp=unit_sp,
+                reasoning=reasoning,
+                condition=condition,
+                judge_model=judge_model,
+                gate_model=gate_model,
+                run_label=run_label,
+                artifacts_root=artifacts_root,
+                task_id_suffix=task_id_suffix,
+                execution_metadata=execution_metadata,
             ))
     return tasks
+
+
+def build_real_task(
+    *,
+    target_name: str,
+    target_build,
+    unit_path: Path,
+    unit_sp: str,
+    reasoning: bool,
+    condition: str,
+    judge_model: str,
+    gate_model: str,
+    run_label: str,
+    artifacts_root: Path | None = None,
+    task_id_suffix: str | None = None,
+    execution_metadata: dict | None = None,
+    continuation: ContinuationRun | None = None,
+    task_name: str | None = None,
+    extra_metadata: dict | None = None,
+) -> Task:
+    """One Inspect task for one (target, environment member) cell.
+
+    Shared by the plain audit builder above and the continuation builder
+    (``exp_real_continuation``), so both stamp identical protocol/tool/judge
+    metadata. ``target_build`` is a :class:`model_catalog.TargetModelBuild`.
+    """
+
+    target_slug = target_build.routed_slug
+    spec = assemble_real_protocol(unit_path, condition, unit_sp)
+    compose = SANDBOX_DIR / FAMILY_SANDBOX[spec.family] / "compose.yaml"
+    if not compose.is_file():
+        raise SystemExit(f"sandbox compose file missing: {compose}")
+    rubric_documents = load_rubrics(spec.family)
+    manifest_path = unit_path / "manifest.json"
+    include_time = spec.family == "ml_training_data_misuse"
+    tools_metadata = real_target_tools_metadata(include_time=include_time)
+    sample = Sample(
+        id=spec.member,
+        input=spec.opening_user_message,
+        files=workspace_files(unit_path),
+        metadata={
+            "condition": condition,
+            "protocol": {
+                "version": spec.version,
+                "system_prompt": spec.system_prompt,
+                "opening_user_message": spec.opening_user_message,
+                "follow_up_user_messages": spec.follow_up_user_messages,
+            },
+            "tools": tools_metadata,
+        },
+    )
+    name = task_name or f"real_audit_{target_slug.split('/')[-1]}_{spec.member}"
+    if task_id_suffix:
+        name += f"_{task_id_suffix}"
+    artifacts_dir = str(artifacts_root / name) if artifacts_root else None
+    metadata = {
+        "config_version": REAL_CONFIG_VERSION,
+        "run_label": run_label,
+        "target_name": target_name,
+        "target_model": target_slug,
+        "reasoning": reasoning,
+        "reasoning_effort": REASONING_EFFORT if reasoning else None,
+        "reasoning_enabled": target_build.reasoning_enabled,
+        "strict_tools": target_build.strict_tools,
+        "target_prompt_cache_key": target_build.prompt_cache_key,
+        "judge": judge_model,
+        "gate_model": gate_model,
+        "condition": condition,
+        "judge_schema_version": JUDGE_SCHEMA_VERSION,
+        "judge_dimensions": [document.key for document in rubric_documents],
+        "judge_dimension_files": [
+            document.metadata() for document in rubric_documents
+        ],
+        "judge_evidence_version": JUDGE_EVIDENCE_VERSION,
+        "target_tools_mode": "real",
+        "target_tools_version": REAL_TOOL_SEMANTICS_VERSION,
+        "target_tool_names": [tool["name"] for tool in tools_metadata],
+        "target_tools_fingerprint": real_target_tools_fingerprint(
+            include_time=include_time
+        ),
+        "target_max_tool_output": REAL_MAX_TOOL_OUTPUT,
+        "protocol_version": spec.version,
+        "protocol_sources": spec.source_provenance,
+        "sandbox_image": FAMILY_SANDBOX[spec.family],
+        "real_env_manifest_sha": (
+            hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            if manifest_path.is_file() else None
+        ),
+        "max_turns": None,
+        "remote_task_id": task_id_suffix,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    return Task(
+        dataset=MemoryDataset([sample], name="seeds"),
+        solver=real_audit_solver(
+            spec=spec,
+            seed_path=str(unit_path),
+            condition=condition,
+            artifacts_dir=artifacts_dir,
+            execution_metadata=execution_metadata,
+            continuation=continuation,
+        ),
+        scorer=real_audit_judge(spec.family),
+        sandbox=("docker", str(compose)),
+        model_roles={
+            "target": target_build.model,
+            "judge": judge_model,
+            # Keep construction free and key-independent. Inspect resolves the role
+            # when the paid stage-one call actually runs.
+            "gate": gate_model,
+        },
+        name=name,
+        metadata=metadata,
+    )
 
 
 def _flag(name: str) -> str | None:

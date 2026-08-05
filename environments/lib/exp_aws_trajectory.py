@@ -52,6 +52,17 @@ SUPPORTED_FUNDING = frozenset({
     PERSONAL_REIMBURSEMENT_FUNDING,
 })
 
+# Workers may only run these environments-owned endpoints (job.json is worker input,
+# so the script choice is validated, never trusted).
+WORKER_PIPELINE_SCRIPTS = frozenset({
+    "exp_real_audit_pipeline.py",
+    "exp_continuation_pipeline.py",
+})
+DEFAULT_WORKER_PIPELINE_SCRIPT = "exp_real_audit_pipeline.py"
+# Fixed on-worker location for a continuation prefix payload; baked into the cell's
+# pipeline args at build time and written by worker_main before launch.
+WORKER_PREFIX_PAYLOAD_PATH = "/var/lib/mats-worker/prefix.json"
+
 DEFAULT_SECRET_NAMES = (
     "OPENROUTER_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -1061,10 +1072,135 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
     return cells
 
 
+def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
+                             bucket: str, hourly_price: float) -> list[dict]:
+    """Cells for a continuation campaign: one VM per (prefix, seed, epoch).
+
+    ``cfg["continuation"]`` carries the treatment plus one payload descriptor per
+    prefix ({name, sha256, file_sha256, local_path, target, target_model});
+    ``file_sha256`` is the exact stored file's byte hash used for transport
+    verification, while ``sha256`` is the payload's canonical identity. The payload
+    file is uploaded once per campaign and downloaded by each worker to
+    ``WORKER_PREFIX_PAYLOAD_PATH`` before the pipeline starts.
+    """
+
+    continuation = cfg["continuation"]
+    treatment = continuation["treatment"]
+    payloads_by_name = {item["name"]: item for item in continuation["payloads"]}
+    selections = cfg.get("_cell_selections") or [
+        (payload["name"], seed, original_epoch)
+        for payload in continuation["payloads"]
+        for seed in cfg["seeds"]
+        for original_epoch in range(1, cfg["epochs"] + 1)
+    ]
+    cells = []
+    for prefix_name, seed, original_epoch in selections:
+        payload = payloads_by_name.get(prefix_name)
+        if payload is None:
+            raise AwsTrajectoryError(
+                f"continuation cell references unknown prefix {prefix_name!r}"
+            )
+        raw = f"{treatment}-{prefix_name}-{seed}-e{original_epoch}"
+        suffix = hashlib.sha256(raw.encode()).hexdigest()[:8]
+        cell_id = f"{_safe_slug(raw)}-{suffix}"
+        task_suffix = cell_id
+        worker_run_dir = f"{campaign_id}-{cell_id}"
+        cell_prefix = f"campaigns/{campaign_id}/cells/{cell_id}"
+        model_last = payload["target_model"].split("/")[-1]
+        task_name = (
+            f"continuation_{treatment}_{model_last}_{seed}_p{prefix_name}"
+            f"_{task_suffix}"
+        )
+        args = [
+            f"--treatment={treatment}",
+            f"--prefix-files={WORKER_PREFIX_PAYLOAD_PATH}",
+            f"--seed-dir={cfg.get('seed_dir') or Path(cfg['seeds_path']).name}",
+            f"--seeds={seed}",
+            "--epochs=1",
+            f"--condition={cfg['condition']}",
+            f"--judge={cfg['judge_resolved']}",
+            f"--gate-model={cfg['gate_model']}",
+            "--concurrency=1",
+            "--sandbox-concurrency=1",
+            f"--time-limit={cfg['time_limit']}",
+            "--compute=local",
+            "--skip-viewer",
+        ]
+        cells.append({
+            "schema_version": AWS_SCHEMA_VERSION,
+            "kind": "trajectory",
+            "campaign_id": campaign_id,
+            "cell_id": cell_id,
+            "target": payload["target"],
+            "target_model": payload["target_model"],
+            "seed": seed,
+            "original_epoch": original_epoch,
+            "treatment": treatment,
+            "prefix_name": prefix_name,
+            "prefix_sha256": payload["sha256"],
+            "prefix_payload_key": (
+                f"campaigns/{campaign_id}/prefixes/"
+                f"{prefix_name}-{payload['sha256'][:12]}.json"
+            ),
+            "prefix_payload_sha256": payload["file_sha256"],
+            "prefix_payload_local": payload["local_path"],
+            "pipeline_script": "exp_continuation_pipeline.py",
+            "task_suffix": task_suffix,
+            "task_name": task_name,
+            "worker_run_dir": worker_run_dir,
+            "bucket": bucket,
+            "region": cfg["aws_region"],
+            "instance_type": cfg["aws_instance_type"],
+            "funding": cfg.get("aws_funding"),
+            "hourly_price_usd": hourly_price,
+            "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
+            "source_sha256": source["sha256"],
+            "source_bytes": source["bytes"],
+            "job_key": f"{cell_prefix}/job.json",
+            "result_key": f"{cell_prefix}/result.tar.gz",
+            "complete_key": f"{cell_prefix}/complete.json",
+            "failure_key": f"{cell_prefix}/failure.json",
+            "pipeline_args": args,
+            "allowed_secret_names": list(cfg.get("worker_allowed_secret_names") or []),
+            "status": "planned",
+        })
+    return cells
+
+
+def _upload_prefix_payloads(clients: dict, cells: list[dict]) -> None:
+    """Upload each unique prefix payload once, verifying local bytes first."""
+
+    uploaded: set[str] = set()
+    for cell in cells:
+        key = cell.get("prefix_payload_key")
+        if not key or key in uploaded:
+            continue
+        local = Path(cell["prefix_payload_local"])
+        if not local.is_file():
+            raise AwsTrajectoryError(
+                f"continuation prefix payload is missing locally: {local}"
+            )
+        digest = _sha256_file(local)
+        if digest != cell["prefix_payload_sha256"]:
+            raise AwsTrajectoryError(
+                f"continuation prefix payload {local} changed since planning "
+                f"(sha {digest[:12]} != recorded "
+                f"{cell['prefix_payload_sha256'][:12]})"
+            )
+        clients["s3"].upload_file(
+            str(local), cell["bucket"], key,
+            ExtraArgs={"ServerSideEncryption": "AES256"},
+        )
+        uploaded.add(key)
+
+
 def _campaign_id(cfg: dict) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    label = cfg["targets"][0] if len(cfg["targets"]) == 1 else f"{len(cfg['targets'])}targets"
     nonce = uuid.uuid4().hex[:8]
+    if cfg.get("continuation"):
+        label = _safe_slug(cfg["continuation"]["treatment"])
+        return f"continuation-aws-{label}-{cfg['epochs']}ep-{stamp}-{nonce}"
+    label = cfg["targets"][0] if len(cfg["targets"]) == 1 else f"{len(cfg['targets'])}targets"
     return (
         f"real-v2-aws-{_safe_slug(label)}-{cfg['condition']}-"
         f"{cfg['epochs']}ep-{stamp}-{nonce}"
@@ -1691,12 +1827,16 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
         raise AwsTrajectoryError(
             f"AWS ML campaigns require the pinned {AGENT_TIME_LIMIT_SECONDS}s agent limit"
         )
+    continuation = cfg.get("continuation")
     selected_cells = cfg.get("_cell_selections")
-    planned_cells = (
-        len(selected_cells)
-        if selected_cells
-        else len(cfg["targets"]) * len(cfg["seeds"]) * int(cfg["epochs"])
-    )
+    if selected_cells:
+        planned_cells = len(selected_cells)
+    elif continuation:
+        planned_cells = (
+            len(continuation["payloads"]) * len(cfg["seeds"]) * int(cfg["epochs"])
+        )
+    else:
+        planned_cells = len(cfg["targets"]) * len(cfg["seeds"]) * int(cfg["epochs"])
     if planned_cells < 1:
         raise AwsTrajectoryError("AWS campaign has no trajectory cells to run")
     # Quota and scheduling should reflect the work that can actually run. In
@@ -1717,7 +1857,8 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             "aws_funding": preflight["funding"],
             "worker_allowed_secret_names": preflight["stored_secret_names"],
         }
-        cells = build_cells(
+        cell_builder = build_continuation_cells if continuation else build_cells
+        cells = cell_builder(
             worker_cfg, campaign_id=campaign_id, source=source,
             bucket=preflight["bucket"], hourly_price=preflight["hourly_price_usd"],
         )
@@ -1756,6 +1897,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             f"campaigns/{campaign_id}/source/source.tar.gz",
             ExtraArgs={"ServerSideEncryption": "AES256"},
         )
+        _upload_prefix_payloads(preflight["clients"], cells)
         state = {
             "schema_version": AWS_SCHEMA_VERSION,
             "campaign_id": campaign_id,
@@ -1777,7 +1919,8 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                     "condition", "judge_resolved", "gate_model", "time_limit",
                     "target_models", "aws_secret_env",
                 )
-            },
+            } | ({"continuation": continuation, "seed_dir": cfg.get("seed_dir")}
+                 if continuation else {}),
             "cells": cells,
         }
         _save_campaign(state, data_root, preflight["clients"])
@@ -1856,11 +1999,17 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
     ):
         if not cfg.get(f"{config_key}_explicit") and old.get(state_key) is not None:
             retry_cfg[config_key] = old[state_key]
+    continuation_retry = bool(original_cfg.get("continuation"))
     retry_cfg.update({
         "targets": list(dict.fromkeys(cell["target"] for cell in failed)),
         "seeds": list(dict.fromkeys(cell["seed"] for cell in failed)),
+        # Continuation cells are keyed by prefix, plain cells by target.
         "_cell_selections": [
-            (cell["target"], cell["seed"], cell["original_epoch"])
+            (
+                cell["prefix_name"] if continuation_retry else cell["target"],
+                cell["seed"],
+                cell["original_epoch"],
+            )
             for cell in failed
         ],
         "campaign_id": (
@@ -2150,7 +2299,39 @@ def worker_main(job_path: Path) -> int:
         "MATS_REMOTE_TASK_SUFFIX": job["task_suffix"],
         "MATS_REMOTE_COMPUTE_JSON": json.dumps(compute, separators=(",", ":")),
     })
-    script = Path("/opt/supermats/mats/environments/exp_real_audit_pipeline.py")
+    script_name = job.get("pipeline_script") or DEFAULT_WORKER_PIPELINE_SCRIPT
+    if script_name not in WORKER_PIPELINE_SCRIPTS:
+        raise AwsTrajectoryError(
+            f"job requests unsupported pipeline script {script_name!r}"
+        )
+    if job.get("prefix_payload_key"):
+        payload_path = Path(WORKER_PREFIX_PAYLOAD_PATH)
+        _aws_cli(
+            "s3", "cp",
+            f"s3://{job['bucket']}/{job['prefix_payload_key']}",
+            str(payload_path), "--region", job["region"],
+        )
+        digest = _sha256_file(payload_path)
+        if digest != job["prefix_payload_sha256"]:
+            failure = {
+                "schema_version": AWS_SCHEMA_VERSION,
+                "campaign_id": job["campaign_id"],
+                "cell_id": job["cell_id"],
+                "instance_id": instance_id,
+                "reason": (
+                    "downloaded continuation prefix payload failed its SHA-256 "
+                    f"check ({digest[:12]} != {job['prefix_payload_sha256'][:12]})"
+                ),
+                "failure_code": "prefix_checksum_failed",
+                "completed_at": _utc_now(),
+            }
+            marker = worker_root / "failure.json"
+            marker.write_text(json.dumps(failure, sort_keys=True))
+            _aws_cli("s3", "cp", str(marker),
+                     f"s3://{job['bucket']}/{job['failure_key']}",
+                     "--region", job["region"], "--sse", "AES256")
+            return 1
+    script = Path("/opt/supermats/mats/environments") / script_name
     command = [sys.executable, str(script), *job["pipeline_args"]]
     started = _utc_now()
     with log_path.open("w") as log:
