@@ -267,10 +267,17 @@ provider-failed source look valid.
 
 The free planning pass builds every exact current prompt. It stores a per-source input
 SHA-256 and computes a method fingerprint from the resolved judge model, schema version,
-`lib/environment_judge/*.py`, `lib/real_judge_evidence.py`, and active rubric files. A
-method change therefore uses a new run directory. Within one method directory, only a
-source whose successful stored input SHA matches is considered complete. `--force`
-creates a separate attempt and never removes prior logs.
+`lib/environment_judge/*.py`, `lib/real_judge_evidence.py`, and active rubric files. The
+method fingerprint does NOT include the source selection or family. Since 2026-08-04
+every invocation writes its own timestamped directory
+(`rejudge-current-<judge>-<method fp12>-<timestamp>`): before that, a second batch
+under the same method (e.g. `--family=ml...` after a p-hacking run) resolved to the
+existing directory and died on Inspect eval_set's dirty-log-dir guard, and would have
+overwritten the first batch's campaign/accounting sidecars. Completion never depended
+on directory identity: a source is complete when any `rejudge-current-*` directory
+holds a successful judgment matching its input SHA, method SHA, and judge model.
+`--force` skips that scan (dir suffix `-rerun-<timestamp>`) and never removes prior
+logs.
 
 The current saved inventory has 31 trajectories: 19 ML and 12 p-hacking. All have final
 artifact records. All predate separate `task_context` and `submission_artifacts` fields,

@@ -242,11 +242,16 @@ async def _plan() -> tuple[list[SourceTrajectory], dict, str, Path]:
         f"rejudge-current-{_safe_name(judge_name)}-"
         f"{campaign['method_fingerprint'][:12]}"
     )
-    log_dir = LOGS_ROOT / run_name
+    # One fresh directory per invocation batch: Inspect's eval_set refuses to add a
+    # new task to a directory that already holds another batch's logs, and a shared
+    # directory would also overwrite the earlier batch's campaign/accounting sidecars.
+    # Cross-batch resume is unaffected — completed sources are found by scanning every
+    # rejudge-current-* directory, not by directory identity.
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     if "--force" in sys.argv:
-        log_dir = LOGS_ROOT / (
-            run_name + "-rerun-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-        )
+        log_dir = LOGS_ROOT / f"{run_name}-rerun-{timestamp}"
+    else:
+        log_dir = LOGS_ROOT / f"{run_name}-{timestamp}"
     return sources, campaign, judge_model, log_dir
 
 

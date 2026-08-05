@@ -244,7 +244,8 @@ uv run exp_rejudge.py
         point used by new production runs
     exact judge inputs, current code/rubric SHA-256, schema, source identity, evidence
         caveats, structured results, token usage, and cost are stored in new Inspect logs
-    run dirs: mats-local/environments/logs/rejudge-current-<judge>-<method fingerprint>/
+    run dirs: mats-local/environments/logs/
+        rejudge-current-<judge>-<method fingerprint>-<timestamp>/, one per invocation
     successful exact source-input + judge-method + judge-model matches resume across
         prior rejudge-current-* directories; --force creates a new attempt directory
         without deleting prior results
