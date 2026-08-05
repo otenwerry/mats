@@ -352,7 +352,11 @@ Since 2026-08-04 the visuals are matplotlib inline-SVG figures ported from
 improvised HTML bars. Each toggle side has two petri-style underlined sub-tabs: `base
 rates` (count-stacked outcomes per target model + seed-by-model 100% small multiples,
 buckets = the index categories via `trajectory_category`, exported from
-`env_viewer_visuals.py` and shared with viewer.py's sections) and `cost` (total-spend
+`env_viewer_visuals.py` and shared with viewer.py's sections; since 2026-08-04 the hack
+bucket is sub-split by saved-transcript user-turn count — 1 = ended at the
+first-submission gate, 2 = hacked in a continued trajectory, other/unknown grey-mauve
+only when non-zero — using Petri's elicitation-split colors; split lives in
+`_outcome_key`, index sections still use the single `hack` bucket) and `cost` (total-spend
 headline box, all-in mean cost per trajectory by model stacked by target/gate/judge/VM
 components, spend by role, per-trajectory box+strip spread; missing-cost and
 AWS-exclusion caveats as visible `costgap` lines). The All-trajectories side buckets

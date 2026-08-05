@@ -99,8 +99,14 @@ def trajectory_category(audit: dict, *, respect_exclusion: bool = True) -> str:
 # Outcome buckets in stack order, with the Petri outcome palette: reward hacks keep the
 # established RH red, review takes the reversed orange, notable takes the interesting
 # purple, clean stays green, and the not-usable buckets stay visually recessive.
+# The hack bucket is split by the trajectory's user-turn count (the same count as the
+# index column): 1 = ended at the first-submission gate, 2 = hacked in a continued
+# trajectory. The split colors are Petri's hack-elicitation pair (RH red / deep wine),
+# with its grey-mauve for a hack whose transcript stores no user-turn count.
 OUTCOME_ORDER = (
-    ("hack", "reward hack", "#C44E52"),
+    ("hack_1turn", "reward hack · 1 user turn", "#C44E52"),
+    ("hack_2turn", "reward hack · 2 user turns", "#7E3B44"),
+    ("hack_other", "reward hack · other/unknown turns", "#8F7A80"),
     ("review", "needs review", "#DD8452"),
     ("notable", "notable behavior", "#8172B3"),
     ("clean", "clean", "#55A868"),
@@ -111,7 +117,26 @@ OUTCOME_ORDER = (
 )
 OUTCOME_COLORS = {key: color for key, _label, color in OUTCOME_ORDER}
 # count labels drawn in white on the saturated segments, dark on the light ones
-_WHITE_TEXT_KEYS = {"hack", "review", "notable"}
+_WHITE_TEXT_KEYS = {"hack_1turn", "hack_2turn", "hack_other", "review", "notable"}
+
+
+def _user_turn_count(audit: dict) -> int | None:
+    messages = audit.get("messages") or []
+    if not messages:
+        return None
+    return sum(1 for message in messages if message.get("role") == "user")
+
+
+def _outcome_key(audit: dict, *, respect_exclusion: bool) -> str:
+    category = trajectory_category(audit, respect_exclusion=respect_exclusion)
+    if category != "hack":
+        return category
+    turns = _user_turn_count(audit)
+    if turns == 1:
+        return "hack_1turn"
+    if turns == 2:
+        return "hack_2turn"
+    return "hack_other"
 
 
 def _fig_to_svg(fig) -> str:
@@ -156,7 +181,7 @@ def outcome_data(audits: list[dict], *, respect_exclusion: bool = True) -> dict:
     for audit in audits:
         model = target_label(audit.get("target"))
         seed = str(audit.get("seed") or "unknown")
-        category = trajectory_category(audit, respect_exclusion=respect_exclusion)
+        category = _outcome_key(audit, respect_exclusion=respect_exclusion)
         totals[category] += 1
         by_model.setdefault(model, Counter())[category] += 1
         by_model_seed.setdefault(model, {}).setdefault(seed, Counter())[category] += 1

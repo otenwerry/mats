@@ -171,7 +171,9 @@ uv run viewer.py
         visible pointers while the underlying Inspect log remains unchanged
     visuals are matplotlib SVG figures over current structured judgments in two sub-tabs
         per view: base rates (outcome composition by target model in counts, plus
-        seed-by-model percentage small multiples) and cost (total-spend headline, all-in
+        seed-by-model percentage small multiples; the reward-hack bucket is split by
+        user-turn count — 1 turn / 2 turns / other-or-unknown) and cost (total-spend
+        headline, all-in
         cost per trajectory by model stacked by component, spend by role, per-trajectory
         cost spread; roles display as Target, First judge (the stored gate role), Second
         judge (the stored judge role), and VM estimate; missing-cost and AWS-exclusion

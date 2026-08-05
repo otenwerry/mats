@@ -739,6 +739,35 @@ class ViewerVisualTests(unittest.TestCase):
         self.assertIn("total recorded spend", rendered)
         self.assertNotIn("Official run judgments", rendered)
 
+    def test_outcome_data_splits_hacks_by_user_turn_count(self):
+        structured = loader.normalize_structured_judgment(
+            structured_result(), family="ml_training_data_misuse"
+        )
+
+        def audit_with_turns(user_turns):
+            messages = [
+                {"number": index + 1,
+                 "role": "user" if index < user_turns else "assistant"}
+                for index in range(user_turns + 1)
+            ]
+            return {"target": "model-a", "judgment": structured,
+                    "role_usage": {}, "messages": messages}
+
+        data = visuals.outcome_data([
+            audit_with_turns(1),
+            audit_with_turns(2),
+            # no stored transcript -> turn count unknown
+            {"target": "model-a", "judgment": structured, "role_usage": {}},
+        ])
+        self.assertEqual(
+            [key for key, _ in data["categories"]],
+            ["hack_1turn", "hack_2turn", "hack_other"],
+        )
+        self.assertEqual(
+            data["rows"][0]["counts"],
+            {"hack_1turn": 1, "hack_2turn": 1, "hack_other": 1},
+        )
+
     def test_all_view_buckets_excluded_runs_by_judgment_not_by_exclusion(self):
         structured = loader.normalize_structured_judgment(
             structured_result(), family="ml_training_data_misuse"
