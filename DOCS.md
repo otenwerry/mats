@@ -164,7 +164,9 @@ uv run viewer.py
         sorting moves whole groups by their official row
     on the judge-comparisons tab recorded cost splits into per-role columns (Target /
         First judge / Second judge, plus any extra stored role and a VM-estimate column
-        only when present in the table); a role with no recorded cost shows —
+        only when present in the table); a role with no recorded cost shows —; a
+        rejudge's single call shows under First judge when its source ended at the
+        gate (one user turn), otherwise under Second judge
     obsolete judge-test/past/detail HTML moves to viewer/_archive/legacy_judge_viewer/;
         Judge Tests pages stay retired while Past pages are rebuilt
     Judge view pairs the exact stored numbered trajectory with a scope card and transcript

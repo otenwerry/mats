@@ -618,6 +618,16 @@ def _index_table(
         user_turns = _user_turn_count(audit)
         if show_judge:
             role_costs = _role_costs(audit)
+            if (
+                retrospective
+                and user_turns == 1
+                and "judge" in role_costs
+                and "gate" not in role_costs
+            ):
+                # A rejudge is one call. On a source that ended at the first-submission
+                # gate it redoes the stage-one judgment, so its cost belongs under
+                # First judge, matching the official row above it.
+                role_costs["gate"] = role_costs.pop("judge")
             cost_cells = "".join(
                 f'<td class="cost"{_sort_attr(role_costs.get(key))}>'
                 + (f'${role_costs[key]:.4f}' if key in role_costs else "—")

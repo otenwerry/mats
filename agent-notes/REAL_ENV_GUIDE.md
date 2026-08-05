@@ -408,7 +408,11 @@ category. On this tab only, the single Recorded-cost column is replaced by per-r
 cost columns from `role_usage` (Target / First judge / Second judge via
 `ROLE_LABEL`, always shown; any extra stored role and a VM-estimate column only when
 some row in the table has one; a role with no recorded cost shows an em dash) —
-`_role_costs`/`_cost_column_label` in viewer.py. Rejudge detail pages highlight that
+`_role_costs`/`_cost_column_label` in viewer.py. A rejudge stores its one call under
+role `judge`; the table remaps it to the First-judge column when the source ended at
+the first-submission gate (user-turn count 1, the same signal as the visuals hack
+split), because there it redoes the stage-one judgment (Owen 2026-08-04: leaving it
+under Second judge on one-turn runs was a mistake). Rejudge detail pages highlight that
 tab. To delete the feature, remove the
 viewer.py blocks marked TEMPORARY (filename helper, nav item, `_judge_display`,
 `_role_costs`/`_cost_column_label`, `comparison_groups` branches in `_index_table`,

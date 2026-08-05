@@ -527,13 +527,57 @@ def test_rejudges_render_only_on_the_judge_comparisons_page() -> None:
     assert ">First judge cost</th>" in comparisons
     assert ">Second judge cost</th>" in comparisons
     assert ">VM estimate</th>" not in comparisons
-    assert "$1.2500" in comparisons and "$0.1000" in comparisons
-    assert "$0.5500" in comparisons
-    assert '<td class="cost">—</td>' in comparisons
+    assert (
+        '<td class="cost" data-sort-value="1.25">$1.2500</td>'
+        '<td class="cost" data-sort-value="0.1">$0.1000</td>'
+        '<td class="cost">—</td>' in comparisons
+    )
+    # This source ended at the gate (one user turn), so the rejudge's single call
+    # lands under First judge, aligned with the official row above it.
+    assert (
+        '<td class="cost">—</td>'
+        '<td class="cost" data-sort-value="0.55">$0.5500</td>'
+        '<td class="cost">—</td>' in comparisons
+    )
     assert ">Recorded cost</th>" in index
     assert (
         '<a href="judge_comparisons_fraud_detection.html" class="active">'
         in rejudge_detail
+    )
+
+
+def test_rejudge_cost_column_follows_the_stage_it_redoes() -> None:
+    viewer = load_viewer()
+
+    def rejudge_row(user_turns: int, ident: int) -> dict:
+        messages = [
+            {"role": "user", "text": "", "tool_calls": []} for _ in range(user_turns)
+        ] + [{"role": "assistant", "text": "done", "tool_calls": []}]
+        return {
+            "id": ident,
+            "target": "mockllm/target",
+            "judge": "anthropic/claude-opus-4-8",
+            "messages": messages,
+            "role_usage": {"judge": {"total_cost": 0.5}},
+            "retrospective_rejudge": {"source_key": "abc"},
+        }
+
+    gated = viewer._index_table(
+        [], dimension_keys=[], comparison_groups=[[rejudge_row(1, 1)]]
+    )
+    continued = viewer._index_table(
+        [], dimension_keys=[], comparison_groups=[[rejudge_row(2, 2)]]
+    )
+
+    assert (
+        '<td class="cost">—</td>'
+        '<td class="cost" data-sort-value="0.5">$0.5000</td>'
+        '<td class="cost">—</td>' in gated
+    )
+    assert (
+        '<td class="cost">—</td>'
+        '<td class="cost">—</td>'
+        '<td class="cost" data-sort-value="0.5">$0.5000</td>' in continued
     )
 
 
