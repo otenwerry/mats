@@ -473,11 +473,16 @@ def test_trajectory_index_only_adds_source_column_when_rejudges_exist() -> None:
 def test_rejudges_render_only_on_the_judge_comparisons_page() -> None:
     viewer = load_viewer()
     official = stamp_current_method(viewer, audit())
+    official["role_usage"] = {
+        "target": {"total_cost": 1.25},
+        "gate": {"total_cost": 0.1},
+    }
     rejudge = stamp_current_method(viewer, audit())
     rejudge.update({
         "mode": "rejudge-current-opus-4.8-abcdef123456",
         "judge": "anthropic/claude-opus-4-8",
         "mtime": 3.0,
+        "role_usage": {"judge": {"total_cost": 0.55}},
         "retrospective_rejudge": {
             "source_run": "new-run",
             "source_task": "real_audit_test_fraud_detection",
@@ -515,6 +520,17 @@ def test_rejudges_render_only_on_the_judge_comparisons_page() -> None:
     assert comparisons.count('class="group-start"') == 1
     assert 'href="trajectory-1.html">1</a>' in comparisons
     assert ">opus-4.8</td>" in comparisons
+    # Recorded cost splits into one column per role; uncalled roles show a dash,
+    # and the trajectories page keeps its single Recorded cost column.
+    assert ">Recorded cost</th>" not in comparisons
+    assert ">Target cost</th>" in comparisons
+    assert ">First judge cost</th>" in comparisons
+    assert ">Second judge cost</th>" in comparisons
+    assert ">VM estimate</th>" not in comparisons
+    assert "$1.2500" in comparisons and "$0.1000" in comparisons
+    assert "$0.5500" in comparisons
+    assert '<td class="cost">—</td>' in comparisons
+    assert ">Recorded cost</th>" in index
     assert (
         '<a href="judge_comparisons_fraud_detection.html" class="active">'
         in rejudge_detail

@@ -41,6 +41,7 @@ from env_viewer_load import (  # noqa: E402
     viewer_build_lock,
 )
 from env_viewer_visuals import (  # noqa: E402
+    ROLE_LABEL,
     VISUALS_CSS,
     VISUALS_JS,
     render_visuals,
@@ -274,6 +275,26 @@ def _recorded_cost(audit: dict) -> tuple[float, bool]:
             total += float(vm_cost)
             found = True
     return total, found
+
+
+def _role_costs(audit: dict) -> dict[str, float]:
+    """Recorded cost split by stored role, plus the VM estimate on original runs."""
+    costs: dict[str, float] = {}
+    for role, usage in (audit.get("role_usage") or {}).items():
+        if isinstance(usage, dict) and isinstance(usage.get("total_cost"), (int, float)):
+            costs[str(role)] = costs.get(str(role), 0.0) + float(usage["total_cost"])
+    if not audit.get("retrospective_rejudge"):
+        compute = ((audit.get("real_env") or {}).get("compute") or {})
+        vm_cost = compute.get("estimated_vm_cost_usd")
+        if isinstance(vm_cost, (int, float)):
+            costs["vm"] = costs.get("vm", 0.0) + float(vm_cost)
+    return costs
+
+
+def _cost_column_label(key: str) -> str:
+    if key == "vm":
+        return "VM estimate"
+    return f"{ROLE_LABEL.get(key, key)} cost"
 
 
 def _seed_families() -> dict[str, str]:
@@ -557,6 +578,17 @@ def _index_table(
         audit.get("retrospective_rejudge") or audit.get("source_trajectory_id") is not None
         for audit in audits
     )
+    # Comparison mode splits recorded cost into one column per role that cost money:
+    # target/gate/judge always, then any other stored role, then the VM estimate.
+    cost_columns: list[str] = []
+    if show_judge:
+        present: set[str] = set()
+        for audit in audits:
+            present.update(_role_costs(audit))
+        cost_columns = ["target", "gate", "judge"]
+        cost_columns += sorted(present - {"target", "gate", "judge", "vm"})
+        if "vm" in present:
+            cost_columns.append("vm")
     cells = []
     for audit, group_key, group_start in ordered:
         cost, has_cost = _recorded_cost(audit)
@@ -584,6 +616,19 @@ def _index_table(
             _dimension_cell(audit, key) for key in dimension_keys
         )
         user_turns = _user_turn_count(audit)
+        if show_judge:
+            role_costs = _role_costs(audit)
+            cost_cells = "".join(
+                f'<td class="cost"{_sort_attr(role_costs.get(key))}>'
+                + (f'${role_costs[key]:.4f}' if key in role_costs else "—")
+                + '</td>'
+                for key in cost_columns
+            )
+        else:
+            cost_cells = (
+                f'<td class="cost"{_sort_attr(cost if has_cost else None)}>'
+                f'{f"${cost:.4f}" if has_cost else "—"}</td>'
+            )
         row_attributes = f' data-id="{int(audit["id"])}"'
         if group_key is not None:
             row_attributes += f' data-group="{esc(group_key, quote=True)}"'
@@ -604,9 +649,8 @@ def _index_table(
             )
             + dimensions
             + _flags_cell(audit)
-            + f'<td class="cost"{_sort_attr(cost if has_cost else None)}>'
-            f'{f"${cost:.4f}" if has_cost else "—"}</td>'
-            "</tr>"
+            + cost_cells
+            + "</tr>"
         )
     dimension_headers = "".join(
         f'<th data-sort-type="{_dimension_sort_type(audits, key)}">'
@@ -615,6 +659,13 @@ def _index_table(
     )
     judge_header = '<th data-sort-type="text">Judge</th>' if show_judge else ""
     provenance_header = '<th data-sort-type="text">Source</th>' if show_provenance else ""
+    if show_judge:
+        cost_headers = "".join(
+            f'<th data-sort-type="number">{esc(_cost_column_label(key))}</th>'
+            for key in cost_columns
+        )
+    else:
+        cost_headers = '<th data-sort-type="number">Recorded cost</th>'
     table_class = "runs sortable grouped" if show_judge else "runs sortable"
     return (
         f'<table class="{table_class}"><thead><tr>'
@@ -622,7 +673,8 @@ def _index_table(
         f'{judge_header}'
         '<th data-sort-type="number">User turns</th>'
         f'{provenance_header}{dimension_headers}'
-        '<th data-sort-type="text">Flags</th><th data-sort-type="number">Recorded cost</th>'
+        '<th data-sort-type="text">Flags</th>'
+        f'{cost_headers}'
         f'</tr></thead><tbody>{"".join(cells)}</tbody></table>'
     )
 
