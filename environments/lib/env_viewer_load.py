@@ -912,6 +912,11 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
 
 def traj_key(audit: dict) -> str:
     """Stable identity used by the existing environments data files."""
+    retrospective = audit.get("retrospective_rejudge")
+    if isinstance(retrospective, dict) and retrospective.get("source_key"):
+        # One rejudge campaign packs every source into a single Inspect task, so
+        # mode/task/seed/epoch collides across targets sharing a seed and epoch.
+        return f"{audit['mode']}__rejudge__{retrospective['source_key']}"
     return (
         f"{audit['mode']}__{audit['task']}__{audit['seed']}__e{audit['epoch']}"
     )

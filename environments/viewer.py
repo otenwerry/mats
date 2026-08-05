@@ -51,6 +51,7 @@ from environment_judge import (  # noqa: E402
     prepare_judge_call,
     provider_request_record,
 )
+from judge_selection import judge_shortname  # noqa: E402
 from project_paths import DATA_ROOT, LOGS_ROOT, SEEDS_ROOT, VIEWER_ROOT  # noqa: E402
 
 
@@ -126,6 +127,7 @@ details.raw summary{font-size:12px;color:#6f7584;cursor:pointer}details.raw pre,
 .legacy-banner{border:1px solid #d8bd73;background:#fff9e9;padding:7px;border-radius:6px;font-size:12px}.cost{font-variant-numeric:tabular-nums}
 .rejudge-banner{border:1px solid #bdcbe5;background:#f3f6fc;padding:7px 9px;border-radius:6px;font-size:12px;margin:10px 0}.kind{font-size:10px;border:1px solid #d9deea;background:#f5f7fb;border-radius:9px;padding:1px 6px;color:#59657b;white-space:nowrap}
 .flag-list{display:flex;gap:3px;flex-wrap:wrap;min-width:95px}.flag{display:inline-block;border-radius:8px;padding:1px 5px;background:#fff3cd;color:#735e13;font-size:9px;white-space:nowrap;cursor:help}.flag.error{background:#ffd7d7;color:#7f1d1d}.section-note{color:#7b8190;font-size:11px;font-weight:400}
+.runs.grouped tr.group-start td{border-top:2px solid #98a0b3}
 """
 
 
@@ -159,8 +161,22 @@ INDEX_SORT_JS = r"""<script>
         header.setAttribute("aria-sort", ascending ? "ascending" : "descending");
         var type = header.getAttribute("data-sort-type") || "text";
         var rows = Array.prototype.slice.call(body.rows);
-        rows.sort(function (left, right) {
-          var a = valueFor(left, index, type), b = valueFor(right, index, type);
+        var units;
+        if (table.classList.contains("grouped")) {
+          var byGroup = {};
+          var order = [];
+          rows.forEach(function (row) {
+            var key = row.getAttribute("data-group");
+            if (key === null) key = "row-" + order.length;
+            if (!byGroup[key]) { byGroup[key] = []; order.push(key); }
+            byGroup[key].push(row);
+          });
+          units = order.map(function (key) { return byGroup[key]; });
+        } else {
+          units = rows.map(function (row) { return [row]; });
+        }
+        units.sort(function (left, right) {
+          var a = valueFor(left[0], index, type), b = valueFor(right[0], index, type);
           if (a === null && b === null) return 0;
           if (a === null) return 1;
           if (b === null) return -1;
@@ -169,7 +185,9 @@ INDEX_SORT_JS = r"""<script>
             : a.localeCompare(b, undefined, {numeric: true, sensitivity: "base"});
           return ascending ? comparison : -comparison;
         });
-        rows.forEach(function (row) { body.appendChild(row); });
+        units.forEach(function (unit) {
+          unit.forEach(function (row) { body.appendChild(row); });
+        });
       }
       header.addEventListener("click", sortColumn);
       header.addEventListener("keydown", function (event) {
@@ -282,6 +300,12 @@ def _visuals_filename(seed: str) -> str:
     return "visuals.html" if seed == "fraud_detection" else f"visuals_{seed}.html"
 
 
+def _comparisons_filename(seed: str) -> str:
+    # TEMPORARY judge-comparisons tab (Owen, 2026-08-04). Delete alongside the other
+    # judge-comparisons blocks when rejudge comparisons are done.
+    return f"judge_comparisons_{seed}.html"
+
+
 def _active_attr(active: bool) -> str:
     return ' class="active"' if active else ""
 
@@ -322,6 +346,7 @@ def _navigation(
         family = families.get(active_seed)
         items = [
             ("trajectories", _seed_filename(active_seed), "trajectories"),
+            ("judge comparisons", _comparisons_filename(active_seed), "comparisons"),
             ("visuals", _visuals_filename(active_seed), "visuals"),
         ]
         if family in GENERIC_JUDGE_FAMILIES:
@@ -371,6 +396,11 @@ def _index_dimension_keys(
 def _target_display(target: object) -> tuple[str, str]:
     raw = str(target or "unknown")
     return target_label(raw), raw
+
+
+def _judge_display(audit: dict) -> tuple[str, str]:
+    raw = str(audit.get("judge") or "unknown")
+    return judge_shortname(raw) or raw.split("/")[-1], raw
 
 
 def _sort_attr(value: object | None) -> str:
@@ -501,13 +531,34 @@ CATEGORY_SECTIONS = (
 )
 
 
-def _index_table(audits: list[dict], *, dimension_keys: list[str]) -> str:
+def _index_table(
+    audits: list[dict],
+    *,
+    dimension_keys: list[str],
+    comparison_groups: list[list[dict]] | None = None,
+) -> str:
+    # ``comparison_groups`` is the TEMPORARY judge-comparisons mode: each group is one
+    # trajectory (official row first, rejudge rows under it), kept together by the
+    # grouped sorter and separated by a bolder line.
+    if comparison_groups is not None:
+        ordered = [
+            (audit, str(group_index), position == 0)
+            for group_index, group in enumerate(comparison_groups)
+            for position, audit in enumerate(group)
+        ]
+        audits = [audit for audit, _group, _start in ordered]
+    else:
+        ordered = [
+            (audit, None, False)
+            for audit in sorted(audits, key=lambda row: int(row.get("id") or 0))
+        ]
+    show_judge = comparison_groups is not None
     show_provenance = any(
         audit.get("retrospective_rejudge") or audit.get("source_trajectory_id") is not None
         for audit in audits
     )
     cells = []
-    for audit in sorted(audits, key=lambda row: int(row.get("id") or 0)):
+    for audit, group_key, group_start in ordered:
         cost, has_cost = _recorded_cost(audit)
         retrospective = audit.get("retrospective_rejudge")
         source_id = audit.get("source_trajectory_id")
@@ -522,17 +573,30 @@ def _index_table(audits: list[dict], *, dimension_keys: list[str]) -> str:
                 provenance = "unlinked"
             else:
                 provenance = "—"
+        judge_cell = ""
+        if show_judge:
+            judge_label, judge_raw = _judge_display(audit)
+            judge_cell = (
+                f'<td class="model-name raw-title" title="{esc(judge_raw, quote=True)}"'
+                f'{_sort_attr(judge_label)}>{esc(judge_label)}</td>'
+            )
         dimensions = "".join(
             _dimension_cell(audit, key) for key in dimension_keys
         )
         user_turns = _user_turn_count(audit)
+        row_attributes = f' data-id="{int(audit["id"])}"'
+        if group_key is not None:
+            row_attributes += f' data-group="{esc(group_key, quote=True)}"'
+        if group_start:
+            row_attributes += ' class="group-start"'
         cells.append(
-            f'<tr data-id="{int(audit["id"])}">'
+            f'<tr{row_attributes}>'
             f'<td{_sort_attr(audit["id"])}><a href="trajectory-{int(audit["id"])}.html">'
             f'{int(audit["id"])}</a></td>'
             f'<td class="model-name raw-title" title="{esc(target_raw, quote=True)}"'
             f'{_sort_attr(target_label)}>{esc(target_label)}</td>'
-            f'<td{_sort_attr(user_turns)}>'
+            + judge_cell
+            + f'<td{_sort_attr(user_turns)}>'
             f'{user_turns if user_turns is not None else "—"}</td>'
             + (
                 f'<td{_sort_attr(source_id)}>{provenance}</td>'
@@ -549,10 +613,13 @@ def _index_table(audits: list[dict], *, dimension_keys: list[str]) -> str:
         f'{esc(INDEX_DIMENSION_LABELS.get(key, key.replace("_", " ")))}</th>'
         for key in dimension_keys
     )
+    judge_header = '<th data-sort-type="text">Judge</th>' if show_judge else ""
     provenance_header = '<th data-sort-type="text">Source</th>' if show_provenance else ""
+    table_class = "runs sortable grouped" if show_judge else "runs sortable"
     return (
-        '<table class="runs sortable"><thead><tr>'
+        f'<table class="{table_class}"><thead><tr>'
         '<th data-sort-type="number">ID</th><th data-sort-type="text">Target</th>'
+        f'{judge_header}'
         '<th data-sort-type="number">User turns</th>'
         f'{provenance_header}{dimension_headers}'
         '<th data-sort-type="text">Flags</th><th data-sort-type="number">Recorded cost</th>'
@@ -600,6 +667,73 @@ def _index(
     heading = title or f"{seed} — trajectories"
     body = (
         _navigation(seeds, active_seed=seed, active_view=active_view)
+        + f'<div class="pagehead"><h1>{esc(heading)}</h1></div>'
+        + error_html
+        + sections
+    )
+    return _page(heading, body, scripts=INDEX_SORT_JS)
+
+
+def _comparison_groups(
+    official: list[dict], rejudges: list[dict]
+) -> list[list[dict]]:
+    groups: dict[int, list[dict]] = {
+        int(audit["id"]): [audit]
+        for audit in sorted(official, key=lambda row: int(row.get("id") or 0))
+    }
+    orphans: list[list[dict]] = []
+    for rejudge in sorted(
+        rejudges,
+        key=lambda row: (str(row.get("mode") or ""), int(row.get("id") or 0)),
+    ):
+        source_id = rejudge.get("source_trajectory_id")
+        if source_id is not None and int(source_id) in groups:
+            groups[int(source_id)].append(rejudge)
+        else:
+            orphans.append([rejudge])
+    return [groups[key] for key in sorted(groups)] + orphans
+
+
+def _comparisons_index(
+    seed: str,
+    official: list[dict],
+    rejudges: list[dict],
+    errors: list[dict],
+    *,
+    seeds: list[str],
+) -> str:
+    # TEMPORARY judge-comparisons page (Owen, 2026-08-04): the trajectories page with
+    # every trajectory's rejudge rows grouped under its official row. Sections follow
+    # the official row's category; a rejudge whose source row is absent gets its own
+    # group in its own judgment's category.
+    dimension_keys = _index_dimension_keys(
+        official + rejudges, family=_seed_families().get(seed)
+    )
+    error_html = "".join(
+        f'<div class="load-error">{esc(error.get("mode"))}: '
+        f'{esc(error.get("error_type"))}: {esc(error.get("error"))}</div>'
+        for error in errors
+    )
+    groups = _comparison_groups(official, rejudges)
+    grouped = {
+        key: [
+            group for group in groups
+            if trajectory_category(group[0]) == key
+        ]
+        for key, _label in CATEGORY_SECTIONS
+    }
+    sections = "".join(
+        '<section class="seed-block"><h2>'
+        f'{esc(label)} <span class="section-note">— {len(grouped[key])}</span></h2>'
+        + _index_table(
+            [], dimension_keys=dimension_keys, comparison_groups=grouped[key]
+        )
+        + '</section>'
+        for key, label in CATEGORY_SECTIONS
+    )
+    heading = f"{seed} — judge comparisons"
+    body = (
+        _navigation(seeds, active_seed=seed, active_view="comparisons")
         + f'<div class="pagehead"><h1>{esc(heading)}</h1></div>'
         + error_html
         + sections
@@ -879,20 +1013,37 @@ async def build(*, use_cache: bool = True) -> dict:
         current_methods = await _current_judge_methods()
         current_grouped: dict[str, list[dict]] = defaultdict(list)
         past_grouped: dict[str, list[dict]] = defaultdict(list)
+        # TEMPORARY judge-comparisons routing (Owen, 2026-08-04): rejudge rows never
+        # reach the trajectories, visuals, or past pages — canonical judgments stay
+        # official there — and render only on the judge-comparisons page.
+        rejudge_grouped: dict[str, list[dict]] = defaultdict(list)
         for audit in audits:
             seed = str(audit.get("seed") or "unknown")
             audit["current_judge_method"] = _is_current_judgment(
                 audit, current_methods
             )
-            destination = current_grouped if audit["current_judge_method"] else past_grouped
+            if audit.get("retrospective_rejudge"):
+                destination = rejudge_grouped
+            elif audit["current_judge_method"]:
+                destination = current_grouped
+            else:
+                destination = past_grouped
             destination[seed].append(audit)
-        seeds = _ordered_seeds(set(current_grouped) | set(past_grouped))
+        seeds = _ordered_seeds(
+            set(current_grouped) | set(past_grouped) | set(rejudge_grouped)
+        )
         for seed in seeds:
             current = current_grouped.get(seed, [])
             past = past_grouped.get(seed, [])
             _write_atomic(
                 VIEWER_ROOT / _seed_filename(seed),
                 _index(seed, current, errors, seeds=seeds),
+            )
+            _write_atomic(
+                VIEWER_ROOT / _comparisons_filename(seed),
+                _comparisons_index(
+                    seed, current, rejudge_grouped.get(seed, []), errors, seeds=seeds
+                ),
             )
             _write_atomic(
                 VIEWER_ROOT / _visuals_filename(seed),
@@ -918,7 +1069,12 @@ async def build(*, use_cache: bool = True) -> dict:
         for audit in audits:
             filename = f'trajectory-{int(audit["id"])}.html'
             expected.add(filename)
-            active_view = "trajectories" if audit["current_judge_method"] else "past"
+            if audit.get("retrospective_rejudge"):
+                active_view = "comparisons"
+            elif audit["current_judge_method"]:
+                active_view = "trajectories"
+            else:
+                active_view = "past"
             _write_atomic(
                 VIEWER_ROOT / filename,
                 _trajectory(audit, seeds=seeds, active_view=active_view),
@@ -930,6 +1086,7 @@ async def build(*, use_cache: bool = True) -> dict:
         "trajectories": len(audits),
         "current_trajectories": sum(map(len, current_grouped.values())),
         "past_trajectories": sum(map(len, past_grouped.values())),
+        "rejudge_trajectories": sum(map(len, rejudge_grouped.values())),
         "load_errors": len(errors),
         "legacy_pages_archived": archived_pages,
         "output": str(VIEWER_ROOT / "index.html"),

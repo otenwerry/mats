@@ -271,6 +271,7 @@ def test_build_renders_structured_navigation_caveats_and_exact_legacy_scores() -
         "trajectories": 2,
         "current_trajectories": 1,
         "past_trajectories": 1,
+        "rejudge_trajectories": 0,
         "load_errors": 1,
         "legacy_pages_archived": 0,
         "output": str(root / "viewer" / "index.html"),
@@ -467,6 +468,57 @@ def test_trajectory_index_only_adds_source_column_when_rejudges_exist() -> None:
     assert ">Source</th>" not in official_only
     assert ">Source</th>" in mixed
     assert 'href="trajectory-1.html">1</a>' in mixed
+
+
+def test_rejudges_render_only_on_the_judge_comparisons_page() -> None:
+    viewer = load_viewer()
+    official = stamp_current_method(viewer, audit())
+    rejudge = stamp_current_method(viewer, audit())
+    rejudge.update({
+        "mode": "rejudge-current-opus-4.8-abcdef123456",
+        "judge": "anthropic/claude-opus-4-8",
+        "mtime": 3.0,
+        "retrospective_rejudge": {
+            "source_run": "new-run",
+            "source_task": "real_audit_test_fraud_detection",
+            "seed": "fraud_detection",
+            "epoch": 1,
+            "judging_method_sha256": "abc123",
+        },
+    })
+
+    async def fake_load(*_args, **_kwargs):
+        return [official, rejudge], []
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        viewer.load_all = fake_load
+        stats = asyncio.run(viewer.build(use_cache=False))
+        output = root / "viewer"
+        index = (output / "index.html").read_text()
+        past = (output / "fraud_detection_past.html").read_text()
+        comparisons = (output / "judge_comparisons_fraud_detection.html").read_text()
+        rejudge_detail = (output / "trajectory-2.html").read_text()
+
+    assert stats["current_trajectories"] == 1
+    assert stats["rejudge_trajectories"] == 1
+    # The canonical pages never contain the rejudge row.
+    assert "trajectory-2.html" not in index
+    assert ">Source</th>" not in index
+    assert "trajectory-2.html" not in past
+    assert 'href="judge_comparisons_fraud_detection.html"' in index
+    # The comparisons page pairs the rejudge under its source with a judge column.
+    assert ">Judge</th>" in comparisons
+    assert 'class="runs sortable grouped"' in comparisons
+    assert comparisons.count('data-group="0"') == 2
+    assert comparisons.count('class="group-start"') == 1
+    assert 'href="trajectory-1.html">1</a>' in comparisons
+    assert ">opus-4.8</td>" in comparisons
+    assert (
+        '<a href="judge_comparisons_fraud_detection.html" class="active">'
+        in rejudge_detail
+    )
 
 
 def test_deception_column_renders_in_every_ml_table() -> None:

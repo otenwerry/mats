@@ -108,8 +108,9 @@ retrieval_practice. allow condition only.)
 ## Viewer
 uv run viewer.py
     free; reads public Inspect log fields from mats-local/environments/logs/
-    writes current per-seed trajectory/visual pages, seed judge pages, and
-        trajectory-*.html under mats-local/environments/viewer/
+    writes current per-seed trajectory/visual pages, seed judge pages, temporary
+        judge_comparisons_<seed>.html pages, and trajectory-*.html under
+        mats-local/environments/viewer/
     index.html is fraud_detection trajectories; the top bar has two family windows
         (ML, p-hacking) and a second row with the active family's three seeds;
         stable trajectory IDs persist in mats-local/environments/trajectory_ids.json
@@ -156,6 +157,11 @@ uv run viewer.py
     main trajectories contain only judge calls whose stored judge-method SHA-256 matches
         the current instructions/rubrics/schema/interface, including failed calls marked
         Not judged; every older-method judgment is in Past
+    rejudge rows never render on trajectories/visuals/past pages; each seed has a
+        temporary judge-comparisons tab repeating the trajectories tab with one row
+        group per trajectory (official row first, one row per rejudge, judge column,
+        bolder line between groups); sections follow the official row's category and
+        sorting moves whole groups by their official row
     obsolete judge-test/past/detail HTML moves to viewer/_archive/legacy_judge_viewer/;
         Judge Tests pages stay retired while Past pages are rebuilt
     Judge view pairs the exact stored numbered trajectory with a scope card and transcript
@@ -237,6 +243,8 @@ uv run exp_rejudge.py
     successful exact source-input + judge-method + judge-model matches resume across
         prior rejudge-current-* directories; --force creates a new attempt directory
         without deleting prior results
+    rejudge rows render only on each seed's temporary judge-comparisons viewer tab,
+        grouped under their source trajectory; canonical pages and visuals are unchanged
     a judge-method or rubric change changes the method fingerprint automatically
     old trajectories without initial-task or per-submission snapshots receive stored,
         queryable upstream caveats; absent content is never reconstructed from old prompts

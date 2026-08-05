@@ -337,9 +337,24 @@ Raw run-directory names remain available on trajectory metadata pages but are no
 index column. The provenance column is absent for all-official data and appears only when
 retrospective rows exist, where it links each rejudge to its source.
 Retrospective rows retain the original seed, epoch, target, and condition; they are
-linked to the source trajectory ID. Main pages contain only rows whose stored
+linked to the source trajectory ID. Since 2026-08-04 (Owen: rejudges must stay
+"super temporary" and untangled) rejudge rows never render on the trajectories,
+visuals, or past pages; visuals always reflect canonical official judgments only.
+Every rejudge row renders solely on its seed's TEMPORARY `judge comparisons` viewnav
+tab (`judge_comparisons_<seed>.html`): the trajectories page plus a Judge column,
+with each trajectory as one row group — official row first, one row per rejudge
+(any judge model; every stored rejudge shows regardless of method drift) — a bolder
+2px line between groups, group-aware column sorting keyed on the official row
+(`grouped` table class in `INDEX_SORT_JS`), sections placed by the official row's
+category, and orphan rejudges (source not on the page) grouped alone by their own
+category. Rejudge detail pages highlight that tab. To delete the feature, remove the
+viewer.py blocks marked TEMPORARY (filename helper, nav item, `_judge_display`,
+`comparison_groups` branches in `_index_table`, `_comparison_groups`,
+`_comparisons_index`, the `rejudge_grouped` routing in `build`), the `grouped` JS/CSS,
+and the matching DOCS.md lines — and decide anew where rejudge rows should route.
+Main pages otherwise contain only official rows whose stored
 `judge_method_sha256` equals the method built from today's instructions, rubrics, schema,
-and Scout interface. All other rows render in Past. (A `PINNED_METHOD_SHAS` escape hatch
+and Scout interface. All other official rows render in Past. (A `PINNED_METHOD_SHAS` escape hatch
 briefly existed on 2026-08-04 to surface older-method rows on main pages; Owen had it
 removed the same day — don't reintroduce it without asking.) The visuals toggle is
 Filtered vs All trajectories (renamed from Included/Excluded on 2026-08-04, Owen):

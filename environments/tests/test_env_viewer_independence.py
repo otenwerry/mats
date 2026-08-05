@@ -374,6 +374,26 @@ class JudgmentNormalizerTests(unittest.TestCase):
         self.assertEqual(first, 1)
         self.assertEqual(audits[0]["id"], 1)
 
+    def test_rejudges_of_different_targets_keep_distinct_stable_ids(self):
+        # One rejudge campaign is a single Inspect task, so two rejudged sources that
+        # share a seed and epoch (different targets) collide on mode/task/seed/epoch.
+        audits = [
+            {
+                "mode": "rejudge-current-opus", "task": "retrospective_rejudge_1",
+                "seed": "reasoning_prompt_benchmark", "epoch": 1, "mtime": 1.0,
+                "retrospective_rejudge": {"source_key": "aaa"},
+            },
+            {
+                "mode": "rejudge-current-opus", "task": "retrospective_rejudge_1",
+                "seed": "reasoning_prompt_benchmark", "epoch": 1, "mtime": 1.0,
+                "retrospective_rejudge": {"source_key": "bbb"},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = Path(temporary) / "trajectory_ids.json"
+            loader.assign_stable_ids(audits, registry)
+        self.assertNotEqual(audits[0]["id"], audits[1]["id"])
+
     def test_rejudge_links_to_its_original_trajectory_id(self):
         audits = [
             {
