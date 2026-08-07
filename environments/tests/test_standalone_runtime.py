@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 import importlib
 from pathlib import Path
@@ -33,16 +34,45 @@ EXPECTED_MEMBERS = {
 }
 
 
+def test_production_python_has_no_petri_runtime_imports() -> None:
+    offenders = []
+    for path in ENVIRONMENTS.rglob("*.py"):
+        relative = path.relative_to(ENVIRONMENTS)
+        # Dot directories hold third-party caches (.venv, .uv-cache), including
+        # deliberately non-UTF-8 fixture files.
+        if any(part.startswith(".") for part in relative.parts[:-1]) or (
+            "tests" in relative.parts
+        ):
+            continue
+        tree = ast.parse(path.read_text(), filename=str(relative))
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            for module in modules:
+                if module == "petri" or module.startswith(("petri.", "mats.petri")):
+                    offenders.append(f"{relative}:{node.lineno}:{module}")
+    assert offenders == []
+
+
 def test_all_protocols_are_local_and_complete() -> None:
     for family, expected in EXPECTED_MEMBERS.items():
         root, members = resolve_seeds(family)
         assert set(members) == expected
         for member in members:
             protocol = load_protocol_sources(Path(root) / member)
+            member_opening = (Path(root) / member / "scenario.md").read_text().strip()
             assert protocol.family == family
             assert protocol.member == member
             assert protocol.system_prompt
             assert protocol.opening_user_message
+            assert protocol.opening_user_message.startswith(member_opening + "\n\n")
+            assert not any(
+                marker in member_opening
+                for marker in ("[USER_PROMPT]", "[TASK]", "[TOOLING]")
+            )
             assert "{{SEED_SPECIFIC_PROMPT}}" not in protocol.opening_user_message
             assert protocol.source_files
             assert all(path.is_relative_to(ENVIRONMENTS) for path in protocol.source_files)
@@ -59,12 +89,15 @@ def test_active_rubrics_route_by_family_without_petri_types() -> None:
     p_hacking = load_rubrics("p_hacking")
     assert [rubric.key for rubric in ml] == [
         "reward_hacking",
+        "noticed",
         "deception",
+        "situational_awareness",
         "environment_failure",
     ]
     assert [rubric.key for rubric in p_hacking] == [
         "reward_hacking",
-        "environment_failure",
+        "noticed",
+        "situational_awareness",
     ]
     assert all(len(rubric.sha256) == 64 for rubric in (*ml, *p_hacking))
 
@@ -83,6 +116,18 @@ def test_openrouter_fallback_cost_is_labeled_estimated() -> None:
         "cost_usd": 0.11,
         "exact": False,
         "source": "openrouter-derived",
+    }
+
+
+def test_zero_billed_cost_remains_exact() -> None:
+    priced = estimate_usage_cost(
+        "openrouter/qwen/qwen3-32b",
+        {"input": 1_000, "output": 100, "total_cost": 0.0},
+    )
+    assert priced == {
+        "cost_usd": 0.0,
+        "exact": True,
+        "source": "billed_or_direct_list",
     }
 
 

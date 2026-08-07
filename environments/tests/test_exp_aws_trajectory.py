@@ -42,7 +42,10 @@ from exp_aws_trajectory import (  # noqa: E402
     retry_failed,
     run_campaign,
     setup_aws,
+    source_file_list,
+    worker_main,
 )
+from aws_worker_runtime import _package_worker_result  # noqa: E402
 
 
 def git(repo: Path, *args: str) -> None:
@@ -55,30 +58,77 @@ class SourceBundleTests(unittest.TestCase):
             root = Path(tmp) / "mats"
             environments = root / "environments"
             environments.mkdir(parents=True)
+            petri = root / "petri"
+            petri.mkdir()
             git(root, "init")
-            (root / "tracked.py").write_text("old\n")
-            (root / ".env").write_text("OPENAI_API_KEY=secret\n")
-            (root / "credentials").write_text("secret\n")
-            git(root, "add", "tracked.py", ".env", "credentials")
+            (environments / "tracked.py").write_text("old\n")
+            (environments / ".env").write_text("OPENAI_API_KEY=secret\n")
+            (environments / "credentials").write_text("secret\n")
+            (petri / "unrelated.py").write_text("must not ship\n")
+            git(
+                root,
+                "add",
+                "environments/tracked.py",
+                "environments/.env",
+                "environments/credentials",
+                "petri/unrelated.py",
+            )
             # The bundle must read the dirty working-tree bytes, not the git index.
-            (root / "tracked.py").write_text("dirty current bytes\n")
-            (root / "untracked.py").write_text("new source\n")
-            (root / ".venv").mkdir()
-            (root / ".venv" / "cache.py").write_text("cache\n")
+            (environments / "tracked.py").write_text("dirty current bytes\n")
+            (environments / "untracked.py").write_text("new source\n")
+            (environments / ".venv").mkdir()
+            (environments / ".venv" / "cache.py").write_text("cache\n")
 
             first = build_source_bundle(environments, Path(tmp) / "out1")
             second = build_source_bundle(environments, Path(tmp) / "out2")
+            selected = source_file_list(root)
 
             self.assertEqual(first["sha256"], second["sha256"])
+            self.assertIn(Path("environments/tracked.py"), selected)
+            self.assertNotIn(Path("petri/unrelated.py"), selected)
             with tarfile.open(first["path"], "r:gz") as archive:
                 names = set(archive.getnames())
-                tracked = archive.extractfile("mats/tracked.py")
-                untracked = archive.extractfile("mats/untracked.py")
+                tracked = archive.extractfile("mats/environments/tracked.py")
+                untracked = archive.extractfile("mats/environments/untracked.py")
                 self.assertEqual(tracked.read().decode(), "dirty current bytes\n")
                 self.assertEqual(untracked.read().decode(), "new source\n")
-            self.assertNotIn("mats/.env", names)
-            self.assertNotIn("mats/credentials", names)
+            self.assertNotIn("mats/environments/.env", names)
+            self.assertNotIn("mats/environments/credentials", names)
+            self.assertNotIn("mats/petri/unrelated.py", names)
+            self.assertTrue(all(
+                name == "mats" or name.startswith("mats/environments/")
+                for name in names
+            ))
             self.assertFalse(any(".venv" in name for name in names))
+
+
+class WorkerRuntimeSplitTests(unittest.TestCase):
+    def test_controller_facade_preserves_worker_validation_error_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_path = Path(tmp) / "job.json"
+            job_path.write_text(json.dumps({"schema_version": "wrong"}))
+
+            with self.assertRaisesRegex(AwsTrajectoryError, "schema does not match"):
+                worker_main(job_path)
+
+    def test_result_packaging_still_contains_manifest_and_run_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_root = Path(tmp) / "worker"
+            run_dir = worker_root / "run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "sample.eval").write_text("saved result")
+            (worker_root / "worker.log").write_text("progress")
+
+            archive_path, manifest = _package_worker_result({}, worker_root, run_dir)
+
+            self.assertTrue(archive_path.is_file())
+            self.assertEqual(
+                {item["path"] for item in manifest["files"]},
+                {"payload/run/sample.eval", "payload/worker.log"},
+            )
+            with tarfile.open(archive_path) as archive:
+                self.assertIn("manifest.json", archive.getnames())
+                self.assertIn("payload/run/sample.eval", archive.getnames())
 
 
 class CellPlanningTests(unittest.TestCase):
@@ -93,6 +143,7 @@ class CellPlanningTests(unittest.TestCase):
             "seeds_path": "/repo/seeds/ml_training_data_misuse",
             "epochs": 2,
             "reasoning": True,
+            "harness": "simple",
             "condition": "allow",
             "judge_resolved": "openai/gpt-5.6-luna",
             "gate_model": "openai/gpt-5.6-luna",
@@ -115,6 +166,7 @@ class CellPlanningTests(unittest.TestCase):
         self.assertEqual(len({cell["cell_id"] for cell in cells}), 4)
         self.assertTrue(all("--epochs=1" in cell["pipeline_args"] for cell in cells))
         self.assertTrue(all("--compute=local" in cell["pipeline_args"] for cell in cells))
+        self.assertTrue(all("--harness=simple" in cell["pipeline_args"] for cell in cells))
         self.assertTrue(all(cell["task_name"].endswith(cell["cell_id"]) for cell in cells))
 
     def test_concurrent_campaign_ids_cannot_collide_within_one_second(self):
@@ -643,6 +695,42 @@ class SafetyContractTests(unittest.TestCase):
         self.assertEqual(request["Tags"], [{"Key": "Project", "Value": "mats-environments"}])
         self.assertNotIn("Overwrite", request)
 
+    def test_subscription_setup_ships_host_claude_login_when_no_token(self):
+        missing = RuntimeError("missing")
+        missing.response = {"Error": {"Code": "ParameterNotFound"}}
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = missing
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "secret"}, clear=True),
+            patch("exp_aws_trajectory.claude_credentials_b64", return_value="e30="),
+        ):
+            names = put_api_keys(
+                {"ssm": ssm}, extra_names=[], ship_claude_subscription_login=True
+            )
+
+        self.assertEqual(
+            names, ["CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64", "OPENAI_API_KEY"]
+        )
+        stored = json.loads(ssm.put_parameter.call_args.kwargs["Value"])
+        self.assertEqual(
+            stored["CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64"], "e30="
+        )
+
+    def test_non_subscription_setup_never_ships_host_claude_login(self):
+        missing = RuntimeError("missing")
+        missing.response = {"Error": {"Code": "ParameterNotFound"}}
+        ssm = MagicMock()
+        ssm.get_parameter.side_effect = missing
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "secret"}, clear=True),
+            patch("exp_aws_trajectory.claude_credentials_b64", return_value="e30="),
+        ):
+            names = put_api_keys({"ssm": ssm}, extra_names=[])
+
+        self.assertEqual(names, ["OPENAI_API_KEY"])
+
     def test_existing_secret_parameter_uses_overwrite_without_tags(self):
         ssm = MagicMock()
         ssm.get_parameter.return_value = {"Parameter": {"Name": "existing"}}
@@ -653,6 +741,33 @@ class SafetyContractTests(unittest.TestCase):
         request = ssm.put_parameter.call_args.kwargs
         self.assertTrue(request["Overwrite"])
         self.assertNotIn("Tags", request)
+
+    def test_large_secret_bundle_uses_advanced_ssm_tier_with_warning(self):
+        ssm = MagicMock()
+        missing = RuntimeError("missing")
+        missing.response = {"Error": {"Code": "ParameterNotFound"}}
+        ssm.get_parameter.side_effect = missing
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "x" * 4100}, clear=True),
+            patch("builtins.print") as print_mock,
+        ):
+            put_api_keys({"ssm": ssm}, extra_names=[])
+
+        self.assertEqual(ssm.put_parameter.call_args.kwargs["Tier"], "Advanced")
+        self.assertIn("billable", print_mock.call_args.args[0])
+
+    def test_secret_bundle_over_advanced_limit_is_rejected(self):
+        ssm = MagicMock()
+        missing = RuntimeError("missing")
+        missing.response = {"Error": {"Code": "ParameterNotFound"}}
+        ssm.get_parameter.side_effect = missing
+
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "x" * 8200}, clear=True),
+            self.assertRaisesRegex(AwsTrajectoryError, "8 KiB"),
+        ):
+            put_api_keys({"ssm": ssm}, extra_names=[])
 
     def test_campaign_success_requires_every_cell_and_no_retry_magic(self):
         success = {"cells": [{
@@ -700,6 +815,77 @@ class SafetyContractTests(unittest.TestCase):
         self.assertEqual(preflight_mock.call_args.args[0]["vm_concurrency"], 4)
         clients["s3"].upload_file.assert_not_called()
         clients["ec2"].run_instances.assert_not_called()
+
+    def test_subscription_preflight_replaces_direct_agent_api_keys_with_auth(self):
+        cfg = CellPlanningTests().make_cfg()
+        cfg.update({
+            "targets": ["opus-4.6", "gpt-5.6-sol", "qwen3-32b"],
+            "target_models": [
+                "anthropic/claude-opus-4-6",
+                "openai/gpt-5.6-sol",
+                "openrouter/qwen/qwen3-32b",
+            ],
+            "epochs": 1,
+            "harness": "subscription",
+            "vm_concurrency": 3,
+        })
+        clients = {"s3": MagicMock(), "ec2": MagicMock()}
+        preflight = {
+            "clients": clients,
+            "bucket": "bucket",
+            "ami": "ami-1",
+            "funding": PERSONAL_REIMBURSEMENT_FUNDING,
+            "runtime_hash": "runtime",
+            "launch_template_id": "lt-1",
+            "hourly_price_usd": 0.2,
+            "quota_vcpus": 12,
+            "required_vcpus": 12,
+            "stored_secret_names": [
+                "OPENROUTER_API_KEY",
+                "OPENAI_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CODEX_ACCESS_TOKEN",
+            ],
+        }
+        source = {
+            "path": "/tmp/source.tar.gz",
+            "sha256": "a" * 64,
+            "bytes": 100,
+            "files": 10,
+        }
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("exp_aws_trajectory.build_source_bundle", return_value=source),
+            patch(
+                "exp_aws_trajectory.preflight_aws", return_value=preflight
+            ) as preflight_mock,
+        ):
+            run_campaign(cfg, ENVIRONMENTS, Path(tmp), dry_run=True)
+
+        kwargs = preflight_mock.call_args.kwargs
+        self.assertEqual(
+            kwargs["model_slugs"],
+            [
+                "openrouter/qwen/qwen3-32b",
+                "openai/gpt-5.6-luna",
+                "openai/gpt-5.6-luna",
+            ],
+        )
+        self.assertEqual(kwargs["required_secrets"], set())
+        self.assertEqual(
+            kwargs["required_secret_alternatives"],
+            [
+                (
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    "CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64",
+                ),
+                (
+                    "CODEX_ACCESS_TOKEN",
+                    "CODEX_SUBSCRIPTION_AUTH_JSON_GZIP_B64",
+                    "CODEX_SUBSCRIPTION_AUTH_JSON_B64",
+                ),
+            ],
+        )
 
     def test_preflight_rejects_insufficient_vcpu_quota_before_launch(self):
         clients = {name: MagicMock() for name in (
@@ -833,6 +1019,7 @@ class SafetyContractTests(unittest.TestCase):
                 "seeds": ["fraud_detection"],
                 "seeds_path": "/repo/seeds/ml_training_data_misuse",
                 "epochs": 1, "reasoning": True, "condition": "allow",
+                "harness": "simple",
                 "judge_resolved": "openai/gpt-5.6-luna",
                 "gate_model": "openai/gpt-5.6-luna",
                 "time_limit": AGENT_TIME_LIMIT_SECONDS, "aws_secret_env": [],
@@ -843,6 +1030,7 @@ class SafetyContractTests(unittest.TestCase):
             }],
         }
         control = {
+            "harness": "simple", "harness_explicit": True,
             "aws_region": "us-west-2", "aws_region_explicit": False,
             "aws_instance_type": "c7a.xlarge", "aws_instance_type_explicit": False,
             "vm_concurrency": 50, "vm_concurrency_explicit": False,

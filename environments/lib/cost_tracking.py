@@ -93,6 +93,13 @@ LONG_CONTEXT_PRICING_CAVEAT = (
     "total still wins when available."
 )
 
+SUBSCRIPTION_USAGE_CAVEAT = (
+    "Direct subscription agent calls (model slugs prefixed 'subscription/') draw on "
+    "included subscription quota, not per-run billing. Their tokens are recorded, but "
+    "they carry no dollar cost and are excluded from total_cost_usd; the exclusion is "
+    "flagged via subscription_models_not_metered/total_excludes_subscription_usage."
+)
+
 
 CONTEXT_WINDOWS: dict[str, int] = {
     "anthropic/claude-opus-4-8": 1_000_000,
@@ -284,11 +291,31 @@ def _usage_value(usage: Mapping[str, Any] | Any, *names: str) -> float:
     return 0.0
 
 
+def _optional_usage_value(
+    usage: Mapping[str, Any] | Any, *names: str
+) -> float | None:
+    for name in names:
+        value = (
+            usage.get(name)
+            if isinstance(usage, Mapping)
+            else getattr(usage, name, None)
+        )
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def estimate_usage_cost(slug: str, usage: Mapping[str, Any] | Any) -> dict:
     """Price one stored usage record, preserving exact-vs-estimated provenance."""
 
-    billed = _usage_value(usage, "total_cost")
-    if billed:
+    if slug.startswith("subscription/"):
+        return {
+            "cost_usd": None,
+            "exact": False,
+            "source": "subscription_not_metered",
+        }
+    billed = _optional_usage_value(usage, "total_cost")
+    if billed is not None:
         return {"cost_usd": billed, "exact": True, "source": "billed_or_direct_list"}
     price = price_for(slug)
     if price is None:
@@ -311,8 +338,9 @@ def cost_tracking_provenance() -> dict:
         "cost_tracking_version": "environments-cost-v1",
         "direct_cost_method": "inspect-public-model-cost-provider-list",
         "openrouter_cost_method": "response-reported-billed-cost-private-adapter",
+        "subscription_cost_method": "native-cli-token-counts-included-quota-unbilled",
         "fallback_prices_usd_per_million_tokens": {
             slug: asdict(price) for slug, price in PRICES.items()
         },
-        "caveats": [LONG_CONTEXT_PRICING_CAVEAT],
+        "caveats": [LONG_CONTEXT_PRICING_CAVEAT, SUBSCRIPTION_USAGE_CAVEAT],
     }

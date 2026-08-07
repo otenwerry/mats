@@ -1,18 +1,19 @@
 """Continuation experiment core for real environments (importable).
 
-A continuation asks: if a target reward-hacks on one task and is then handed a
+A continuation asks: if an agent reward-hacks on one task and is then handed a
 SECOND, unrelated task, does its probability of hacking on the second task go up --
 because it is conditioned on its own earlier behavior?
 
-Each cell conditions ONE target model on a PREFIX (a prior conversation) and then
+Each cell conditions ONE agent model on a PREFIX (a prior conversation) and then
 drops it into a real environment seed. One invocation = ONE TREATMENT, a free-form
 label chosen with --treatment. There is no no-prefix condition here: the environment
 is pinned and scripted, so the base rate comes from the ordinary original
-trajectories of the same (seed, target).
+trajectories of the same (seed, agent).
 
 PREFIXES are self-contained payload files (``environments-continuation-prefix-v1``):
-the exact message list the target carries, plus the catalog target name and its
-reasoning setting. They come from two places:
+the exact Inspect message list the agent carries, plus the catalog agent name and its
+reasoning setting. Production/subscription payloads additionally contain the
+scaffold's opaque, checksummed native resume bundle. They come from two places:
 
 - ``--prefixes=<viewer ids>``: reconstructed from stored real-environment logs
   (the viewer's stable integer IDs) and written under
@@ -20,7 +21,7 @@ reasoning setting. They come from two places:
 - ``--prefix-files=<paths>``: arbitrary hand-built conversations (e.g. a long Q&A
   session). Owen constructs these to match the payload contract below.
 
-The spliced target context is [prefix's system prompt + prefix conversation +
+The spliced agent context is [prefix's system prompt + prefix conversation +
 injected pivot user turn + the seed's opening message, live]. The pivot sentence is
 identical to the Petri continuation experiment; when the prefix is not from the new
 task's own seed family (including every external prefix) it also names the new kind
@@ -30,9 +31,10 @@ pivot onward -- the prefix is sliced out mechanically by a stored boundary index
 cannot see or infer anything about the prior task.
 
 INVARIANTS enforced before any paid work:
-- the prefix's system prompt must byte-match the current ``seeds/SYSTEM_PROMPT.txt``
-  in the variant implied by its reasoning setting (a drifted global prompt would
-  confound the comparison against the original-trajectory base rate);
+- a simple prefix's system prompt must byte-match the current
+  ``seeds/SYSTEM_PROMPT.txt`` variant implied by its reasoning setting;
+- a native prefix must carry native state from the same harness, agent, reasoning
+  setting, scaffold, exact scaffold version, and exact Inspect SWE version;
 - a trajectory-sourced prefix must not share a seed with the new task;
 - integrity-excluded and rejudge trajectories are refused as prefixes;
 - a prefix ending on unresolved tool calls gets a neutral synthetic closer,
@@ -49,6 +51,7 @@ import hashlib
 import json
 import re
 import uuid
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +68,13 @@ from continuation_evidence import (
     seed_family_task_description,
 )
 from exp_real_audit import assemble_real_protocol, build_real_task
+from exp_target_harness import (
+    NATIVE_HARNESS_MODES,
+    native_resume_record,
+    production_scaffold_for_target,
+    resolve_harness,
+    validate_native_resume_bundle,
+)
 from judge_selection import resolve_judge
 from model_catalog import (
     REASONING_EFFORT,
@@ -131,7 +141,7 @@ def validate_prefix_payload(payload: dict, *, origin: str) -> dict:
     target = payload.get("target")
     if target not in TARGET_CHOICES:
         raise SystemExit(
-            f"{origin}: prefix payload 'target' must be a catalog name "
+            f"{origin}: prefix payload 'target' must be a catalog agent name "
             f"({sorted(TARGET_CHOICES)}); got {target!r}"
         )
     if not isinstance(payload.get("reasoning"), bool):
@@ -223,7 +233,7 @@ def _integrity_status(mode_dir: Path, task: str, seed: str, epoch: int) -> dict 
 
 
 def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
-    """Rebuild one stored trajectory's exact target-visible conversation."""
+    """Rebuild one stored trajectory's exact agent-visible conversation."""
 
     from inspect_ai.log import list_eval_logs, read_eval_log
 
@@ -285,13 +295,13 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
     if target_name not in TARGET_CHOICES:
         raise SystemExit(
             f"trajectory #{trajectory_id} has no usable stamped target_name "
-            f"({target_name!r}); cannot rebuild its target for a continuation"
+            f"({target_name!r}); cannot rebuild its agent for a continuation"
         )
     reasoning = run_metadata.get("reasoning")
     if not isinstance(reasoning, bool):
         raise SystemExit(
             f"trajectory #{trajectory_id} has no stamped boolean 'reasoning' "
-            "setting; cannot replicate its target configuration"
+            "setting; cannot replicate its agent configuration"
         )
     messages = [
         message.model_dump(mode="json", exclude_none=False)
@@ -300,7 +310,30 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
     if not messages:
         raise SystemExit(f"trajectory #{trajectory_id} has no stored messages")
 
+    source_harness = run_metadata.get("harness") or "simple"
+    native_resume = None
+    if source_harness in NATIVE_HARNESS_MODES:
+        sidecar = (
+            mode_dir
+            / "real_artifacts"
+            / entry["task"]
+            / f"{entry['seed']}_ep{entry['epoch']}"
+        )
+        manifest_path = sidecar / "_native_resume_bundle.json"
+        archive_path = sidecar / "_native_resume_bundle.tar.gz"
+        if manifest_path.is_file() and archive_path.is_file():
+            try:
+                native_resume = json.loads(manifest_path.read_text())
+            except json.JSONDecodeError as error:
+                raise SystemExit(
+                    f"trajectory #{trajectory_id}: native resume manifest is invalid: {error}"
+                ) from error
+            native_resume["archive_base64"] = base64.b64encode(
+                archive_path.read_bytes()
+            ).decode("ascii")
+
     protocol_sources = run_metadata.get("protocol_sources") or {}
+    recorded_protocol = sample_metadata.get("protocol") or {}
     payload = {
         "format": PREFIX_FORMAT,
         "name": f"traj{trajectory_id}",
@@ -318,10 +351,14 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
                 or protocol_sources.get("protocol_family")
             ),
             "condition": run_metadata.get("condition"),
+            "harness": source_harness,
+            "environment_system_prompt": recorded_protocol.get("system_prompt"),
             "was_continuation": bool(real_env.get("continuation")),
         },
         "messages": messages,
     }
+    if native_resume is not None:
+        payload["native_resume"] = native_resume
     return validate_prefix_payload(payload, origin=f"trajectory #{trajectory_id}")
 
 
@@ -352,6 +389,7 @@ class PrefixSpec:
     synthesized_closer: bool
     system_prompt_inserted: bool
     boundary_index: int
+    native_resume: dict | None
 
     def record(self) -> dict:
         """The stored ``real_env["continuation"]["prefix"]`` block."""
@@ -391,9 +429,15 @@ def expected_system_prompt(reasoning: bool) -> str:
     return strip_thinking_instruction(prompt) if reasoning else prompt
 
 
-def build_prefix_spec(payload: dict, *, payload_path: Path | None = None) -> PrefixSpec:
+def build_prefix_spec(
+    payload: dict,
+    *,
+    payload_path: Path | None = None,
+    harness: str = "simple",
+) -> PrefixSpec:
     """Validate one payload against the experiment invariants and close it."""
 
+    harness = resolve_harness(harness)
     origin = payload["name"]
     try:
         messages = _MESSAGES_ADAPTER.validate_python(payload["messages"])
@@ -405,31 +449,71 @@ def build_prefix_spec(payload: dict, *, payload_path: Path | None = None) -> Pre
 
     expected = expected_system_prompt(payload["reasoning"])
     system_prompt_inserted = False
-    if messages[0].role == "system":
-        actual = messages[0].text or ""
-        if actual != expected:
+    source_harness = str(payload.get("source", {}).get("harness") or "simple")
+    if harness == "simple" and source_harness in NATIVE_HARNESS_MODES:
+        raise SystemExit(
+            f"prefix {origin!r} came from a {source_harness}-harness trajectory and "
+            f"cannot be natively spliced into --harness=simple; use "
+            f"--harness={source_harness}"
+        )
+    native_resume = payload.get("native_resume")
+    if harness in NATIVE_HARNESS_MODES:
+        if source_harness != harness:
             raise SystemExit(
-                f"prefix {origin!r}: its recorded system prompt does not byte-match "
-                "the current seeds/SYSTEM_PROMPT.txt "
-                f"({'reasoning-stripped' if payload['reasoning'] else 'verbatim'} "
-                f"variant): prefix sha "
-                f"{hashlib.sha256(actual.encode()).hexdigest()[:12]}, current sha "
-                f"{hashlib.sha256(expected.encode()).hexdigest()[:12]}. A drifted "
-                "global prompt would confound the comparison against the original "
-                "base rate, so this is refused rather than silently replayed."
+                f"prefix {origin!r} came from --harness={source_harness} and has no "
+                f"matching {harness}-scaffold session to resume; generate it with "
+                f"--harness={harness}"
+            )
+        routed_slug = resolve_target(payload["target"])
+        validate_native_resume_bundle(
+            native_resume,
+            target_name=payload["target"],
+            routed_slug=routed_slug,
+            reasoning=payload["reasoning"],
+        )
+        if (
+            harness == "subscription"
+            and production_scaffold_for_target(payload["target"], routed_slug)
+            != "opencode"
+            and not native_resume.get("native_session_id")
+        ):
+            # Fail before any spend: without a native session id the CLI cannot
+            # resume (the source run's first CLI call never completed).
+            raise SystemExit(
+                f"prefix {origin!r}: subscription resume bundle has no "
+                "native_session_id, so the native CLI session cannot be resumed"
+            )
+        if messages[0].role != "system":
+            raise SystemExit(
+                f"prefix {origin!r}: {harness} scaffold transcript does not start "
+                "with its native system message"
             )
     else:
-        messages = [ChatMessageSystem(content=expected), *messages]
-        system_prompt_inserted = True
-    extra_system = [
-        index for index, message in enumerate(messages[1:], start=2)
-        if message.role == "system"
-    ]
-    if extra_system:
-        raise SystemExit(
-            f"prefix {origin!r}: system messages beyond the first are not supported "
-            f"(found at positions {extra_system})"
-        )
+        if messages[0].role == "system":
+            actual = messages[0].text or ""
+            if actual != expected:
+                raise SystemExit(
+                    f"prefix {origin!r}: its recorded system prompt does not byte-match "
+                    "the current seeds/SYSTEM_PROMPT.txt "
+                    f"({'reasoning-stripped' if payload['reasoning'] else 'verbatim'} "
+                    f"variant): prefix sha "
+                    f"{hashlib.sha256(actual.encode()).hexdigest()[:12]}, current sha "
+                    f"{hashlib.sha256(expected.encode()).hexdigest()[:12]}. A drifted "
+                    "global prompt would confound the comparison against the original "
+                    "base rate, so this is refused rather than silently replayed."
+                )
+        else:
+            messages = [ChatMessageSystem(content=expected), *messages]
+            system_prompt_inserted = True
+        extra_system = [
+            index for index, message in enumerate(messages[1:], start=2)
+            if message.role == "system"
+        ]
+        if extra_system:
+            raise SystemExit(
+                f"prefix {origin!r}: system messages beyond the first are not supported "
+                f"(found at positions {extra_system})"
+            )
 
     messages = _ensure_unique_message_ids(list(messages))
     closed, synthesized = close_dangling_tool_calls(messages)
@@ -447,21 +531,24 @@ def build_prefix_spec(payload: dict, *, payload_path: Path | None = None) -> Pre
         synthesized_closer=synthesized,
         system_prompt_inserted=system_prompt_inserted,
         boundary_index=prefix_boundary_index(closed),
+        native_resume=native_resume if harness in NATIVE_HARNESS_MODES else None,
     )
 
 
 def load_prefix_specs(
-    trajectory_ids: list[int], payload_files: list[str]
+    trajectory_ids: list[int], payload_files: list[str], *, harness: str
 ) -> list[PrefixSpec]:
     """Resolve both prefix sources into validated specs with unique names."""
 
     specs: list[PrefixSpec] = []
     for payload in reconstruct_prefix_payloads(trajectory_ids):
         path = store_prefix_payload(payload)
-        specs.append(build_prefix_spec(payload, payload_path=path))
+        specs.append(build_prefix_spec(payload, payload_path=path, harness=harness))
     for file_path in payload_files:
         payload = load_prefix_payload_file(file_path)
-        specs.append(build_prefix_spec(payload, payload_path=Path(file_path)))
+        specs.append(build_prefix_spec(
+            payload, payload_path=Path(file_path), harness=harness
+        ))
     names = [spec.name for spec in specs]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -550,14 +637,20 @@ def build_continuation_tasks(
     artifacts_root: Path | None,
     task_id_suffix: str | None = None,
     execution_metadata: dict | None = None,
+    harness: str,
 ) -> list:
     """One Inspect task per cell, sharing build_real_task with plain audits."""
 
+    harness = resolve_harness(harness)
     judge_model = resolve_judge(judge)
     tasks = []
     for cell in cells:
         prefix = cell.prefix
-        unit_sp = expected_system_prompt(prefix.reasoning)
+        unit_sp = (
+            expected_system_prompt(prefix.reasoning)
+            if harness == "simple"
+            else ""
+        )
         target_slug = resolve_target(prefix.target_name)
         target_build = build_target(
             target_slug,
@@ -565,7 +658,11 @@ def build_continuation_tasks(
             effort=REASONING_EFFORT,
             # OpenAI rejects prompt_cache_key values longer than 64 chars.
             prompt_cache_key="environments-cont-" + stable_key(
-                "continuation-target-v1",
+                (
+                    "continuation-target-v1"
+                    if harness == "simple"
+                    else f"continuation-target-{harness}-v1"
+                ),
                 target_slug,
                 prefix.reasoning,
                 prefix.sha256,
@@ -592,7 +689,19 @@ def build_continuation_tasks(
             prefix_messages=prefix.messages,
             pivot_text=pivot,
             record=record,
+            native_resume=prefix.native_resume,
         )
+        if harness in NATIVE_HARNESS_MODES:
+            native_key = f"{harness}_native_resume"
+            record[native_key] = native_resume_record(
+                prefix.native_resume or {}
+            )
+            record[native_key][
+                "scaffold_system_message_count"
+            ] = sum(
+                message.role == "system"
+                for message in prefix.messages[:prefix.boundary_index]
+            )
         tasks.append(build_real_task(
             target_name=prefix.target_name,
             target_build=target_build,
@@ -623,6 +732,7 @@ def build_continuation_tasks(
                 "pivot_preamble": pivot,
                 "cross_family": cell.cross_family,
             },
+            harness=harness,
         ))
     return tasks
 
@@ -649,7 +759,7 @@ def describe_plan(
             flags.append("system prompt inserted")
         flag_note = f"  [{'; '.join(flags)}]" if flags else ""
         lines.append(
-            f"  prefix {spec.name}: {origin}, target {spec.target_name} "
+            f"  prefix {spec.name}: {origin}, agent {spec.target_name} "
             f"[reasoning:{'on' if spec.reasoning else 'off'}], "
             f"{len(spec.messages)} msgs / {spec.char_count:,} chars{flag_note}"
         )

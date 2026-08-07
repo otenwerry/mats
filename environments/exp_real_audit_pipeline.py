@@ -10,21 +10,25 @@ reasoning_prompt_benchmark + checkout_redesign + retrieval_practice (p_hacking),
 
 Usage (from mats/environments/):
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
-      --seeds=fraud_detection --epochs=3
+      --seeds=fraud_detection --epochs=3 --harness=simple --judge=gpt-5.6-luna
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
-      --seeds=reasoning_prompt_benchmark --epochs=3
+      --seeds=reasoning_prompt_benchmark --epochs=3 --harness=production \
+      --judge=gpt-5.6-luna
 
 Flags:
-  --targets=<a,b,..>   REQUIRED. target names from TARGET_CHOICES.
+  --targets=<a,b,..>   REQUIRED. agent names from TARGET_CHOICES.
   --seed-dir=<sub>     REQUIRED. a pinned seed dir or collection; every selected member
                        needs a generated real_env/workspace/ tree (envgen/gen_*.py).
   --seeds=<a,b,..>     REQUIRED. member names, or `all` (= every PORTED member).
-  --epochs=<N>         REQUIRED. epochs per (target, seed) cell.
+  --epochs=<N>         REQUIRED. epochs per (agent, seed) cell.
+  --harness=simple|production|subscription  REQUIRED. simple is the existing fixed
+                       Inspect tool loop. production uses API-backed Claude Code,
+                       Codex, or OpenCode. subscription uses Claude/Codex subscription
+                       login quota; OpenCode remains API-backed.
   --reasoning=yes|no   optional (default yes). Same semantics as the simulated pipeline.
   --condition=<c>      defaults to allow; v1 supports allow only (correct is a designed
                        seam, rejected loudly).
-  --judge=<m>          alignment judge (default gpt-5.6-luna; see
-                       lib/judge_selection.py, or set $ENVIRONMENTS_JUDGE).
+  --judge=<m>          REQUIRED. alignment judge; see lib/judge_selection.py.
   --gate-model=<m>     first-submission judge; defaults to and must equal --judge.
   --concurrency=<N>    LLM parallelism (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
@@ -48,8 +52,9 @@ Flags:
 
 Local compute requires a running Docker daemon (checked before any spend). AWS setup
 requires an explicit, truthfully recorded team-funded or personal/reimbursement account.
-Costs money (target + stage-one/final judge calls, and EC2 for AWS runs). The viewer
-stage and AWS dry-run are free.
+Costs money (API-backed agent calls, stage-one/final judge calls, and EC2 for AWS
+runs). Direct subscription agents consume plan quota instead of incurring a measured
+per-run API charge. The viewer stage and AWS dry-run are free.
 """
 
 import asyncio
@@ -59,7 +64,6 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import tempfile
 import traceback
 from datetime import datetime
 
@@ -88,9 +92,16 @@ from exp_real_audit import (
     resolve_time_limit,
 )
 from exp_inspect_runner import dead_targets, run_eval
-from judge_selection import resolve_judge
+from exp_target_harness import resolve_harness
+from judge_selection import require_judge_arg, resolve_judge
+from pipeline_cli import positive_int_arg, validate_cli_args, value_arg
+from pipeline_integrity import (
+    audit_integrity_failures,
+    gate_integrity_failures,
+    judge_procedure_integrity_failures,
+    write_integrity_sidecar,
+)
 from project_paths import DATA_ROOT as DATA, VIEWER_ROOT as OUT
-from real_integrity import integrity_sidecar_records
 from exp_aws_trajectory import (
     DEFAULT_INSTANCE_TYPE,
     DEFAULT_REGION,
@@ -123,7 +134,7 @@ def env_viewer():
     return module
 
 _VALUE_FLAGS = {
-    "--targets", "--seed-dir", "--seeds", "--epochs", "--reasoning", "--condition",
+    "--targets", "--seed-dir", "--seeds", "--epochs", "--harness", "--reasoning", "--condition",
     "--concurrency", "--sandbox-concurrency", "--time-limit",
     "--judge", "--gate-model", "--compute",
     "--vm-concurrency", "--aws-region", "--aws-instance-type", "--aws-bucket",
@@ -137,35 +148,17 @@ _SWITCH_FLAGS = {
 
 
 def _validate_cli_args() -> None:
-    valid = sorted(_VALUE_FLAGS | _SWITCH_FLAGS)
-    for arg in sys.argv[1:]:
-        flag, separator, _ = arg.partition("=")
-        if flag in _VALUE_FLAGS:
-            if not separator:
-                raise SystemExit(f"{flag} requires a value in the form {flag}=<value>")
-            continue
-        if flag in _SWITCH_FLAGS:
-            if separator:
-                raise SystemExit(f"{flag} is a switch and does not take a value")
-            continue
-        raise SystemExit(f"unknown argument {arg!r}; valid flags: {valid}")
+    validate_cli_args(
+        sys.argv, value_flags=_VALUE_FLAGS, switch_flags=_SWITCH_FLAGS
+    )
 
 
 def _arg(flag: str, default: str | None = None) -> str | None:
-    return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(flag + "=")), default)
+    return value_arg(sys.argv, flag, default)
 
 
 def _posint(flag: str, default: int | None) -> int | None:
-    raw = _arg(flag)
-    if raw is None:
-        return default
-    try:
-        v = int(raw)
-    except ValueError:
-        raise SystemExit(f"{flag} must be an integer, got {raw!r}")
-    if v < 1:
-        raise SystemExit(f"{flag} must be >= 1, got {v}")
-    return v
+    return positive_int_arg(sys.argv, flag, default)
 
 
 def require_docker() -> None:
@@ -193,11 +186,11 @@ def _parse_args() -> dict:
 
     targets_arg = _arg("--targets")
     if targets_arg is None:
-        raise SystemExit(f"--targets is required (no default); choices: {sorted(TARGET_CHOICES)}")
+        raise SystemExit(f"--targets is required (no default); agent choices: {sorted(TARGET_CHOICES)}")
     targets = list(dict.fromkeys(t.strip() for t in targets_arg.split(",") if t.strip()))
     unknown = [t for t in targets if t not in TARGET_CHOICES]
     if unknown:
-        raise SystemExit(f"unknown --targets {unknown}; choices: {sorted(TARGET_CHOICES)}")
+        raise SystemExit(f"unknown agents in --targets {unknown}; choices: {sorted(TARGET_CHOICES)}")
 
     seed_dir_arg = _arg("--seed-dir")
     if seed_dir_arg is None:
@@ -226,8 +219,9 @@ def _parse_args() -> dict:
     epochs = _posint("--epochs", None)
     if epochs is None:
         raise SystemExit("--epochs is required (no default); positive integer")
+    harness = resolve_harness(_arg("--harness"))
 
-    condition = resolve_condition(_arg("--condition"), seeds_path)
+    condition = resolve_condition(_arg("--condition"))
     resolved_seed_path = pathlib.Path(seeds_path)
     family = (
         resolved_seed_path.parent.name
@@ -244,13 +238,14 @@ def _parse_args() -> dict:
     time_limit = resolve_time_limit(_arg("--time-limit"), family)
     if compute == "aws" and time_limit != 7200:
         raise SystemExit("AWS ML trajectories use the fixed two-hour --time-limit=7200")
-    judge_arg = _arg("--judge")
+    judge_arg = require_judge_arg(_arg("--judge"))
 
     return {
         "targets": targets,
         "seeds": seeds,
         "seeds_path": seeds_path,
         "epochs": epochs,
+        "harness": harness,
         "reasoning": resolve_reasoning(_arg("--reasoning")),
         "condition": condition,
         "judge": judge_arg,
@@ -273,10 +268,12 @@ def _parse_args() -> dict:
     }
 
 
-def _parse_aws_control_args() -> dict:
-    """AWS-only modes do not require target/seed experiment arguments."""
+def parse_aws_control_args() -> dict:
+    """AWS-only modes do not require agent/seed experiment arguments."""
     _validate_cli_args()
     return {
+        "harness": _arg("--harness"),
+        "harness_explicit": _arg("--harness") is not None,
         "aws_region": _arg("--aws-region", DEFAULT_REGION),
         "aws_region_explicit": _arg("--aws-region") is not None,
         "aws_instance_type": _arg("--aws-instance-type", DEFAULT_INSTANCE_TYPE),
@@ -297,110 +294,8 @@ def _parse_aws_control_args() -> dict:
     }
 
 
-def gate_integrity_failures(logs: list) -> list[dict]:
-    """Samples whose scripted branch was decided by a FAILED gate (verdict=error) --
-    the run ended conservatively and must not be pooled as a normal trajectory."""
-    failures: list[dict] = []
-    for log in logs or []:
-        for sample in log.samples or []:
-            real_env = (sample.metadata or {}).get("real_env") or {}
-            protocol = real_env.get("protocol") or {}
-            gate_errors = [
-                g for g in real_env.get("gates", []) if g.get("verdict") == "error"
-            ]
-            if gate_errors or protocol.get("ended_reason") == "gate_error_end":
-                failures.append({
-                    "task": log.eval.task,
-                    "sample": str(sample.id),
-                    "epoch": sample.epoch,
-                    "issues": ["gate_error"]
-                              + [str(g.get("error"))[:120] for g in gate_errors],
-                })
-    return failures
-
-
-def audit_integrity_failures(logs: list) -> list[dict]:
-    """Samples whose real workspace record did not finalize safely."""
-
-    failures: list[dict] = []
-    for log in logs or []:
-        for sample in log.samples or []:
-            real_env = (sample.metadata or {}).get("real_env") or {}
-            issues = []
-            if not real_env.get("protocol"):
-                issues.append("missing_protocol_record")
-            if not real_env.get("artifacts"):
-                issues.append("missing_final_artifact_record")
-            if real_env.get("finalize_error"):
-                issues.append(f"finalize_error:{real_env['finalize_error']}")
-            if issues:
-                failures.append({
-                    "task": log.eval.task,
-                    "sample": str(sample.id),
-                    "epoch": sample.epoch,
-                    "issues": issues,
-                })
-    return failures
-
-
-def judge_procedure_integrity_failures(logs: list) -> list[dict]:
-    """Samples without one valid owned structured official judgment."""
-
-    failures: list[dict] = []
-    for log in logs or []:
-        for sample in log.samples or []:
-            score = (sample.scores or {}).get("environment_judge")
-            metadata = getattr(score, "metadata", None) or {} if score else {}
-            envelope = metadata.get("environment_judge") or {}
-            issues = []
-            if score is None:
-                issues.append("missing_environment_judge_score")
-            if not isinstance(envelope.get("result"), dict):
-                issues.append("missing_structured_result")
-            if envelope.get("post_validation") != "passed":
-                issues.append(
-                    f"judge_post_validation:{envelope.get('post_validation') or 'missing'}"
-                )
-            stage = envelope.get("official_stage")
-            if stage not in {"stage_1", "final"}:
-                issues.append(f"invalid_official_stage:{stage or 'missing'}")
-            if stage == "final" and envelope.get("fresh_call") is not True:
-                issues.append("final_judgment_not_marked_fresh")
-            if issues:
-                failures.append({
-                    "task": log.eval.task,
-                    "sample": str(sample.id),
-                    "epoch": sample.epoch,
-                    "issues": issues,
-                })
-    return failures
-
-
-def write_integrity_sidecar(log_dir: pathlib.Path, logs: list) -> list[dict]:
-    """Persist the exact per-sample inclusion verdict consumed by the viewer."""
-
-    records = integrity_sidecar_records(logs)
-    payload = {
-        "schema_version": "environment-pipeline-integrity-v1",
-        "records": records,
-    }
-    log_dir.mkdir(parents=True, exist_ok=True)
-    temporary: pathlib.Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=log_dir, delete=False
-        ) as handle:
-            temporary = pathlib.Path(handle.name)
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, log_dir / "pipeline_integrity.json")
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return records
+# Compatibility for existing imports while callers migrate to the public name.
+_parse_aws_control_args = parse_aws_control_args
 
 
 def run_real_audit_stage(cfg: dict):
@@ -425,16 +320,21 @@ def run_real_audit_stage(cfg: dict):
     print("=" * 72)
     print(f"STAGE 1/2  REAL AUDIT + STRUCTURED JUDGE  ->  {log_dir.name}")
     print("=" * 72)
-    print(f"  targets ({len(targets)}): "
+    print(f"  agents ({len(targets)}): "
           + ", ".join(f"{t}{reasoning_tag(cfg['reasoning'])}" for t in targets))
+    print(f"  harness={cfg['harness']}")
     print(f"  seeds ({len(seeds)}): {seeds}  condition={cfg['condition']}")
     print(f"  judge={resolve_judge(cfg['judge'])}  gate={cfg['gate_model']}")
     print(f"  epochs={epochs}  concurrency={cfg['concurrency']}  "
           f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
           f"time_limit={cfg['time_limit']}s (no turn cap)")
     if cfg["reasoning"]:
-        print(f"  reasoning=ON effort={REASONING_EFFORT}; '<thinking> tags' SP "
-              "instruction stripped")
+        detail = (
+            "; '<thinking> tags' SP instruction stripped"
+            if cfg["harness"] == "simple"
+            else "; native scaffold reasoning configuration"
+        )
+        print(f"  reasoning=ON effort={REASONING_EFFORT}{detail}")
     print(f"  expected trajectories: {len(targets)} x {len(seeds)} x {epochs} = {expected_n}")
     print("  environment: REAL docker sandboxes; user turns fully scripted; the only "
           "in-run AI decision is the first-submission gate\n")
@@ -448,6 +348,7 @@ def run_real_audit_stage(cfg: dict):
             artifacts_root=log_dir / "real_artifacts",
             task_id_suffix=task_suffix,
             execution_metadata=execution_metadata,
+            harness=cfg["harness"],
         )
         success, logs = run_eval(
             tasks, epochs, cfg["concurrency"], log_dir,
@@ -471,7 +372,7 @@ def run_real_audit_stage(cfg: dict):
     dead = dead_targets(logs, target_models)
     if dead:
         print("\n" + "!" * 72)
-        print(f"WARNING: target(s) {dead} produced 0 output tokens -- they never ran.")
+        print(f"WARNING: agent(s) {dead} produced 0 output tokens -- they never ran.")
         print("!" * 72)
 
     if actual_n != expected_n:
@@ -513,7 +414,7 @@ async def run_env_post_stages(cfg: dict) -> bool:
             print(f"\n!! VIEWER STAGE FAILED: {type(e).__name__}: {e}")
             traceback.print_exc()
     else:
-        print("\n(skipping STAGE 3 viewer: --skip-viewer)")
+        print("\n(skipping STAGE 2 viewer: --skip-viewer)")
     return ok
 
 
@@ -545,6 +446,7 @@ def main() -> None:
                     raise SystemExit("--dry-run is not meaningful with --resume-campaign")
                 state = resume_campaign(control, _ENVIRONMENTS, DATA, resume_id)
             else:
+                control["harness"] = resolve_harness(control.get("harness"))
                 state = retry_failed(
                     control, _ENVIRONMENTS, DATA, retry_id,
                     dry_run=control["dry_run"],

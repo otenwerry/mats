@@ -8,12 +8,12 @@ module only computes.
 
 from __future__ import annotations
 
-from env_viewer_visuals import target_label, trajectory_category
+from env_viewer_visuals import agent_label, trajectory_category
 
 
 CATEGORY_KEYS = (
     "hack", "review", "notable", "clean",
-    "unjudged", "invalid", "awaiting", "excluded",
+    "unjudged", "invalid", "awaiting",
 )
 
 
@@ -40,10 +40,16 @@ def prefix_source_trajectory_id(audit: dict) -> int | None:
     return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def category_counts(audits: list[dict]) -> dict[str, int]:
+def category_counts(
+    audits: list[dict], *, include_excluded: bool = False
+) -> dict[str, int]:
+    """Outcome counts for valid runs, or for all runs when explicitly requested."""
+
     counts = {key: 0 for key in CATEGORY_KEYS}
     for audit in audits:
-        counts[trajectory_category(audit)] += 1
+        if not include_excluded and audit.get("integrity_status") == "excluded":
+            continue
+        counts[trajectory_category(audit, respect_exclusion=False)] += 1
     return counts
 
 
@@ -67,19 +73,27 @@ def reasoning_values(audits: list[dict]) -> set:
     }
 
 
+def harness_of(audit: dict) -> str:
+    """Stored agent harness, treating pre-flag trajectories as simple."""
+
+    return str(audit.get("harness") or "simple")
+
+
 def baseline_audits(
-    originals: list[dict], target: str, reasoning: bool | None
+    originals: list[dict], agent: str, reasoning: bool | None, harness: str
 ) -> list[dict]:
     """Original trajectories comparable to one continuation group.
 
-    ``originals`` is the seed's current official pool. Matching is by exact target
-    slug; when the group has one recorded reasoning setting, originals with a
-    recorded conflicting setting are dropped (unstamped ones stay).
+    ``originals`` is the seed's current official pool. Matching is by exact agent
+    slug and harness; when the group has one recorded reasoning setting, originals
+    with a recorded conflicting setting are dropped (unstamped ones stay). Historical
+    originals without a harness stamp are the former simple implementation.
     """
 
     pool = [
         audit for audit in originals
-        if str(audit.get("target") or "") == target
+        if str(audit.get("target") or "") == agent
+        and harness_of(audit) == harness
     ]
     if reasoning is None:
         return pool
@@ -92,12 +106,16 @@ def baseline_audits(
 
 def continuation_groups(
     continuations: list[dict], *, seed_order: list[str]
-) -> list[tuple[tuple[str, str], dict[str, list[dict]]]]:
-    """[( (seed, target), {treatment: rows} )] ordered by seed nav order, target."""
+) -> list[tuple[tuple[str, str, str], dict[str, list[dict]]]]:
+    """[((seed, agent, harness), {treatment: rows})] in viewer order."""
 
-    grouped: dict[tuple[str, str], dict[str, list[dict]]] = {}
+    grouped: dict[tuple[str, str, str], dict[str, list[dict]]] = {}
     for audit in continuations:
-        key = (str(audit.get("seed") or "unknown"), str(audit.get("target") or ""))
+        key = (
+            str(audit.get("seed") or "unknown"),
+            str(audit.get("target") or ""),
+            harness_of(audit),
+        )
         grouped.setdefault(key, {}).setdefault(treatment_of(audit), []).append(audit)
     order = {seed: index for index, seed in enumerate(seed_order)}
     return sorted(
@@ -108,6 +126,7 @@ def continuation_groups(
         key=lambda item: (
             order.get(item[0][0], len(order)),
             item[0][0],
-            target_label(item[0][1]),
+            agent_label(item[0][1]),
+            item[0][2],
         ),
     )

@@ -18,6 +18,8 @@ class RealAuditPipelineArgTests(unittest.TestCase):
             "--seed-dir=ml_training_data_misuse",
             "--seeds=fraud_detection",
             "--epochs=1",
+            "--harness=simple",
+            "--judge=gpt-5.6-luna",
         ]
 
     def test_default_runtime_selection(self):
@@ -28,6 +30,43 @@ class RealAuditPipelineArgTests(unittest.TestCase):
         self.assertEqual(config["time_limit"], 7200)
         self.assertEqual(config["vm_concurrency"], 50)
         self.assertEqual(config["gate_model"], config["judge_resolved"])
+        self.assertEqual(config["harness"], "simple")
+
+    def test_harness_is_required_and_has_no_default(self):
+        argv = [arg for arg in self.base_argv if not arg.startswith("--harness=")]
+        with patch.object(sys, "argv", argv):
+            with self.assertRaisesRegex(SystemExit, "--harness is required"):
+                exp_real_audit_pipeline._parse_args()
+
+    def test_production_harness_is_explicitly_selectable(self):
+        argv = [
+            "--harness=production" if arg == "--harness=simple" else arg
+            for arg in self.base_argv
+        ]
+        with patch.object(sys, "argv", argv):
+            config = exp_real_audit_pipeline._parse_args()
+        self.assertEqual(config["harness"], "production")
+
+    def test_subscription_harness_is_explicitly_selectable(self):
+        argv = [
+            "--harness=subscription" if arg == "--harness=simple" else arg
+            for arg in self.base_argv
+        ]
+        with patch.object(sys, "argv", argv):
+            config = exp_real_audit_pipeline._parse_args()
+        self.assertEqual(config["harness"], "subscription")
+
+    def test_judge_is_required_and_has_no_default(self):
+        argv = [arg for arg in self.base_argv if not arg.startswith("--judge=")]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.dict(
+                "os.environ",
+                {"ENVIRONMENTS_JUDGE": "gpt-5.6-luna"},
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "--judge is required"):
+                exp_real_audit_pipeline._parse_args()
 
     def test_local_debugging_remains_explicitly_available(self):
         with patch.object(sys, "argv", [*self.base_argv, "--compute=local"]):
@@ -47,6 +86,8 @@ class RealAuditPipelineArgTests(unittest.TestCase):
             "--seed-dir=p_hacking",
             "--seeds=reasoning_prompt_benchmark",
             "--epochs=1",
+            "--harness=simple",
+            "--judge=gpt-5.6-luna",
         ]
         with patch.object(sys, "argv", argv):
             config = exp_real_audit_pipeline._parse_args()

@@ -1,15 +1,15 @@
 """End-to-end CONTINUATION pipeline for real environments: generate -> structured
 judge (inline gate + fresh final call) -> viewer, in one command.
 
-THE QUESTION: if a target reward-hacks on one task and is then handed a SECOND,
+THE QUESTION: if an agent reward-hacks on one task and is then handed a SECOND,
 unrelated task, does its hack rate on the second task go up -- because it is
 conditioned on its own earlier behavior?
 
 ONE INVOCATION = ONE TREATMENT: label the run with a free-form ``--treatment`` slug
-and choose the prefixes the target carries; run again for another treatment. There
+and choose the prefixes the agent carries; run again for another treatment. There
 is NO no-prefix condition: the environment is pinned and scripted (no auditor), so
 the base rate is simply the ordinary original trajectories of the same
-(seed, target) -- the viewer's Continuations page shows them side by side.
+(seed, agent) -- the viewer's Continuations page shows them side by side.
 
 PREFIXES come from two sources, combinable in one run:
   --prefixes=<ids>        stored trajectories by viewer ID, reconstructed exactly
@@ -18,9 +18,9 @@ PREFIXES come from two sources, combinable in one run:
                           environments-continuation-prefix-v1 JSON format (see
                           lib/exp_real_continuation.py) -- e.g. a long Q&A session.
 
-Each cell = one (prefix, new-task seed) pair, run for --epochs epochs. The target
+Each cell = one (prefix, new-task seed) pair, run for --epochs epochs. The agent
 model and its reasoning setting are read from each prefix (there is no --targets or
---reasoning flag). The target starts pre-loaded with the prefix conversation, then
+--reasoning flag). The agent starts pre-loaded with the prefix conversation, then
 receives one injected pivot user turn (the fixed Petri pivot sentence + the seed's
 pinned opening message) and goes live in a fresh sandbox. Both judge stages see only
 the system message plus the live task: the prefix is sliced out mechanically at a
@@ -28,9 +28,11 @@ stored boundary index and the omission is declared as an evidence caveat.
 
 Usage (from mats/environments/):
   uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=12,17 \
-      --seed-dir=p_hacking --seeds=all --epochs=5 --compute=local
+      --seed-dir=p_hacking --seeds=all --epochs=5 --harness=simple --compute=local \
+      --judge=gpt-5.6-luna
   uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=12 \
-      --seed-dir=ml_training_data_misuse --seeds=demand_forecasting --epochs=5
+      --seed-dir=ml_training_data_misuse --seeds=demand_forecasting --epochs=5 \
+      --harness=production --judge=gpt-5.6-luna
   uv run exp_continuation_pipeline.py ... --dry-run     # FREE: plan (and AWS preflight)
 
 Flags:
@@ -43,8 +45,13 @@ Flags:
   --seeds=<a,b|all>       REQUIRED. new-task members (`all` = every ported member).
                           Must not include any prefix's own source seed.
   --epochs=<N>            REQUIRED. continuations per (prefix, seed) cell.
+  --harness=simple|production|subscription  REQUIRED. simple keeps native prefix
+                          message splicing. production uses API-backed native
+                          scaffolds. subscription uses Claude/Codex subscription login
+                          quota; OpenCode remains API-backed.
   --condition=<c>         allow only (default).
-  --judge=<m> --gate-model=<m>  same semantics as exp_real_audit_pipeline.
+  --judge=<m>            REQUIRED. alignment judge; see lib/judge_selection.py.
+  --gate-model=<m>       defaults to and must equal --judge.
   --concurrency=<N>       LLM parallelism (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
   --time-limit=<sec>      family default (ml 7200 / p_hacking 1800).
@@ -57,12 +64,13 @@ Flags:
   --dry-run               FREE: validate + print the full plan (local), or the plan
                           plus the AWS campaign preflight (aws). No model calls.
 
-There is no --reasoning flag: each prefix records the reasoning setting its target
+There is no --reasoning flag: each prefix records the reasoning setting its agent
 ran with, and the continuation replicates it. --aws-setup and --aws-smoke-test live
 in exp_real_audit_pipeline.py.
 
-Costs money (target + stage-one/final judge calls, and EC2 for AWS runs) unless
---dry-run.
+Costs money (API-backed agent calls, stage-one/final judge calls, and EC2 for AWS
+runs) unless --dry-run. Direct subscription agents consume plan quota instead of a
+measured per-run API charge.
 """
 
 import asyncio
@@ -88,7 +96,7 @@ from exp_aws_trajectory import (
     resume_campaign,
     retry_failed,
     run_campaign,
-    _sha256_file,
+    sha256_file,
 )
 from exp_inspect_runner import dead_targets, run_eval
 from exp_real_audit import (
@@ -104,8 +112,10 @@ from exp_real_continuation import (
     load_prefix_specs,
     validate_treatment,
 )
-from judge_selection import resolve_judge
+from judge_selection import require_judge_arg, resolve_judge
 from model_catalog import resolve_target
+from exp_target_harness import resolve_harness
+from pipeline_cli import positive_int_arg, validate_cli_args, value_arg
 from project_paths import DATA_ROOT as DATA, VIEWER_ROOT as OUT
 from protocol_sources import (
     reject_retired_fixed_system_prompt_flag,
@@ -118,7 +128,7 @@ DEFAULT_CONCURRENCY = 50
 
 _VALUE_FLAGS = {
     "--treatment", "--prefixes", "--prefix-files", "--seed-dir", "--seeds",
-    "--epochs", "--condition", "--judge", "--gate-model", "--concurrency",
+    "--epochs", "--harness", "--condition", "--judge", "--gate-model", "--concurrency",
     "--sandbox-concurrency", "--time-limit", "--compute", "--vm-concurrency",
     "--aws-region", "--aws-instance-type", "--aws-bucket", "--aws-secret-env",
     "--resume-campaign", "--retry-failed",
@@ -127,10 +137,10 @@ _SWITCH_FLAGS = {"--skip-viewer", "--dry-run"}
 _REJECTED_FLAGS = {
     "--reasoning": (
         "--reasoning is not a continuation flag: each prefix records the reasoning "
-        "setting its target ran with, and the continuation replicates it"
+        "setting its agent ran with, and the continuation replicates it"
     ),
     "--targets": (
-        "--targets is not a continuation flag: the target model is read from each "
+        "--targets is not a continuation flag: the agent model is read from each "
         "prefix"
     ),
     "--aws-setup": "--aws-setup lives in exp_real_audit_pipeline.py",
@@ -139,37 +149,20 @@ _REJECTED_FLAGS = {
 
 
 def _validate_cli_args() -> None:
-    valid = sorted(_VALUE_FLAGS | _SWITCH_FLAGS)
-    for arg in sys.argv[1:]:
-        flag, separator, _ = arg.partition("=")
-        if flag in _REJECTED_FLAGS:
-            raise SystemExit(_REJECTED_FLAGS[flag])
-        if flag in _VALUE_FLAGS:
-            if not separator:
-                raise SystemExit(f"{flag} requires a value in the form {flag}=<value>")
-            continue
-        if flag in _SWITCH_FLAGS:
-            if separator:
-                raise SystemExit(f"{flag} is a switch and does not take a value")
-            continue
-        raise SystemExit(f"unknown argument {arg!r}; valid flags: {valid}")
+    validate_cli_args(
+        sys.argv,
+        value_flags=_VALUE_FLAGS,
+        switch_flags=_SWITCH_FLAGS,
+        rejected_flags=_REJECTED_FLAGS,
+    )
 
 
 def _arg(flag: str, default: str | None = None) -> str | None:
-    return next((a.split("=", 1)[1] for a in sys.argv if a.startswith(flag + "=")), default)
+    return value_arg(sys.argv, flag, default)
 
 
 def _posint(flag: str, default: int | None) -> int | None:
-    raw = _arg(flag)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        raise SystemExit(f"{flag} must be an integer, got {raw!r}")
-    if value < 1:
-        raise SystemExit(f"{flag} must be >= 1, got {value}")
-    return value
+    return positive_int_arg(sys.argv, flag, default)
 
 
 def _parse_ids(flag: str) -> list[int]:
@@ -238,8 +231,9 @@ def _parse_args() -> dict:
     epochs = _posint("--epochs", None)
     if epochs is None:
         raise SystemExit("--epochs is required (no default); positive integer")
+    harness = resolve_harness(_arg("--harness"))
 
-    condition = resolve_condition(_arg("--condition"), seeds_path)
+    condition = resolve_condition(_arg("--condition"))
     resolved_seed_path = pathlib.Path(seeds_path)
     family = (
         resolved_seed_path.parent.name
@@ -256,7 +250,7 @@ def _parse_args() -> dict:
     time_limit = resolve_time_limit(_arg("--time-limit"), family)
     if compute == "aws" and time_limit != 7200:
         raise SystemExit("AWS ML trajectories use the fixed two-hour --time-limit=7200")
-    judge_arg = _arg("--judge")
+    judge_arg = require_judge_arg(_arg("--judge"))
 
     return {
         "treatment": treatment,
@@ -267,6 +261,7 @@ def _parse_args() -> dict:
         "seed_dir": seed_dir_arg,
         "family": family,
         "epochs": epochs,
+        "harness": harness,
         "condition": condition,
         "judge": judge_arg,
         "judge_resolved": resolve_judge(judge_arg),
@@ -297,7 +292,9 @@ def _load_plan(cfg: dict):
     """Free: resolve prefixes, validate every invariant, and build the cells."""
 
     print("[plan] loading prefixes, validating invariants, building cells ...")
-    specs = load_prefix_specs(cfg["prefix_ids"], cfg["prefix_files"])
+    specs = load_prefix_specs(
+        cfg["prefix_ids"], cfg["prefix_files"], harness=cfg["harness"]
+    )
     cells = build_continuation_cells(specs, cfg["seeds_path"], cfg["seeds"])
     print(describe_plan(cfg["treatment"], specs, cells))
     expected = len(cells) * cfg["epochs"]
@@ -332,13 +329,14 @@ def run_local_stage(cfg: dict, cells: list) -> tuple[object, pathlib.Path, int, 
     print("=" * 72)
     print(f"  treatment={cfg['treatment']}  seeds={cfg['seeds']}  "
           f"condition={cfg['condition']}")
+    print(f"  harness={cfg['harness']}")
     print(f"  judge={cfg['judge_resolved']}  gate={cfg['gate_model']}")
     print(f"  epochs={cfg['epochs']}  concurrency={cfg['concurrency']}  "
           f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
           f"time_limit={cfg['time_limit']}s (no turn cap)")
     print(f"  expected trajectories: {len(cells)} cell(s) x {cfg['epochs']} = "
           f"{expected_n}")
-    print("  environment: REAL docker sandboxes; the target carries its prefix; "
+    print("  environment: REAL docker sandboxes; the agent carries its prefix; "
           "both judge stages see only the live task\n")
 
     target_models = sorted({
@@ -355,6 +353,7 @@ def run_local_stage(cfg: dict, cells: list) -> tuple[object, pathlib.Path, int, 
             artifacts_root=log_dir / "real_artifacts",
             task_id_suffix=task_suffix,
             execution_metadata=execution_metadata,
+            harness=cfg["harness"],
         )
         success, logs = run_eval(
             tasks, cfg["epochs"], cfg["concurrency"], log_dir,
@@ -378,7 +377,7 @@ def run_local_stage(cfg: dict, cells: list) -> tuple[object, pathlib.Path, int, 
     dead = dead_targets(logs, target_models)
     if dead:
         print("\n" + "!" * 72)
-        print(f"WARNING: target(s) {dead} produced 0 output tokens -- they never ran.")
+        print(f"WARNING: agent(s) {dead} produced 0 output tokens -- they never ran.")
         print("!" * 72)
 
     if actual_n != expected_n:
@@ -416,7 +415,7 @@ def _aws_payload_descriptors(specs: list) -> list[dict]:
         descriptors.append({
             "name": spec.name,
             "sha256": spec.sha256,
-            "file_sha256": _sha256_file(spec.payload_path),
+            "file_sha256": sha256_file(spec.payload_path),
             "local_path": str(spec.payload_path),
             "target": spec.target_name,
             "target_model": resolve_target(spec.target_name),
@@ -431,12 +430,13 @@ def main() -> None:
         if resume_id and retry_id:
             raise SystemExit("--resume-campaign and --retry-failed are mutually exclusive")
         if resume_id or retry_id:
-            control = base_pipeline._parse_aws_control_args()
+            control = base_pipeline.parse_aws_control_args()
             if resume_id:
                 if control["dry_run"]:
                     raise SystemExit("--dry-run is not meaningful with --resume-campaign")
                 state = resume_campaign(control, _ENVIRONMENTS, DATA, resume_id)
             else:
+                control["harness"] = resolve_harness(control.get("harness"))
                 state = retry_failed(
                     control, _ENVIRONMENTS, DATA, retry_id,
                     dry_run=control["dry_run"],

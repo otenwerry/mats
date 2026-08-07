@@ -16,6 +16,50 @@ BLOCKING_TARGET_PROVIDER_EVENT_KINDS = frozenset({
 })
 
 
+EVIDENCE_CAVEAT_FLAGS = {
+    "messages_excluded_by_family_policy": (
+        "messages_excluded_by_family_policy", "judge messages omitted"
+    ),
+    "native_reasoning_excluded_by_policy": (
+        "native_reasoning_excluded_by_policy", "judge reasoning omitted"
+    ),
+    "tool_calls_excluded_by_family_policy": (
+        "tool_calls_excluded_by_family_policy", "judge tool calls omitted"
+    ),
+    "tool_results_excluded_by_family_policy": (
+        "tool_results_excluded_by_family_policy", "judge tool results omitted"
+    ),
+    "native_reasoning_not_fully_available_upstream": (
+        "native_reasoning_not_fully_available_upstream", "reasoning incomplete"
+    ),
+    "native_system_prompt_unavailable": (
+        "native_system_prompt_unavailable", "system prompt unavailable"
+    ),
+    "changed_non_text_artifacts_not_copied": (
+        "changed_non_text_artifacts_not_copied", "non-text artifacts omitted"
+    ),
+    "target_scaffold_context_compacted": (
+        "context_compacted", "context compacted"
+    ),
+    "target_scaffold_tool_output_pruned": (
+        "scaffold_tool_output_pruned", "tool output pruned"
+    ),
+    "initial_task_snapshot_unavailable_upstream": (
+        "initial_task_snapshot_unavailable_upstream", "initial task unavailable"
+    ),
+    "submission_snapshots_unavailable_upstream": (
+        "submission_snapshots_unavailable_upstream",
+        "submission snapshots unavailable",
+    ),
+    "final_artifacts_unavailable_upstream": (
+        "missing_final_artifact_record", "final artifacts unavailable"
+    ),
+    "prior_unrelated_task_omitted": (
+        "prior_unrelated_task_omitted", "prior task omitted"
+    ),
+}
+
+
 def tool_output_truncations(sample: Any) -> list[dict]:
     out = []
     for event in getattr(sample, "events", None) or []:
@@ -35,7 +79,7 @@ def tool_output_truncations(sample: Any) -> list[dict]:
 
 
 def sample_has_target_output(sample: Any) -> bool:
-    """Whether stored assistant messages contain visible target output or a tool call."""
+    """Whether stored assistant messages contain visible agent output or a tool call."""
 
     for message in getattr(sample, "messages", None) or []:
         if getattr(message, "role", None) != "assistant":
@@ -79,10 +123,13 @@ def _visible_response(event: Any) -> bool:
     )
 
 
-def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
-    """Return target-call anomalies, retaining recovered retries as non-blocking."""
+def target_model_events(
+    sample: Any, target_model: str | None
+) -> tuple[list[Any], bool]:
+    """Select agent-call events and report whether model-name fallback was used."""
 
     events = []
+    used_model_fallback = False
     for event in getattr(sample, "events", None) or []:
         if getattr(event, "event", None) != "model":
             continue
@@ -90,18 +137,30 @@ def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
         if role is not None:
             if role != "target":
                 continue
-        elif target_model and getattr(event, "model", None) != target_model:
-            continue
+        else:
+            if target_model and getattr(event, "model", None) != target_model:
+                continue
+            used_model_fallback = True
         events.append(event)
+    return events, used_model_fallback
 
-    def same_request(left: Any, right: Any) -> bool:
-        try:
-            return all(
-                getattr(left, field, None) == getattr(right, field, None)
-                for field in ("model", "input", "tools", "config")
-            )
-        except (TypeError, ValueError):
-            return False
+
+def same_model_request(left: Any, right: Any) -> bool:
+    """Whether two recorded model events represent the same provider request."""
+
+    try:
+        return all(
+            getattr(left, field, None) == getattr(right, field, None)
+            for field in ("model", "input", "tools", "config")
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
+    """Return agent-call anomalies, retaining recovered retries as non-blocking."""
+
+    events, _ = target_model_events(sample, target_model)
 
     out: list[dict] = []
     for index, event in enumerate(events):
@@ -116,7 +175,7 @@ def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
         next_usage = getattr(getattr(next_event, "output", None), "usage", None)
 
         if usage is None and error and next_event is not None and next_usage is not None \
-                and same_request(event, next_event):
+                and same_model_request(event, next_event):
             out.append({
                 "kind": "failed_attempt_retried",
                 "attempt": index + 1,
@@ -197,12 +256,12 @@ def finalize_audit_integrity(audit: dict) -> dict:
             excludes=True)
 
     if audit.get("dead"):
-        add("target_no_output", "no target output", severity="error",
-            detail="The target produced no usable output.", excludes=True)
+        add("target_no_output", "no agent output", severity="error",
+            detail="The agent produced no usable output.", excludes=True)
     for event in blocking_provider_events(audit.get("target_provider_events")):
         kind = str(event.get("kind"))
         add(f"target_provider_{kind}", kind.replace("_", " "), severity="error",
-            detail=f"Unrecovered target-provider anomaly on attempt {event.get('attempt')}.",
+            detail=f"Unrecovered agent-provider anomaly on attempt {event.get('attempt')}.",
             excludes=True)
 
     judgment = audit.get("judgment") or {}
@@ -258,36 +317,135 @@ def finalize_audit_integrity(audit: dict) -> dict:
     if truncations:
         add("tool_output_truncated", f"tool truncation ×{len(truncations)}",
             severity="warning",
-            detail="At least one tool result was truncated before the target saw it.")
+            detail="At least one tool result was truncated before the agent saw it.")
     compactions = audit.get("compactions") or []
     if compactions:
         add("context_compacted", f"compacted ×{len(compactions)}", severity="warning",
             detail="Inspect compacted the model context during this trajectory.")
+    continuation = real_env.get("continuation") or {}
+    native_prefix = (
+        continuation.get("production_native_resume")
+        or continuation.get("subscription_native_resume")
+        or {}
+    )
+    if native_prefix.get("boundary_lost"):
+        add(
+            "production_prefix_boundary_lost",
+            "prefix boundary lost",
+            severity="error",
+            detail=(
+                "The live hand-off boundary could not be recovered exactly after the "
+                "native scaffold resumed its session."
+            ),
+            excludes=True,
+        )
+    harness_record = real_env.get("harness") or {}
+    native_bundle = real_env.get("native_resume_bundle") or {}
+    if (
+        harness_record.get("mode") in {"production", "subscription"}
+        and native_bundle.get("available") is not True
+    ):
+        add(
+            "native_resume_bundle_unavailable",
+            "native resume unavailable",
+            severity="error",
+            detail=(
+                "The native scaffold's session bundle was not saved, so "
+                "this trajectory cannot be resumed literally."
+            ),
+            excludes=True,
+        )
+    monitoring = harness_record.get("native_loss_monitoring") or {}
+    if (
+        harness_record.get("mode") in {"production", "subscription"}
+        and monitoring.get("complete") is False
+    ):
+        add(
+            "production_scaffold_loss_observability",
+            "scaffold loss partly unobservable",
+            severity="warning",
+            detail=(
+                "Native scaffold loss monitoring is incomplete. This is a monitoring "
+                "limit and does not mean loss occurred in this trajectory."
+            ),
+        )
+    system_observability = harness_record.get("native_system_prompt_observability") or {}
+    if not system_observability.get("complete", True):
+        add(
+            "native_system_prompt_unavailable",
+            "system prompt unavailable",
+            severity="warning",
+            detail=(
+                "Claude Code's complete built-in system prompt was unavailable to "
+                "the transcript and judge."
+            ),
+        )
+    native_events = harness_record.get("native_loss_events") or []
+    native_compactions = [
+        event for event in native_events
+        if isinstance(event, dict) and event.get("kind") == "context_compaction"
+    ]
+    if native_compactions and not compactions:
+        add(
+            "context_compacted",
+            f"compacted ×{len(native_compactions)}",
+            severity="warning",
+            detail="The production scaffold compacted the agent's native context.",
+        )
+    pruned = [
+        event for event in native_events
+        if isinstance(event, dict) and event.get("kind") == "tool_output_pruned"
+    ]
+    if pruned:
+        add(
+            "scaffold_tool_output_pruned",
+            f"tool output pruned ×{len(pruned)}",
+            severity="warning",
+            detail="The production scaffold shortened earlier native tool output.",
+        )
 
     evidence = ((judgment.get("envelope") or {}).get("evidence") or {})
-    caveat_codes = {
-        str(item.get("code"))
-        for item in evidence.get("caveats") or []
-        if isinstance(item, dict) and item.get("code")
-    }
-    lossy_codes = sorted(
-        code for code in caveat_codes
-        if any(word in code for word in ("truncat", "unavailable", "changed", "missing"))
-    )
-    # Truncated or unreadable artifact snapshots no longer emit prompt caveats (their
-    # status is marked in place in the rendered artifact block), so flag them from the
-    # stored snapshot records directly.
+    for caveat in evidence.get("caveats") or []:
+        if not isinstance(caveat, dict) or not caveat.get("code"):
+            continue
+        caveat_code = str(caveat["code"])
+        flag_code, label = EVIDENCE_CAVEAT_FLAGS.get(
+            caveat_code,
+            (f"judge_evidence_{caveat_code}", caveat_code.replace("_", " ")),
+        )
+        if any(item["code"] == flag_code for item in flags):
+            continue
+        add(
+            flag_code,
+            label,
+            severity="warning",
+            detail=str(caveat.get("description") or caveat_code),
+        )
+
+    # Artifact content loss is stored directly on each snapshot rather than as a
+    # separate evidence issue record.
     lossy_artifacts = [
         item for item in evidence.get("artifacts") or []
         if isinstance(item, dict) and (item.get("truncated") or item.get("read_error"))
     ]
     if lossy_artifacts:
-        lossy_codes.append(
-            f"truncated_or_unreadable_artifact_snapshots ×{len(lossy_artifacts)}"
+        affected = ", ".join(
+            f"{item.get('path') or 'unknown'}@{item.get('snapshot') or 'unknown'}"
+            for item in lossy_artifacts
         )
-    if evidence.get("builder_truncated_evidence") or lossy_codes:
-        add("judge_evidence_incomplete", "judge evidence caveat", severity="warning",
-            detail="; ".join(lossy_codes) or "The judge builder recorded truncated evidence.")
+        add(
+            "judge_artifacts_incomplete",
+            f"artifact incomplete ×{len(lossy_artifacts)}",
+            severity="warning",
+            detail=f"Truncated or unreadable judge artifact snapshots: {affected}.",
+        )
+    if evidence.get("builder_truncated_evidence"):
+        add(
+            "judge_evidence_truncated",
+            "judge evidence truncated",
+            severity="warning",
+            detail="The judge builder recorded truncated evidence.",
+        )
 
     # A pipeline sidecar may contain additional per-sample issues.  Preserve these
     # without turning a historical exit-code warning into an exclusion.
@@ -344,6 +502,13 @@ def integrity_sidecar_records(logs: list[Any]) -> list[dict]:
                 issues.append("missing_final_artifact_record")
             if real_env.get("finalize_error"):
                 issues.append("finalize_error")
+            if (
+                (real_env.get("harness") or {}).get("mode")
+                in {"production", "subscription"}
+                and (real_env.get("native_resume_bundle") or {}).get("available")
+                is not True
+            ):
+                issues.append("native_resume_bundle_unavailable")
             if any(gate.get("verdict") == "error" for gate in real_env.get("gates", [])):
                 issues.append("gate_error")
             if not has_target_output and output_tokens == 0:

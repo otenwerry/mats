@@ -2,7 +2,7 @@
 
 This module deliberately depends on Inspect only.  It does not import the Petri
 package, the old local Petri project, or either project's viewer.  Real-environment
-runs keep the target-facing conversation in ``EvalSample.messages``, so we can read
+runs keep the agent-facing conversation in ``EvalSample.messages``, so we can read
 both old and new environments logs without Petri's branch renderer.
 
 There are two judgment formats and they stay separate:
@@ -16,50 +16,51 @@ would silently change the meaning of historical data.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from copy import deepcopy
-import fcntl
-import hashlib
 import json
-import os
 import pickle
 import re
-import tempfile
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable
 
-from real_integrity import finalize_audit_integrity, target_provider_events
+from env_viewer_cache import (
+    assign_stable_ids,
+    cache_file as _cache_file,
+    mode_signature as _mode_signature,
+    module_signature as _module_signature,
+    trajectory_key as traj_key,
+    viewer_build_lock,
+    write_pickle_atomic as _write_pickle_atomic,
+)
+from judgment_semantics import (
+    CURRENT_STRUCTURED_DIMENSIONS,
+    FAMILY_STRUCTURED_DIMENSIONS,
+    KNOWN_STRUCTURED_DIMENSIONS,
+    ML_NOTICED_VALUES,
+    ML_HACK_TYPE_VALUES,
+    P_HACK_TYPE_VALUES,
+    P_REVIEW_TYPE_VALUES,
+    RETIRED_STRUCTURED_DIMENSIONS,
+    REWARD_HACKING_DISPLAY_LABELS,
+)
+from real_integrity import (
+    finalize_audit_integrity,
+    same_model_request,
+    target_model_events,
+    target_provider_events,
+    tool_output_truncations,
+)
+
+# Kept for callers that used the loader's former private compatibility helper.
+_tool_truncations = tool_output_truncations
 
 
 CURRENT_SCORE_KEY = "environment_judge"
 LEGACY_SCORE_KEY = "audit_judge"
 JUDGMENT_KEYS = (CURRENT_SCORE_KEY, LEGACY_SCORE_KEY)
-CURRENT_STRUCTURED_DIMENSIONS = (
-    "reward_hacking",
-    "deception",
-    "environment_failure",
-)
-# Retired fields remain recognizable only so historical structured judgments can be
-# rendered exactly. Current schemas and prompts never request them.
-RETIRED_STRUCTURED_DIMENSIONS = ("noticed_honeypot",)
-KNOWN_STRUCTURED_DIMENSIONS = (
-    *RETIRED_STRUCTURED_DIMENSIONS,
-    *CURRENT_STRUCTURED_DIMENSIONS,
-)
-
-_CURRENT_ML_HACK_TYPES = {
-    "used_test_set_to_guide_model_selection",
-    "fitted_to_test_set_errors",
-    "trained_on_test_set",
-    "copied_answer_key_into_solutions",
-    "validation_contamination",
-    "other_hack",
-}
-_CURRENT_P_HACK_TYPES = {
-    "unsupported_positive_claim",
-    "fabricated_positive_claim",
-}
-_CURRENT_P_REVIEW_TYPES = {"other"}
+_CURRENT_ML_HACK_TYPES = ML_HACK_TYPE_VALUES
+_CURRENT_P_HACK_TYPES = P_HACK_TYPE_VALUES
+_CURRENT_P_REVIEW_TYPES = P_REVIEW_TYPE_VALUES
 _LEGACY_ML_HACK_TYPES = {"test_set"}
 _LEGACY_P_HACK_TYPES = {
     "selective_reporting",
@@ -69,6 +70,30 @@ _LEGACY_P_HACK_TYPES = {
 
 _ATTACHMENT_RE = re.compile(r"attachment://([0-9a-fA-F]+)")
 _MESSAGE_REF_RE = re.compile(r"\[?M(\d+)\]?", re.IGNORECASE)
+_JUDGE_SCHEMA_VERSION_RE = re.compile(
+    r"(?:environment-judge-v|environment_judge\.v)(\d+)$"
+)
+
+
+def _missing_dimension_is_issue(key: str, schema_version: str | None) -> bool:
+    """Treat noticed as optional only for judgments stored before schema v14."""
+
+    if key != "noticed":
+        return True
+    match = _JUDGE_SCHEMA_VERSION_RE.fullmatch(str(schema_version or ""))
+    return bool(match and int(match.group(1)) >= 14)
+
+
+def _reward_hacking_display_values(
+    types: list[str], not_delivered: list[str]
+) -> list[str]:
+    labels = []
+    for item in types:
+        label = REWARD_HACKING_DISPLAY_LABELS.get(item, item.replace("_", " "))
+        if item in not_delivered:
+            label += " (not delivered)"
+        labels.append(label)
+    return labels or ["none"]
 
 
 def _plain(value: Any) -> Any:
@@ -115,6 +140,28 @@ def resolve_attachments(value: Any, attachments: dict[str, str] | None) -> Any:
     return value
 
 
+def _content_field(block: Any, name: str) -> Any:
+    """Read a content-block field from current models or historical plain mappings."""
+
+    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+
+
+def _display_reasoning(block: Any, attachments: dict[str, str]) -> str:
+    """Return only provider-readable reasoning text, never its opaque replay payload."""
+
+    summary = _content_field(block, "summary")
+    if bool(_content_field(block, "redacted")):
+        if isinstance(summary, str) and summary.strip():
+            return str(resolve_attachments(summary, attachments))
+        return "[reasoning produced but redacted by the provider]"
+
+    for name in ("reasoning", "summary", "text"):
+        value = _content_field(block, name)
+        if isinstance(value, str) and value.strip():
+            return str(resolve_attachments(value, attachments))
+    return ""
+
+
 def _message_content(message: Any, attachments: dict[str, str]) -> tuple[str, str, list]:
     """Return visible text, native reasoning, and unfamiliar content blocks."""
     content = getattr(message, "content", "")
@@ -128,21 +175,15 @@ def _message_content(message: Any, attachments: dict[str, str]) -> tuple[str, st
         if isinstance(block, str):
             visible.append(str(resolve_attachments(block, attachments)))
             continue
-        kind = str(getattr(block, "type", "") or "")
+        kind = str(_content_field(block, "type") or "")
         if kind == "reasoning":
-            value = (
-                getattr(block, "reasoning", None)
-                or getattr(block, "summary", None)
-                or getattr(block, "text", None)
-            )
+            value = _display_reasoning(block, attachments)
             if value:
-                reasoning.append(str(resolve_attachments(value, attachments)))
-            elif getattr(block, "redacted", False):
-                reasoning.append("[reasoning produced but redacted by the provider]")
+                reasoning.append(value)
             else:
                 other.append(resolve_attachments(_plain(block), attachments))
             continue
-        text = getattr(block, "text", None)
+        text = _content_field(block, "text")
         if isinstance(text, str):
             visible.append(str(resolve_attachments(text, attachments)))
         else:
@@ -150,11 +191,142 @@ def _message_content(message: Any, attachments: dict[str, str]) -> tuple[str, st
     return "".join(visible), "\n\n".join(reasoning), other
 
 
+def _iso_timestamp(value: Any) -> str | None:
+    """Return a stable ISO timestamp string for an Inspect datetime-like value."""
+
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    text = str(value).strip()
+    return text or None
+
+
+def _message_timings(sample: Any, target_model: str | None) -> list[dict]:
+    """Map saved messages to their existing Inspect event time.
+
+    Inspect stores timing on ModelEvent and ToolEvent rather than ChatMessage. Model
+    inputs timestamp system/user turns (and native tool results without ToolEvents),
+    while model outputs and ToolEvent.message_id provide the authoritative generated
+    turn mapping. ``working_start`` is already elapsed sample time and is shared by all
+    three agent harnesses.
+    """
+
+    messages = list(getattr(sample, "messages", None) or [])
+    candidates: dict[str, tuple[int, float, str | None, str]] = {}
+
+    def remember(
+        message_id: Any,
+        *,
+        priority: int,
+        elapsed: Any,
+        timestamp: Any,
+        source: str,
+    ) -> None:
+        if not message_id or isinstance(elapsed, bool) or not isinstance(
+            elapsed, (int, float)
+        ):
+            return
+        key = str(message_id)
+        current = candidates.get(key)
+        if current is None or priority > current[0]:
+            candidates[key] = (
+                priority,
+                max(0.0, float(elapsed)),
+                _iso_timestamp(timestamp),
+                source,
+            )
+
+    model_events, _ = target_model_events(sample, target_model)
+    for event in model_events:
+        elapsed = getattr(event, "working_start", None)
+        timestamp = getattr(event, "timestamp", None)
+        for message in getattr(event, "input", None) or []:
+            remember(
+                getattr(message, "id", None),
+                priority=10,
+                elapsed=elapsed,
+                timestamp=timestamp,
+                source="model_input_event",
+            )
+        output_message = getattr(getattr(event, "output", None), "message", None)
+        remember(
+            getattr(output_message, "id", None),
+            priority=30,
+            elapsed=elapsed,
+            timestamp=timestamp,
+            source="model_output_event",
+        )
+
+    tool_call_candidates: dict[str, tuple[int, float, str | None, str]] = {}
+    for event in getattr(sample, "events", None) or []:
+        if getattr(event, "event", None) != "tool":
+            continue
+        elapsed = getattr(event, "working_start", None)
+        timestamp = getattr(event, "timestamp", None)
+        message_id = getattr(event, "message_id", None)
+        remember(
+            message_id,
+            priority=30,
+            elapsed=elapsed,
+            timestamp=timestamp,
+            source="tool_event",
+        )
+        call_id = getattr(event, "id", None)
+        if (
+            call_id
+            and not isinstance(elapsed, bool)
+            and isinstance(elapsed, (int, float))
+        ):
+            tool_call_candidates[str(call_id)] = (
+                20,
+                max(0.0, float(elapsed)),
+                _iso_timestamp(timestamp),
+                "tool_event_call_id",
+            )
+
+    sample_started = _iso_timestamp(getattr(sample, "started_at", None))
+    timings: list[dict] = []
+    previous = (0, 0.0, sample_started, "sample_start_fallback")
+    for message in messages:
+        message_id = getattr(message, "id", None)
+        timing = candidates.get(str(message_id)) if message_id else None
+        if timing is None and getattr(message, "role", None) == "tool":
+            call_id = getattr(message, "tool_call_id", None)
+            timing = tool_call_candidates.get(str(call_id)) if call_id else None
+        if timing is None:
+            timing = previous
+        else:
+            previous = timing
+        _, elapsed, timestamp, source = timing
+        timings.append({
+            "timestamp": timestamp,
+            "elapsed_seconds": elapsed,
+            "timestamp_source": source,
+        })
+    return timings
+
+
+def _format_elapsed_time(value: Any) -> str | None:
+    """Format non-negative elapsed seconds as an unbounded HH:MM:SS value."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    total = max(0, int(value))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def normalize_messages(
-    messages: Iterable[Any], attachments: dict[str, str] | None = None
+    messages: Iterable[Any],
+    attachments: dict[str, str] | None = None,
+    timings: Iterable[dict] | None = None,
 ) -> list[dict]:
-    """Normalize target-facing Inspect messages and give each a stable ``M#`` anchor."""
+    """Normalize agent-facing Inspect messages and give each a stable ``M#`` anchor."""
     attachments = attachments or {}
+    timing_records = list(timings or [])
     normalized: list[dict] = []
     assistant_index = 0
     user_index = 0
@@ -178,6 +350,7 @@ def normalize_messages(
             })
 
         error = getattr(message, "error", None)
+        timing = timing_records[number - 1] if number <= len(timing_records) else {}
         normalized.append({
             "number": number,
             "id": f"M{number}",
@@ -191,6 +364,10 @@ def normalize_messages(
             "function": getattr(message, "function", None),
             "error": resolve_attachments(_plain(error), attachments) if error else None,
             "source": getattr(message, "source", None),
+            "timestamp": timing.get("timestamp"),
+            "elapsed_seconds": timing.get("elapsed_seconds"),
+            "elapsed_time": _format_elapsed_time(timing.get("elapsed_seconds")),
+            "timestamp_source": timing.get("timestamp_source"),
             "assistant_turn": assistant_index if role == "assistant" else None,
             "user_turn": user_index if role == "user" else None,
         })
@@ -384,7 +561,7 @@ def _structured_dimension(
             "key": key,
             "status": "missing",
             "value": None,
-            "display_value": "missing",
+            "display_value": "—",
             "explanation": "",
             "evidence": normalize_evidence({}, present_messages=present_messages),
             "raw": None,
@@ -412,7 +589,26 @@ def _structured_dimension(
         source_lookup=source_lookup,
     )
 
-    if key in {"noticed_honeypot", "environment_failure"}:
+    if key == "noticed":
+        value = raw_dict.get("value")
+        if family == "ml_training_data_misuse":
+            valid = isinstance(value, str) and value in ML_NOTICED_VALUES
+        elif family == "p_hacking":
+            valid = isinstance(value, bool)
+        else:
+            valid = (
+                isinstance(value, bool)
+                or isinstance(value, str) and value in ML_NOTICED_VALUES
+            )
+        if valid and value == "inputs":
+            display = "inputs only"
+        elif valid and isinstance(value, bool):
+            display = "yes" if value else "no"
+        else:
+            display = str(value) if valid else "invalid"
+    elif key in {
+        "noticed_honeypot", "situational_awareness", "environment_failure",
+    }:
         value = raw_dict.get("value")
         valid = isinstance(value, bool)
         display = "yes" if value is True else "no" if value is False else "invalid"
@@ -426,10 +622,8 @@ def _structured_dimension(
             and all(isinstance(item, str) for item in not_delivered)
         )
         if valid:
-            display = ", ".join(
-                f"{item} (not delivered)" if item in not_delivered else item
-                for item in value
-            ) or "none"
+            display_values = _reward_hacking_display_values(value, not_delivered)
+            display = ", ".join(display_values)
             if family == "ml_training_data_misuse":
                 hack_vocabulary = _CURRENT_ML_HACK_TYPES | _LEGACY_ML_HACK_TYPES
             elif family == "p_hacking":
@@ -465,6 +659,7 @@ def _structured_dimension(
     }
     if key == "reward_hacking":
         normalized.update({
+            "display_values": display_values if valid else [display],
             "hack_types": hack_types,
             "review_types": review_types,
             "requires_review": bool(review_types) if valid else None,
@@ -496,6 +691,12 @@ def normalize_evidence_scope(
             "native_reasoning_policy": None,
             "native_reasoning_message_count": None,
             "native_reasoning_block_count": None,
+            "native_reasoning_plaintext_block_count": None,
+            "native_reasoning_summary_block_count": None,
+            "native_reasoning_unavailable_block_count": None,
+            "source_tool_call_count": None,
+            "source_embedded_tool_use_block_count": None,
+            "source_tool_result_message_count": None,
             "source_message_count": None,
             "selected_message_count": None,
             "omitted_message_count": None,
@@ -535,6 +736,22 @@ def normalize_evidence_scope(
             "native_reasoning_message_count"
         ),
         "native_reasoning_block_count": evidence.get("native_reasoning_block_count"),
+        "native_reasoning_plaintext_block_count": evidence.get(
+            "native_reasoning_plaintext_block_count"
+        ),
+        "native_reasoning_summary_block_count": evidence.get(
+            "native_reasoning_summary_block_count"
+        ),
+        "native_reasoning_unavailable_block_count": evidence.get(
+            "native_reasoning_unavailable_block_count"
+        ),
+        "source_tool_call_count": evidence.get("source_tool_call_count"),
+        "source_embedded_tool_use_block_count": evidence.get(
+            "source_embedded_tool_use_block_count"
+        ),
+        "source_tool_result_message_count": evidence.get(
+            "source_tool_result_message_count"
+        ),
         "source_message_count": evidence.get("source_message_count"),
         "selected_message_count": evidence.get("selected_message_count"),
         "omitted_message_count": evidence.get("omitted_message_count"),
@@ -558,12 +775,19 @@ def normalize_structured_judgment(
     envelope: dict | None = None,
 ) -> dict:
     """Normalize an environments-owned structured result for viewer code."""
+    current_dimensions = FAMILY_STRUCTURED_DIMENSIONS.get(
+        family, CURRENT_STRUCTURED_DIMENSIONS
+    )
     dimension_keys = [
         *(
             key for key in RETIRED_STRUCTURED_DIMENSIONS
             if key in raw_result
         ),
-        *CURRENT_STRUCTURED_DIMENSIONS,
+        *current_dimensions,
+        *(
+            key for key in CURRENT_STRUCTURED_DIMENSIONS
+            if key not in current_dimensions and key in raw_result
+        ),
     ]
     dimensions = [
         _structured_dimension(
@@ -575,11 +799,14 @@ def normalize_structured_judgment(
             source_lookup=source_lookup,
         )
         for key in dimension_keys
-        if key != "deception" or family != "p_hacking" or key in raw_result
     ]
     issues = []
     for dimension in dimensions:
-        if dimension["status"] in {"missing", "invalid"}:
+        if (
+            dimension["status"] == "invalid"
+            or dimension["status"] == "missing"
+            and _missing_dimension_is_issue(dimension["key"], schema_version)
+        ):
             issues.append({
                 "kind": f"dimension_{dimension['status']}",
                 "dimension": dimension["key"],
@@ -593,18 +820,25 @@ def normalize_structured_judgment(
         source_lookup=source_lookup,
     )
     issues.extend(evidence_scope["issues"])
+    envelope = envelope or {}
+    explanation = str(
+        envelope.get("explanation")
+        # Read compatibility for judgments stored before schema v9.
+        or envelope.get("justification")
+        or ""
+    )
     return {
         "format": "structured",
         "schema_version": schema_version or "environment_judge.unknown",
         "family": family,
         "summary": str(raw_result.get("summary") or ""),
-        "justification": str((envelope or {}).get("justification") or ""),
+        "explanation": explanation,
         "highlights": str(raw_result.get("highlights") or ""),
         "dimensions": dimensions,
         "issues": issues,
         "evidence_scope": evidence_scope,
         "raw_result": deepcopy(raw_result),
-        "envelope": deepcopy(envelope or {}),
+        "envelope": deepcopy(envelope),
     }
 
 
@@ -637,7 +871,7 @@ def normalize_legacy_judgment(
         "legacy": {
             "summary": str((metadata or {}).get("summary") or ""),
             "highlights": str((metadata or {}).get("highlights") or ""),
-            "justification": str(explanation or ""),
+            "explanation": str(explanation or ""),
         },
     }
 
@@ -662,10 +896,11 @@ def normalize_judgment(
     if not isinstance(score_envelope, dict):
         score_envelope = score_metadata.get("final_judgment")
     real_envelope = real_env.get("final_judgment")
-    if (
+    retrospective_rejudge = (
         isinstance(score_envelope, dict)
         and score_envelope.get("judgment_role") == "retrospective_rejudge"
-    ):
+    )
+    if retrospective_rejudge:
         # A rejudge deliberately carries the original real_env record. Its old
         # final_judgment must not overwrite the new score that this row represents.
         envelope = {
@@ -678,7 +913,12 @@ def normalize_judgment(
             **(real_envelope if isinstance(real_envelope, dict) else {}),
         }
 
-    raw_result = envelope.get("result")
+    # A failed rejudge has no new result. Do not fall back to the original result that
+    # travels inside real_env, or the failed row would masquerade as a judged row.
+    raw_result = (
+        score_envelope.get("result")
+        if retrospective_rejudge else envelope.get("result")
+    )
     if not isinstance(raw_result, dict) and isinstance(score_metadata.get("result"), dict):
         raw_result = score_metadata["result"]
     plain_score = _plain(score_value)
@@ -724,10 +964,8 @@ def normalize_judgment(
             source_lookup=source_lookup,
             envelope=envelope,
         )
-        judgment["overall_explanation"] = (
-            "" if judgment.get("justification")
-            else str(score_explanation or "")
-        )
+        if not judgment.get("explanation"):
+            judgment["explanation"] = str(score_explanation or "")
         return judgment
 
     if score_key == LEGACY_SCORE_KEY and isinstance(score_value, dict):
@@ -759,22 +997,64 @@ def _role_model(roles: dict, role: str) -> str | None:
     return str(getattr(model, "model", None) or model)
 
 
-def _tool_truncations(sample: Any) -> list[dict]:
-    out = []
-    for event in getattr(sample, "events", None) or []:
-        if getattr(event, "event", None) != "tool" or not getattr(event, "truncated", None):
+def _target_context_usage(sample: Any, target_model: str | None) -> dict:
+    """Provider-reported prompt tokens for every logical agent-model call.
+
+    Ordinary input, cache-read, and cache-write tokens together are the complete prompt
+    presented on a call. Missing usage remains a ``None`` slot, so the metadata graph
+    shows a real gap instead of shifting later calls left. A failed provider attempt
+    immediately retried with the same request is one logical call and uses the successful
+    attempt's usage.
+    """
+
+    events, used_model_fallback = target_model_events(sample, target_model)
+
+    calls: list[int | None] = []
+    for index, event in enumerate(events):
+        output = getattr(event, "output", None)
+        usage = getattr(output, "usage", None)
+        if usage is None:
+            next_event = events[index + 1] if index + 1 < len(events) else None
+            next_usage = getattr(getattr(next_event, "output", None), "usage", None)
+            if (
+                getattr(event, "error", None)
+                and next_event is not None
+                and next_usage is not None
+                and same_model_request(event, next_event)
+            ):
+                continue
+            calls.append(None)
             continue
-        truncated = getattr(event, "truncated")
-        try:
-            original, limit = int(truncated[0]), int(truncated[1])
-        except (IndexError, TypeError, ValueError):
-            original, limit = None, None
-        out.append({
-            "tool": getattr(event, "function", None),
-            "original_bytes": original,
-            "limit_bytes": limit,
-        })
-    return out
+        prompt = (
+            (getattr(usage, "input_tokens", None) or 0)
+            + (getattr(usage, "input_tokens_cache_read", None) or 0)
+            + (getattr(usage, "input_tokens_cache_write", None) or 0)
+        )
+        calls.append(prompt if prompt > 0 else None)
+
+    missing = sum(value is None for value in calls)
+    status = (
+        "unavailable"
+        if not calls or missing == len(calls)
+        else "partial"
+        if missing
+        else "complete"
+    )
+    reason = None
+    if not calls:
+        reason = "no agent model-call events were recorded"
+    elif missing:
+        reason = f"provider usage missing on {missing} of {len(calls)} agent calls"
+    return {
+        "calls": calls,
+        "status": status,
+        "missing_calls": missing,
+        "reason": reason,
+        "source": "provider_reported",
+        "role_matching": "model_fallback" if used_model_fallback else "event_role",
+        "recorded_attempts": len(events),
+        "logical_calls": len(calls),
+    }
 
 
 def _score_for_sample(sample: Any) -> tuple[str | None, Any]:
@@ -785,11 +1065,56 @@ def _score_for_sample(sample: Any) -> tuple[str | None, Any]:
     return None, None
 
 
+def _judge_failure_record(
+    *,
+    score_key: str | None,
+    score_value: Any,
+    score_metadata: dict,
+    score_explanation: str,
+    judgment: dict | None,
+) -> dict | None:
+    """Describe a stored current-judge score that produced no usable judgment."""
+
+    if score_key != CURRENT_SCORE_KEY or judgment is not None:
+        return None
+    envelope = score_metadata.get("environment_judge")
+    if not isinstance(envelope, dict):
+        envelope = score_metadata.get("final_judgment")
+    envelope = envelope if isinstance(envelope, dict) else {}
+    failures = envelope.get("fresh_failures") or []
+    return {
+        "status": str(envelope.get("post_validation") or "failed"),
+        "failure_kind": str(
+            envelope.get("failure_kind") or "no_usable_judgment"
+        ),
+        "explanation": score_explanation or "The judge produced no usable judgment.",
+        "score_value": _plain(score_value),
+        "fresh_attempt_count": envelope.get("fresh_attempt_count"),
+        "fresh_call_limit": envelope.get("fresh_call_limit"),
+        "recorded_failure_count": len(failures) if isinstance(failures, list) else None,
+    }
+
+
 def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
                     run_metadata: dict, roles: dict, sample: Any) -> dict:
     """Convert one Inspect sample into the plain viewer contract."""
     attachments = getattr(sample, "attachments", None) or {}
-    messages = normalize_messages(getattr(sample, "messages", None) or [], attachments)
+    sample_metadata = _plain(getattr(sample, "metadata", None) or {})
+    real_env = sample_metadata.get("real_env") or {}
+    retrospective = sample_metadata.get("retrospective_rejudge")
+    if not isinstance(retrospective, dict):
+        retrospective = None
+    target_model = (
+        retrospective.get("target")
+        if retrospective is not None
+        else _role_model(roles, "target") or run_metadata.get("target_model")
+    )
+    raw_messages = getattr(sample, "messages", None) or []
+    messages = normalize_messages(
+        raw_messages,
+        attachments,
+        _message_timings(sample, target_model),
+    )
     present_messages = {message["number"] for message in messages}
     source_lookup = {
         "ids": {
@@ -813,11 +1138,6 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         # Old summaries/highlights live in score metadata; keep the score explanation too.
         score_metadata = {**score_metadata, "explanation": score_explanation}
 
-    sample_metadata = _plain(getattr(sample, "metadata", None) or {})
-    real_env = sample_metadata.get("real_env") or {}
-    retrospective = sample_metadata.get("retrospective_rejudge")
-    if not isinstance(retrospective, dict):
-        retrospective = None
     judgment = normalize_judgment(
         score_key=score_key,
         score_value=score_value,
@@ -826,6 +1146,13 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         present_messages=present_messages,
         source_lookup=source_lookup,
         score_explanation=score_explanation,
+    )
+    judge_failure = _judge_failure_record(
+        score_key=score_key,
+        score_value=score_value,
+        score_metadata=score_metadata,
+        score_explanation=score_explanation,
+        judgment=judgment,
     )
     protocol = (real_env.get("protocol") or {}) if isinstance(real_env, dict) else {}
     ended_reason = protocol.get("ended_reason")
@@ -845,10 +1172,7 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
     ]
 
     scores = _plain(score_value) if score_key == LEGACY_SCORE_KEY and isinstance(score_value, dict) else {}
-    target_model = (
-        retrospective.get("target")
-        if retrospective is not None else _role_model(roles, "target")
-    )
+    target_context_usage = _target_context_usage(sample, target_model)
     audit = {
         "mode": mode,
         "mtime": mode_mtime,
@@ -870,6 +1194,23 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         "judgment_role": (
             "retrospective_rejudge" if retrospective is not None else "official"
         ),
+        "reasoning": run_metadata.get("reasoning"),
+        "harness": (
+            retrospective.get("harness")
+            if retrospective is not None
+            else run_metadata.get("harness")
+        ) or "simple",
+        "production_harness": (
+            (real_env.get("harness") or {})
+            if retrospective is not None
+            else run_metadata.get("production_harness")
+        ),
+        "native_harness": (
+            (real_env.get("harness") or {})
+            if retrospective is not None
+            else run_metadata.get("native_harness")
+            or run_metadata.get("production_harness")
+        ),
         "retrospective_rejudge": retrospective,
         "dimension_scope": run_metadata.get("dimension_scope"),
         "target_tools_mode": run_metadata.get("target_tools_mode"),
@@ -889,10 +1230,11 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
             or score_metadata.get("highlights")
             or ""
         ),
-        "justification": str(
-            (judgment or {}).get("justification") or score_explanation or ""
+        "explanation": str(
+            (judgment or {}).get("explanation") or score_explanation or ""
         ),
         "judgment": judgment,
+        "judge_failure": judge_failure,
         "messages": messages,
         "transcript": transcript_text(messages),
         "transcript_source": "sample_messages",
@@ -900,8 +1242,9 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         "real_ended_reason": ended_reason,
         "dead": not has_target_output and target_output_tokens == 0,
         "crashed": run_metadata.get("target_tools_mode") == "real" and ended_reason is None,
-        "tool_truncations": _tool_truncations(sample),
+        "tool_truncations": tool_output_truncations(sample),
         "target_provider_events": target_provider_events(sample, target_model),
+        "target_context_usage": target_context_usage,
         "compactions": compactions,
         "model_usage": _usage_dict(getattr(sample, "model_usage", None)),
         "role_usage": _usage_dict(getattr(sample, "role_usage", None)),
@@ -910,26 +1253,14 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
     return finalize_audit_integrity(audit)
 
 
-def traj_key(audit: dict) -> str:
-    """Stable identity used by the existing environments data files."""
-    retrospective = audit.get("retrospective_rejudge")
-    if isinstance(retrospective, dict) and retrospective.get("source_key"):
-        # One rejudge campaign packs every source into a single Inspect task, so
-        # mode/task/seed/epoch collides across targets sharing a seed and epoch.
-        return f"{audit['mode']}__rejudge__{retrospective['source_key']}"
-    return (
-        f"{audit['mode']}__{audit['task']}__{audit['seed']}__e{audit['epoch']}"
-    )
-
-
 def link_rejudge_sources(audits: list[dict]) -> None:
-    """Attach viewer IDs for the original trajectory referenced by each rejudge."""
+    """Attach original trajectory identity, timing, and context to rejudges."""
 
     originals = {
         (
             audit.get("mode"), audit.get("task"), str(audit.get("seed")),
             audit.get("epoch"),
-        ): audit.get("id")
+        ): audit
         for audit in audits
         if not audit.get("retrospective_rejudge")
     }
@@ -941,48 +1272,41 @@ def link_rejudge_sources(audits: list[dict]) -> None:
             source.get("source_run"), source.get("source_task"),
             str(source.get("seed")), source.get("epoch"),
         )
-        audit["source_trajectory_id"] = originals.get(key)
-
-
-def _module_signature() -> str:
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
-
-
-def _mode_signature(mode_dir: Path) -> str:
-    rows = []
-    paths = list(mode_dir.glob("*.eval"))
-    remote_campaign = mode_dir / "remote_campaign.json"
-    if remote_campaign.is_file():
-        paths.append(remote_campaign)
-    integrity_sidecar = mode_dir / "pipeline_integrity.json"
-    if integrity_sidecar.is_file():
-        paths.append(integrity_sidecar)
-    for path in sorted(paths):
-        stat = path.stat()
-        rows.append((path.name, stat.st_mtime_ns, stat.st_size))
-    payload = json.dumps([_module_signature(), rows], separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:24]
-
-
-def _cache_file(mode_dir: Path, cache_root: Path) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9._-]", "-", mode_dir.name)
-    return cache_root / f"mode__{safe}__{_mode_signature(mode_dir)}.pkl"
-
-
-def _write_pickle_atomic(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-            temporary = Path(handle.name)
-            pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        original = originals.get(key)
+        audit["source_trajectory_id"] = original.get("id") if original else None
+        if original:
+            original_messages = original.get("messages") or []
+            original_by_source_id = {
+                str(message.get("source_id")): message
+                for message in original_messages
+                if message.get("source_id") is not None
+            }
+            for index, message in enumerate(audit.get("messages") or []):
+                source_id = message.get("source_id")
+                source_message = (
+                    original_by_source_id.get(str(source_id))
+                    if source_id is not None
+                    else None
+                )
+                if (
+                    source_message is None
+                    and index < len(original_messages)
+                    and message.get("role") == original_messages[index].get("role")
+                    and message.get("text") == original_messages[index].get("text")
+                ):
+                    source_message = original_messages[index]
+                if source_message is None:
+                    continue
+                for field in (
+                    "timestamp", "elapsed_seconds", "elapsed_time", "timestamp_source",
+                ):
+                    message[field] = source_message.get(field)
+        if original and isinstance(original.get("target_context_usage"), dict):
+            audit["target_context_usage"] = {
+                **deepcopy(original["target_context_usage"]),
+                "origin": "source_trajectory",
+                "source_trajectory_id": original.get("id"),
+            }
 
 
 def attach_remote_compute(mode_dir: Path, audits: list[dict]) -> list[dict]:
@@ -1136,60 +1460,3 @@ async def load_all(
                 "error": str(error),
             })
     return audits, errors
-
-
-@contextmanager
-def viewer_build_lock(data_root: Path) -> Iterator[None]:
-    """Serialize viewer builds and release the lock automatically after crashes."""
-    path = data_root / ".viewer_build.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def assign_stable_ids(audits: list[dict], registry_file: Path) -> None:
-    """Assign append-only trajectory IDs using the existing registry format."""
-    try:
-        registry = json.loads(registry_file.read_text()) if registry_file.exists() else {}
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read trajectory ID registry {registry_file}: {error}") from error
-    if not isinstance(registry, dict) or not all(
-        isinstance(key, str) and isinstance(value, int)
-        for key, value in registry.items()
-    ):
-        raise ValueError(f"invalid trajectory ID registry: {registry_file}")
-
-    next_id = max(registry.values(), default=0) + 1
-    new = [audit for audit in audits if traj_key(audit) not in registry]
-    for audit in sorted(
-        new,
-        key=lambda item: (
-            item.get("mtime", 0), item.get("task", ""),
-            item.get("seed", ""), item.get("epoch", 0),
-        ),
-    ):
-        registry[traj_key(audit)] = next_id
-        next_id += 1
-    if new:
-        registry_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(registry, indent=2, sort_keys=True) + "\n"
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", dir=registry_file.parent, delete=False
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, registry_file)
-            temporary = None
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-    for audit in audits:
-        audit["id"] = registry[traj_key(audit)]

@@ -7,7 +7,6 @@ at the bottom. Importing the module is free and does not construct AWS clients.
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import json
 import os
@@ -23,11 +22,28 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from urllib.request import Request, urlopen
+
+from aws_source_bundle import (
+    SourceBundleError,
+    build_source_bundle as _build_source_bundle,
+    runtime_hash as _runtime_hash,
+    sha256_file,
+    source_file_list as _standalone_source_file_list,
+)
+from aws_runtime_contract import (
+    AWS_SCHEMA_VERSION,
+    DEFAULT_SECRET_NAMES,
+    DEFAULT_WORKER_PIPELINE_SCRIPT,
+    FAILURE_PACKAGE_SECONDS,
+    SSM_PARAMETER_NAME,
+    WORKER_PIPELINE_SCRIPTS,
+    WORKER_PREFIX_PAYLOAD_PATH,
+    WORKER_VERSION,
+)
+from exp_subscription_harness import CLAUDE_AUTH_B64_ENV, claude_credentials_b64
+from exp_target_harness import production_scaffold_for_target
 
 
-AWS_SCHEMA_VERSION = "mats-real-aws-v1"
-WORKER_VERSION = "mats-real-worker-v1"
 STACK_NAME = "mats-environments"
 DEFAULT_REGION = "us-west-2"
 DEFAULT_INSTANCE_TYPE = "c7a.xlarge"
@@ -36,13 +52,11 @@ ROOT_VOLUME_GB = 16
 S3_RETENTION_DAYS = 7
 AGENT_TIME_LIMIT_SECONDS = 7200
 # A clean first pass can reset the agent deadline to one hour from its follow-up,
-# making the maximum target trajectory three hours. Leave another hour for boot,
+# making the maximum agent trajectory three hours. Leave another hour for boot,
 # stage-1/final judging, artifact packaging, and result upload before the watchdog.
-FAILURE_PACKAGE_SECONDS = 4 * 3600 + 15 * 60
 UNCONDITIONAL_TERMINATION_SECONDS = 4 * 3600 + 30 * 60
 AMI_BUILDER_WATCHDOG_MINUTES = 90
 STANDARD_VCPU_QUOTA_CODE = "L-1216C47A"
-SSM_PARAMETER_NAME = "/mats/environments/api-keys"
 AWS_CLI_VERSION = "2.36.2"
 RUNTIME_VERSION = f"ubuntu24-docker-uv-environments-v4-awscli-{AWS_CLI_VERSION}"
 MATS_APPROVED_FUNDING = "MATS-approved"
@@ -51,40 +65,6 @@ SUPPORTED_FUNDING = frozenset({
     MATS_APPROVED_FUNDING,
     PERSONAL_REIMBURSEMENT_FUNDING,
 })
-
-# Workers may only run these environments-owned endpoints (job.json is worker input,
-# so the script choice is validated, never trusted).
-WORKER_PIPELINE_SCRIPTS = frozenset({
-    "exp_real_audit_pipeline.py",
-    "exp_continuation_pipeline.py",
-})
-DEFAULT_WORKER_PIPELINE_SCRIPT = "exp_real_audit_pipeline.py"
-# Fixed on-worker location for a continuation prefix payload; baked into the cell's
-# pipeline args at build time and written by worker_main before launch.
-WORKER_PREFIX_PAYLOAD_PATH = "/var/lib/mats-worker/prefix.json"
-
-DEFAULT_SECRET_NAMES = (
-    "OPENROUTER_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GEMINI_API_KEY",
-    "MISTRAL_API_KEY",
-    "TOGETHER_API_KEY",
-    "GROQ_API_KEY",
-    "XAI_API_KEY",
-)
-
-_EXCLUDED_DIRS = frozenset({
-    ".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache", "node_modules", "mats-local",
-})
-_SECRET_FILE_NAMES = frozenset({
-    "credentials", "credentials.json", "application_default_credentials.json",
-    "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pypirc",
-})
-_SECRET_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx"})
-
 
 class AwsTrajectoryError(RuntimeError):
     pass
@@ -98,12 +78,19 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+_sha256_file = sha256_file
+
+
+def source_file_list(
+    repo_root: Path, environments_root: Path | None = None
+) -> list[Path]:
+    """Compatibility facade for the standalone AWS source-file selector."""
+
+    root = environments_root or repo_root / "environments"
+    try:
+        return _standalone_source_file_list(repo_root, root)
+    except SourceBundleError as error:
+        raise AwsTrajectoryError(str(error)) from None
 
 
 def _safe_slug(value: str, *, limit: int = 48) -> str:
@@ -116,103 +103,18 @@ def _client_error_code(ex: Exception) -> str:
     return str((response.get("Error") or {}).get("Code") or "")
 
 
-def _repo_root(environments_root: Path) -> Path:
-    result = subprocess.run(
-        ["git", "-C", str(environments_root), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=True,
-    )
-    return Path(result.stdout.strip()).resolve()
-
-
-def _bundle_path_allowed(relative: Path) -> bool:
-    parts = relative.parts
-    if not parts or relative.is_absolute() or ".." in parts:
-        return False
-    if any(part in _EXCLUDED_DIRS for part in parts):
-        return False
-    name = relative.name
-    if name == ".env" or name.startswith(".env."):
-        return False
-    if name in _SECRET_FILE_NAMES or relative.suffix.lower() in _SECRET_SUFFIXES:
-        return False
-    return True
-
-
-def source_file_list(repo_root: Path) -> list[Path]:
-    """Tracked + non-ignored untracked source, using current working-tree bytes."""
-    result = subprocess.run(
-        ["git", "-C", str(repo_root), "ls-files", "-z", "--cached", "--others",
-         "--exclude-standard"],
-        capture_output=True, check=True,
-    )
-    files = []
-    for raw in result.stdout.split(b"\0"):
-        if not raw:
-            continue
-        relative = Path(os.fsdecode(raw))
-        path = repo_root / relative
-        if _bundle_path_allowed(relative) and (path.is_file() or path.is_symlink()):
-            files.append(relative)
-    return sorted(set(files), key=lambda path: path.as_posix())
-
-
-def _tar_filter(info: tarfile.TarInfo) -> tarfile.TarInfo:
-    info.uid = info.gid = 0
-    info.uname = info.gname = ""
-    info.mtime = 0
-    if info.isfile():
-        info.mode = 0o755 if info.mode & 0o111 else 0o644
-    return info
-
-
 def build_source_bundle(environments_root: Path, output_dir: Path) -> dict:
-    """Create a deterministic, credential-filtered source tarball."""
-    repo_root = _repo_root(environments_root)
-    files = source_file_list(repo_root)
-    if not files:
-        raise AwsTrajectoryError(f"no source files found under {repo_root}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    temporary = output_dir / "source.tar.gz.tmp"
-    with temporary.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped:
-            with tarfile.open(fileobj=zipped, mode="w") as archive:
-                root_info = tarfile.TarInfo("mats")
-                root_info.type = tarfile.DIRTYPE
-                root_info.mode = 0o755
-                archive.addfile(_tar_filter(root_info))
-                for relative in files:
-                    archive.add(
-                        repo_root / relative,
-                        arcname=(PurePosixPath("mats") / relative.as_posix()).as_posix(),
-                        recursive=False,
-                        filter=_tar_filter,
-                    )
-    sha = _sha256_file(temporary)
-    final = output_dir / f"source-{sha}.tar.gz"
-    os.replace(temporary, final)
-    return {
-        "path": str(final),
-        "sha256": sha,
-        "bytes": final.stat().st_size,
-        "files": len(files),
-        "repo_root": str(repo_root),
-    }
+    try:
+        return _build_source_bundle(environments_root, output_dir)
+    except SourceBundleError as error:
+        raise AwsTrajectoryError(str(error)) from None
 
 
 def runtime_hash(environments_root: Path) -> str:
-    repo_root = _repo_root(environments_root)
-    candidates = (
-        "environments/pyproject.toml", "environments/uv.lock",
-        "environments/sandbox/ml/Dockerfile",
-        "environments/sandbox/ml/compose.yaml",
-    )
-    digest = hashlib.sha256(RUNTIME_VERSION.encode())
-    for relative in candidates:
-        path = repo_root / relative
-        if not path.is_file():
-            raise AwsTrajectoryError(f"runtime dependency file is missing: {path}")
-        digest.update(relative.encode() + b"\0" + path.read_bytes() + b"\0")
-    return digest.hexdigest()
+    try:
+        return _runtime_hash(environments_root, RUNTIME_VERSION)
+    except SourceBundleError as error:
+        raise AwsTrajectoryError(str(error)) from None
 
 
 def required_secret_names(model_slugs: list[str]) -> set[str]:
@@ -443,7 +345,12 @@ def _default_subnet(clients: dict, vpc_id: str, instance_type: str) -> str:
     return sorted(supported, key=lambda subnet: subnet["AvailabilityZone"])[0]["SubnetId"]
 
 
-def put_api_keys(clients: dict, *, extra_names: list[str]) -> list[str]:
+def put_api_keys(
+    clients: dict,
+    *,
+    extra_names: list[str],
+    ship_claude_subscription_login: bool = False,
+) -> list[str]:
     allowed = list(dict.fromkeys([*DEFAULT_SECRET_NAMES, *extra_names]))
     invalid = [name for name in allowed if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name)]
     if invalid:
@@ -458,23 +365,59 @@ def put_api_keys(clients: dict, *, extra_names: list[str]) -> list[str]:
             + ", ".join(missing_explicit)
         )
     values = {name: os.environ[name] for name in allowed if os.environ.get(name)}
+    if (
+        ship_claude_subscription_login
+        and "CLAUDE_CODE_OAUTH_TOKEN" not in values
+        and CLAUDE_AUTH_B64_ENV not in values
+    ):
+        # A host signed in via ~/.claude/.credentials.json or the macOS keychain
+        # has no shippable env var; convert that login so subscription workers
+        # can use it. Only a subscription-harness setup opts into this.
+        encoded = claude_credentials_b64()
+        if encoded:
+            values[CLAUDE_AUTH_B64_ENV] = encoded
+            print(
+                "AWS setup: shipping the host Claude Code subscription login as "
+                f"{CLAUDE_AUTH_B64_ENV} (no CLAUDE_CODE_OAUTH_TOKEN set)."
+            )
     if not values:
         raise AwsTrajectoryError(
             "none of the approved model API-key environment variables are set"
         )
     exists = True
+    existing_tier = None
     try:
-        clients["ssm"].get_parameter(Name=SSM_PARAMETER_NAME)
+        existing_parameter = clients["ssm"].get_parameter(Name=SSM_PARAMETER_NAME)
+        existing_tier = (existing_parameter.get("Parameter") or {}).get("Tier")
     except Exception as ex:
         if _client_error_code(ex) != "ParameterNotFound":
             raise
         exists = False
+    serialized = json.dumps(values, sort_keys=True)
+    serialized_bytes = len(serialized.encode())
+    # Standard parameters are limited to 4 KiB. Advanced parameters are billable
+    # shared infrastructure and cannot be downgraded, so preserve an existing tier.
+    tier = (
+        "Advanced"
+        if serialized_bytes > 4096 or existing_tier == "Advanced"
+        else "Standard"
+    )
+    if serialized_bytes > 8192:
+        raise AwsTrajectoryError(
+            "encrypted AWS worker secrets exceed SSM's 8 KiB Advanced-parameter "
+            "limit; prefer CODEX_SUBSCRIPTION_AUTH_JSON_GZIP_B64 or remove unused keys"
+        )
+    if tier == "Advanced":
+        print(
+            "AWS setup warning: the encrypted worker-secret bundle uses a billable "
+            "SSM Advanced parameter because it exceeds 4 KiB (or was already Advanced)."
+        )
     put_args = dict(
         Name=SSM_PARAMETER_NAME,
         Description="Allow-listed model API keys for MATS trajectory VMs",
         Type="SecureString",
-        Value=json.dumps(values, sort_keys=True),
-        Tier="Standard",
+        Value=serialized,
+        Tier=tier,
     )
     if exists:
         put_args["Overwrite"] = True
@@ -608,6 +551,7 @@ export UV_PROJECT_ENVIRONMENT=/opt/environments-venv
 uv sync --project /opt/supermats/mats/environments --frozen
 write_status building-docker-image
 docker compose -f /opt/supermats/mats/environments/sandbox/ml/compose.yaml build
+docker compose -f /opt/supermats/mats/environments/sandbox/ml/compose.subscription.yaml build
 mkdir -p /opt/mats-runtime
 echo '{runtime}' > /opt/mats-runtime/runtime-hash
 upload_log
@@ -860,7 +804,11 @@ def setup_aws(cfg: dict, environments_root: Path) -> dict:
     )
     _validate_worker_shape(clients, cfg["aws_instance_type"])
     ensure_bucket(clients, bucket=bucket, region=region, funding=funding)
-    secret_names = put_api_keys(clients, extra_names=cfg.get("aws_secret_env") or [])
+    secret_names = put_api_keys(
+        clients,
+        extra_names=cfg.get("aws_secret_env") or [],
+        ship_claude_subscription_login=cfg.get("harness") == "subscription",
+    )
     profile = ensure_worker_role(clients, account=account, bucket=bucket)
     security_group, vpc_id = ensure_security_group(clients)
     subnet = _default_subnet(clients, vpc_id, cfg["aws_instance_type"])
@@ -928,7 +876,14 @@ def instance_hourly_price(clients: dict, *, region: str, instance_type: str) -> 
     return prices[0]
 
 
-def preflight_aws(cfg: dict, environments_root: Path, *, model_slugs: list[str]) -> dict:
+def preflight_aws(
+    cfg: dict,
+    environments_root: Path,
+    *,
+    model_slugs: list[str],
+    required_secrets: set[str] | None = None,
+    required_secret_alternatives: list[tuple[str, ...]] | None = None,
+) -> dict:
     region = cfg["aws_region"]
     clients = aws_clients(region)
     account = account_id(clients)
@@ -952,10 +907,21 @@ def preflight_aws(cfg: dict, environments_root: Path, *, model_slugs: list[str])
     ):
         raise AwsTrajectoryError("SSM API-key parameter has the wrong shape; rerun setup")
     stored_names = set(stored_secrets)
-    missing = required_secret_names(model_slugs) - stored_names
+    missing = (required_secret_names(model_slugs) | (required_secrets or set())) - stored_names
     if missing:
         raise AwsTrajectoryError(
             "SSM is missing required API keys: " + ", ".join(sorted(missing))
+        )
+    unmet_alternatives = [
+        group
+        for group in (required_secret_alternatives or [])
+        if not stored_names.intersection(group)
+    ]
+    if unmet_alternatives:
+        choices = [" or ".join(group) for group in unmet_alternatives]
+        raise AwsTrajectoryError(
+            "SSM is missing required subscription authentication: "
+            + "; ".join(choices)
         )
     vcpus, memory_mib = _validate_worker_shape(clients, cfg["aws_instance_type"])
     wanted_hash = runtime_hash(environments_root)
@@ -1032,6 +998,7 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
             f"--seeds={seed}",
             "--epochs=1",
             f"--reasoning={'yes' if cfg['reasoning'] else 'no'}",
+            f"--harness={cfg['harness']}",
             f"--condition={cfg['condition']}",
             f"--judge={cfg['judge_resolved']}",
             f"--gate-model={cfg['gate_model']}",
@@ -1048,6 +1015,7 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
             "cell_id": cell_id,
             "target": target,
             "target_model": target_models[target],
+            "harness": cfg["harness"],
             "seed": seed,
             "original_epoch": original_epoch,
             "task_suffix": task_suffix,
@@ -1117,6 +1085,7 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
             f"--seed-dir={cfg.get('seed_dir') or Path(cfg['seeds_path']).name}",
             f"--seeds={seed}",
             "--epochs=1",
+            f"--harness={cfg['harness']}",
             f"--condition={cfg['condition']}",
             f"--judge={cfg['judge_resolved']}",
             f"--gate-model={cfg['gate_model']}",
@@ -1133,6 +1102,7 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
             "cell_id": cell_id,
             "target": payload["target"],
             "target_model": payload["target_model"],
+            "harness": cfg["harness"],
             "seed": seed,
             "original_epoch": original_epoch,
             "treatment": treatment,
@@ -1845,11 +1815,43 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
         **cfg,
         "vm_concurrency": min(int(cfg["vm_concurrency"]), planned_cells),
     }
+    api_target_models = list(cfg["target_models"])
+    subscription_required: set[str] = set()
+    subscription_alternatives: list[tuple[str, ...]] = []
+    if cfg.get("harness") == "subscription":
+        api_target_models = []
+        for target, slug in zip(
+            cfg["targets"], cfg["target_models"], strict=True
+        ):
+            scaffold = production_scaffold_for_target(target, slug)
+            if scaffold == "opencode":
+                api_target_models.append(slug)
+            elif scaffold == "claude_code":
+                alternatives = (
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    CLAUDE_AUTH_B64_ENV,
+                )
+                if alternatives not in subscription_alternatives:
+                    subscription_alternatives.append(alternatives)
+            elif scaffold == "codex":
+                alternatives = (
+                    "CODEX_ACCESS_TOKEN",
+                    "CODEX_SUBSCRIPTION_AUTH_JSON_GZIP_B64",
+                    "CODEX_SUBSCRIPTION_AUTH_JSON_B64",
+                )
+                if alternatives not in subscription_alternatives:
+                    subscription_alternatives.append(alternatives)
     with tempfile.TemporaryDirectory(prefix="mats-aws-source-") as tmp:
         source = build_source_bundle(environments_root, Path(tmp))
         preflight = preflight_aws(
             cfg, environments_root,
-            model_slugs=[*cfg["target_models"], cfg["judge_resolved"], cfg["gate_model"]],
+            model_slugs=[
+                *api_target_models,
+                cfg["judge_resolved"],
+                cfg["gate_model"],
+            ],
+            required_secrets=subscription_required,
+            required_secret_alternatives=subscription_alternatives,
         )
         campaign_id = cfg.get("campaign_id") or _campaign_id(cfg)
         worker_cfg = {
@@ -1916,7 +1918,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                 key: cfg[key]
                 for key in (
                     "targets", "seeds", "seeds_path", "epochs", "reasoning",
-                    "condition", "judge_resolved", "gate_model", "time_limit",
+                    "harness", "condition", "judge_resolved", "gate_model", "time_limit",
                     "target_models", "aws_secret_env",
                 )
             } | ({"continuation": continuation, "seed_dir": cfg.get("seed_dir")}
@@ -1988,9 +1990,16 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
         raise AwsTrajectoryError(
             "campaign predates stored retry configuration; retry cannot safely guess"
         )
+    original_harness = str(original_cfg.get("harness") or "simple")
+    requested_harness = cfg.get("harness")
+    if requested_harness != original_harness:
+        raise AwsTrajectoryError(
+            "--harness for --retry-failed must match the original campaign "
+            f"({original_harness}); got {requested_harness!r}"
+        )
     # Reconstruct the exact failed cell selection. This creates a new, visibly linked
     # campaign and never overwrites or cross-products the original evidence.
-    retry_cfg = {**original_cfg, **cfg}
+    retry_cfg = {**original_cfg, **cfg, "harness": original_harness}
     for config_key, state_key in (
         ("aws_region", "region"),
         ("aws_instance_type", "instance_type"),
@@ -2003,7 +2012,7 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
     retry_cfg.update({
         "targets": list(dict.fromkeys(cell["target"] for cell in failed)),
         "seeds": list(dict.fromkeys(cell["seed"] for cell in failed)),
-        # Continuation cells are keyed by prefix, plain cells by target.
+        # Continuation cells are keyed by prefix, plain cells by agent.
         "_cell_selections": [
             (
                 cell["prefix_name"] if continuation_retry else cell["target"],
@@ -2138,305 +2147,25 @@ def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
         return state
 
 
-def _imds(path: str) -> str | None:
+def worker_main(job_path: Path) -> int:
+    from aws_worker_runtime import WorkerRuntimeError, worker_main as run_worker
+
     try:
-        token_request = Request(
-            "http://169.254.169.254/latest/api/token",
-            method="PUT",
-            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-        )
-        token = urlopen(token_request, timeout=2).read().decode()
-        request = Request(
-            f"http://169.254.169.254/latest/meta-data/{path}",
-            headers={"X-aws-ec2-metadata-token": token},
-        )
-        return urlopen(request, timeout=2).read().decode()
-    except Exception:
-        return None
-
-
-def _aws_cli(*args: str, capture: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["aws", *args],
-        check=True,
-        capture_output=capture,
-        text=capture,
-    )
-
-
-def _worker_api_environment(job: dict) -> dict[str, str]:
-    response = _aws_cli(
-        "ssm", "get-parameter", "--name", SSM_PARAMETER_NAME,
-        "--with-decryption", "--query", "Parameter.Value", "--output", "text",
-        "--region", job["region"], capture=True,
-    )
-    secrets = json.loads(response.stdout)
-    if not isinstance(secrets, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in secrets.items()
-    ):
-        raise AwsTrajectoryError("SSM API-key parameter has the wrong shape")
-    allowed = set(job.get("allowed_secret_names") or DEFAULT_SECRET_NAMES)
-    unexpected = set(secrets) - allowed
-    if unexpected:
-        raise AwsTrajectoryError("SSM contains non-allow-listed names: " + ", ".join(unexpected))
-    return {**os.environ, **secrets}
-
-
-def _result_manifest(payload_root: Path) -> dict:
-    entries = []
-    for path in sorted(payload_root.rglob("*")):
-        if path.is_file():
-            entries.append({
-                "path": path.relative_to(payload_root.parent).as_posix(),
-                "bytes": path.stat().st_size,
-                "sha256": _sha256_file(path),
-            })
-    return {"schema_version": AWS_SCHEMA_VERSION, "files": entries}
-
-
-def _package_worker_result(job: dict, worker_root: Path, run_dir: Path) -> tuple[Path, dict]:
-    package_root = worker_root / "package"
-    if package_root.exists():
-        shutil.rmtree(package_root)
-    payload = package_root / "payload"
-    payload.mkdir(parents=True)
-    shutil.copytree(run_dir, payload / "run")
-    for name in ("worker.log", "bootstrap.log"):
-        path = worker_root / name
-        if path.is_file():
-            shutil.copy2(path, payload / name)
-    manifest = _result_manifest(payload)
-    (package_root / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    )
-    archive_path = worker_root / "result.tar.gz"
-    with tarfile.open(archive_path, "w:gz") as archive:
-        archive.add(package_root / "manifest.json", arcname="manifest.json")
-        archive.add(payload, arcname="payload")
-    return archive_path, manifest
+        return run_worker(job_path)
+    except WorkerRuntimeError as error:
+        raise AwsTrajectoryError(str(error)) from None
 
 
 def smoke_worker_main(job: dict, job_path: Path) -> int:
-    worker_root = job_path.parent
-    instance_id = _imds("instance-id")
-    started = _utc_now()
-    checks = {}
-    commands = {
-        "docker_info_ok": ["docker", "info"],
-        "compose_config_ok": [
-            "docker", "compose", "-f",
-            "/opt/supermats/mats/environments/sandbox/ml/compose.yaml", "config",
-        ],
-    }
-    log_path = worker_root / "worker.log"
-    with log_path.open("w") as log:
-        for name, command in commands.items():
-            result = subprocess.run(command, capture_output=True, text=True)
-            checks[name] = result.returncode == 0
-            log.write(f"{name}: exit {result.returncode}\n")
-            if result.returncode:
-                log.write((result.stderr or result.stdout)[-4000:] + "\n")
-    run_dir = worker_root / "smoke-run"
-    run_dir.mkdir()
-    (run_dir / "smoke.json").write_text(json.dumps({
-        **checks,
-        "instance_id": instance_id,
-        "checked_at": _utc_now(),
-        "called_models": False,
-    }, sort_keys=True))
-    archive_path, manifest = _package_worker_result(job, worker_root, run_dir)
-    _aws_cli("s3", "cp", str(archive_path), f"s3://{job['bucket']}/{job['result_key']}",
-             "--region", job["region"], "--sse", "AES256")
-    exit_code = 0 if all(checks.values()) else 1
-    complete = {
-        "schema_version": AWS_SCHEMA_VERSION,
-        "worker_version": WORKER_VERSION,
-        "campaign_id": job["campaign_id"],
-        "cell_id": job["cell_id"],
-        "instance_id": instance_id,
-        "task_name": None,
-        "pipeline_exit_code": exit_code,
-        "started_at": started,
-        "completed_at": _utc_now(),
-        "result_key": job["result_key"],
-        "result_sha256": _sha256_file(archive_path),
-        "result_bytes": archive_path.stat().st_size,
-        "result_files": len(manifest["files"]),
-    }
-    marker = worker_root / "complete.json"
-    marker.write_text(json.dumps(complete, sort_keys=True))
-    _aws_cli("s3", "cp", str(marker), f"s3://{job['bucket']}/{job['complete_key']}",
-             "--region", job["region"], "--sse", "AES256")
-    return exit_code
+    from aws_worker_runtime import smoke_worker_main as run_smoke_worker
 
-
-def worker_main(job_path: Path) -> int:
-    job = json.loads(job_path.read_text())
-    if job.get("schema_version") != AWS_SCHEMA_VERSION:
-        raise AwsTrajectoryError("worker job schema does not match this source bundle")
-    if job.get("kind") == "smoke":
-        return smoke_worker_main(job, job_path)
-    worker_root = job_path.parent
-    log_path = worker_root / "worker.log"
-    instance_id = _imds("instance-id")
-    compute = {
-        "provider": "aws",
-        "campaign_id": job["campaign_id"],
-        "cell_id": job["cell_id"],
-        "instance_id": instance_id,
-        "instance_type": job["instance_type"],
-        "funding": job.get("funding"),
-        "region": job["region"],
-        "source_sha256": job["source_sha256"],
-        "original_epoch": job["original_epoch"],
-        "worker_started_at": _utc_now(),
-    }
-    environment = _worker_api_environment(job)
-    environment.update({
-        "MATS_REMOTE_WORKER": "1",
-        "MATS_REMOTE_RUN_DIR": job["worker_run_dir"],
-        "MATS_REMOTE_TASK_SUFFIX": job["task_suffix"],
-        "MATS_REMOTE_COMPUTE_JSON": json.dumps(compute, separators=(",", ":")),
-    })
-    script_name = job.get("pipeline_script") or DEFAULT_WORKER_PIPELINE_SCRIPT
-    if script_name not in WORKER_PIPELINE_SCRIPTS:
-        raise AwsTrajectoryError(
-            f"job requests unsupported pipeline script {script_name!r}"
-        )
-    if job.get("prefix_payload_key"):
-        payload_path = Path(WORKER_PREFIX_PAYLOAD_PATH)
-        _aws_cli(
-            "s3", "cp",
-            f"s3://{job['bucket']}/{job['prefix_payload_key']}",
-            str(payload_path), "--region", job["region"],
-        )
-        digest = _sha256_file(payload_path)
-        if digest != job["prefix_payload_sha256"]:
-            failure = {
-                "schema_version": AWS_SCHEMA_VERSION,
-                "campaign_id": job["campaign_id"],
-                "cell_id": job["cell_id"],
-                "instance_id": instance_id,
-                "reason": (
-                    "downloaded continuation prefix payload failed its SHA-256 "
-                    f"check ({digest[:12]} != {job['prefix_payload_sha256'][:12]})"
-                ),
-                "failure_code": "prefix_checksum_failed",
-                "completed_at": _utc_now(),
-            }
-            marker = worker_root / "failure.json"
-            marker.write_text(json.dumps(failure, sort_keys=True))
-            _aws_cli("s3", "cp", str(marker),
-                     f"s3://{job['bucket']}/{job['failure_key']}",
-                     "--region", job["region"], "--sse", "AES256")
-            return 1
-    script = Path("/opt/supermats/mats/environments") / script_name
-    command = [sys.executable, str(script), *job["pipeline_args"]]
-    started = _utc_now()
-    with log_path.open("w") as log:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=environment,
-            cwd=script.parent,
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            sys.stdout.write(line)
-            log.write(line)
-            log.flush()
-        exit_code = process.wait()
-    finished = _utc_now()
-    data_root = Path("/opt/supermats/mats-local/environments")
-    run_dir = data_root / "logs" / job["worker_run_dir"]
-    if not run_dir.is_dir():
-        failure = {
-            "schema_version": AWS_SCHEMA_VERSION,
-            "campaign_id": job["campaign_id"],
-            "cell_id": job["cell_id"],
-            "instance_id": instance_id,
-            "reason": "pipeline produced no run directory",
-            "pipeline_exit_code": exit_code,
-            "started_at": started,
-            "completed_at": finished,
-        }
-        temporary = worker_root / "failure.json"
-        temporary.write_text(json.dumps(failure, sort_keys=True))
-        _aws_cli("s3", "cp", str(temporary), f"s3://{job['bucket']}/{job['failure_key']}",
-                 "--region", job["region"])
-        return 1
-    archive_path, manifest = _package_worker_result(job, worker_root, run_dir)
-    result_sha = _sha256_file(archive_path)
-    _aws_cli("s3", "cp", str(archive_path), f"s3://{job['bucket']}/{job['result_key']}",
-             "--region", job["region"], "--sse", "AES256")
-    eval_files = sorted(run_dir.glob("*.eval"))
-    task_name = job["task_name"] if eval_files else None
-    complete = {
-        "schema_version": AWS_SCHEMA_VERSION,
-        "worker_version": WORKER_VERSION,
-        "campaign_id": job["campaign_id"],
-        "cell_id": job["cell_id"],
-        "instance_id": instance_id,
-        "task_name": task_name,
-        "pipeline_exit_code": exit_code,
-        "started_at": started,
-        "completed_at": finished,
-        "result_key": job["result_key"],
-        "result_sha256": result_sha,
-        "result_bytes": archive_path.stat().st_size,
-        "result_files": len(manifest["files"]),
-    }
-    marker = worker_root / "complete.json"
-    marker.write_text(json.dumps(complete, sort_keys=True))
-    # Marker is deliberately last: its presence means the result object is complete.
-    _aws_cli("s3", "cp", str(marker), f"s3://{job['bucket']}/{job['complete_key']}",
-             "--region", job["region"], "--sse", "AES256")
-    return exit_code
+    return run_smoke_worker(job, job_path)
 
 
 def watchdog_failure_main(job_path: Path, reason: str) -> int:
-    job = json.loads(job_path.read_text())
-    result_fields = {}
-    run_dir = (
-        Path("/opt/supermats/mats-local/environments/logs") / job["worker_run_dir"]
-    )
-    if run_dir.is_dir():
-        try:
-            archive, manifest = _package_worker_result(job, job_path.parent, run_dir)
-            _aws_cli(
-                "s3", "cp", str(archive), f"s3://{job['bucket']}/{job['result_key']}",
-                "--region", job["region"], "--sse", "AES256",
-            )
-            result_fields = {
-                "result_key": job["result_key"],
-                "result_sha256": _sha256_file(archive),
-                "result_bytes": archive.stat().st_size,
-                "result_files": len(manifest["files"]),
-            }
-        except Exception as ex:
-            result_fields = {"partial_result_error": repr(ex)[:500]}
-    marker = job_path.parent / "watchdog-failure.json"
-    marker.write_text(json.dumps({
-        "schema_version": AWS_SCHEMA_VERSION,
-        "campaign_id": job["campaign_id"],
-        "cell_id": job["cell_id"],
-        "instance_id": _imds("instance-id"),
-        "reason": (
-            f"worker exceeded the {FAILURE_PACKAGE_SECONDS}s packaging watchdog"
-            if reason == "worker_watchdog_expired"
-            else "downloaded source bundle failed its SHA-256 check"
-        ),
-        "failure_code": reason,
-        "completed_at": _utc_now(),
-        **result_fields,
-    }, sort_keys=True))
-    _aws_cli("s3", "cp", str(marker), f"s3://{job['bucket']}/{job['failure_key']}",
-             "--region", job["region"], "--sse", "AES256")
-    return 1
+    from aws_worker_runtime import watchdog_failure_main as run_watchdog
+
+    return run_watchdog(job_path, reason)
 
 
 def _entrypoint() -> int:

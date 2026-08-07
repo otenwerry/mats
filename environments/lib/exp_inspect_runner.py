@@ -78,6 +78,7 @@ def summarize_log_usage(logs: list[Any]) -> dict:
     total = 0.0
     exact = True
     unknown: list[str] = []
+    subscription_models: list[str] = []
     for slug, row in by_model.items():
         # Do not pass a synthetic 0 total through as billed when one or more calls lacked it.
         usage = dict(row)
@@ -86,7 +87,10 @@ def summarize_log_usage(logs: list[Any]) -> dict:
         priced = estimate_usage_cost(slug, usage)
         row["priced"] = priced
         if priced["cost_usd"] is None:
-            unknown.append(slug)
+            if priced.get("source") == "subscription_not_metered":
+                subscription_models.append(slug)
+            else:
+                unknown.append(slug)
             exact = False
         else:
             total += priced["cost_usd"]
@@ -95,6 +99,8 @@ def summarize_log_usage(logs: list[Any]) -> dict:
         "total_cost_usd": total,
         "exact": exact and bool(by_model),
         "unknown_models": sorted(unknown),
+        "subscription_models_not_metered": sorted(subscription_models),
+        "total_excludes_subscription_usage": bool(subscription_models),
         "by_model": by_model,
     }
 

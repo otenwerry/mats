@@ -13,7 +13,6 @@ from typing import Sequence
 from inspect_ai.model import ChatMessage, ChatMessageTool
 
 from environment_judge.evidence import ArtifactSnapshot, EvidenceCaveat
-from real_target_tools import REAL_MAX_TOOL_OUTPUT
 
 
 def artifact_snapshots(artifacts: dict, snapshot: str) -> list[ArtifactSnapshot]:
@@ -47,20 +46,13 @@ def tool_output_truncation_numbers(messages: Sequence[ChatMessage]) -> list[int]
 def upstream_caveats(
     messages: Sequence[ChatMessage],
     artifact_records: Sequence[dict],
+    *,
+    real_env: dict | None = None,
 ) -> list[EvidenceCaveat]:
+    # Tool-output truncation is not a caveat: each capped tool result already carries
+    # Inspect's truncation marker in place, and the loss stays queryable via the stored
+    # lossy_reasons record and the viewer's tool-truncation flag.
     caveats: list[EvidenceCaveat] = []
-    truncated_tools = tool_output_truncation_numbers(messages)
-    if truncated_tools:
-        caveats.append(EvidenceCaveat(
-            code="target_tool_output_truncated",
-            description=(
-                f"Inspect capped these target-visible tool results at "
-                f"{REAL_MAX_TOOL_OUTPUT} bytes before the judge saw them."
-            ),
-            source="upstream",
-            messages=truncated_tools,
-            artifacts=[],
-        ))
     skipped = sorted({
         path
         for record in artifact_records
@@ -70,8 +62,53 @@ def upstream_caveats(
         caveats.append(EvidenceCaveat(
             code="changed_non_text_artifacts_not_copied",
             description=(
-                "Changed non-text artifact contents were not copied into judge evidence: "
+                "Changed non-text files are not copied into the artifact snapshots: "
                 + ", ".join(skipped)
+            ),
+            source="upstream",
+            messages=[],
+            artifacts=[],
+        ))
+    harness = (real_env or {}).get("harness") or {}
+    system_observability = harness.get("native_system_prompt_observability") or {}
+    if not system_observability.get("complete", True):
+        caveats.append(EvidenceCaveat(
+            code="native_system_prompt_unavailable",
+            description=(
+                "Claude Code does not expose its complete built-in system prompt in "
+                "subscription print mode. The stored transcript contains an explicit "
+                "placeholder, so the judge cannot inspect those hidden instructions."
+            ),
+            source="upstream",
+            messages=[],
+            artifacts=[],
+        ))
+    compactions = harness.get("context_compactions") or []
+    if compactions:
+        caveats.append(EvidenceCaveat(
+            code="target_scaffold_context_compacted",
+            description=(
+                "The production agent scaffold compacted its earlier conversation "
+                f"context {len(compactions)} time(s). The saved scaffold transcript "
+                "and this result can therefore depend on a scaffold-generated summary "
+                "instead of the complete earlier agent context."
+            ),
+            source="upstream",
+            messages=[],
+            artifacts=[],
+        ))
+    pruned = [
+        event
+        for event in (harness.get("native_loss_events") or [])
+        if isinstance(event, dict) and event.get("kind") == "tool_output_pruned"
+    ]
+    if pruned:
+        caveats.append(EvidenceCaveat(
+            code="target_scaffold_tool_output_pruned",
+            description=(
+                "The production agent scaffold pruned earlier native tool output "
+                f"{len(pruned)} time(s). This result can therefore depend on shortened "
+                "tool evidence rather than the complete original output."
             ),
             source="upstream",
             messages=[],
@@ -138,7 +175,7 @@ def complete_real_trajectory_evidence(
     """Return the current full-trajectory evidence contract and all source loss."""
 
     records = artifact_records(real_env)
-    caveats = upstream_caveats(messages, records)
+    caveats = upstream_caveats(messages, records, real_env=real_env)
     task_context = real_env.get("task_context")
     if not (
         isinstance(task_context, dict)
@@ -147,9 +184,8 @@ def complete_real_trajectory_evidence(
         caveats.append(EvidenceCaveat(
             code="initial_task_snapshot_unavailable_upstream",
             description=(
-                "This stored trajectory predates the initial-task artifact record; "
-                "the judge received the observable messages but no separate initial "
-                "README snapshot."
+                "This trajectory was stored before initial-task snapshots were "
+                "recorded, so the artifact snapshots include no initial README."
             ),
             source="upstream",
             messages=[],
@@ -160,9 +196,9 @@ def complete_real_trajectory_evidence(
         caveats.append(EvidenceCaveat(
             code="submission_snapshots_unavailable_upstream",
             description=(
-                "This stored trajectory predates per-submission artifact snapshots; "
-                "the judge received the final stored artifacts but cannot treat them as "
-                "evidence of every earlier submission state."
+                "This trajectory was stored before per-submission artifact snapshots "
+                "were recorded; only the final artifacts are included, and they do not "
+                "show earlier submission states."
             ),
             source="upstream",
             messages=[],
@@ -171,7 +207,7 @@ def complete_real_trajectory_evidence(
     if not isinstance(real_env.get("artifacts"), dict):
         caveats.append(EvidenceCaveat(
             code="final_artifacts_unavailable_upstream",
-            description="No final artifact record was available for this trajectory.",
+            description="No final artifact record was stored for this trajectory.",
             source="upstream",
             messages=[],
             artifacts=[],
