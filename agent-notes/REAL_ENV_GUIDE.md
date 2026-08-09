@@ -249,7 +249,15 @@ campaign on `--retry-failed`.
   official tally come from the result record's own `modelUsage`
   (`authoritative_usage`, `usage_totals_source`) rather than snapshot sums, which
   under-count output and over-count cache reads. Codex per-response `token_count`
-  sums were verified exact and stay authoritative there. Claude Code does not expose its complete native system prompt;
+  sums were verified exact and stay authoritative there.
+  Codex natively sends a second instruction message under the OpenAI "developer"
+  role and injects `<environment_context>`/`<user_instructions>` blocks as USER-role
+  turns before the first assistant turn. Roles and M#/U# numbering stay exactly what
+  the model saw; the transcript labels them "system · developer" /
+  "user · environment_context" via `native_role` (parser metadata for new runs,
+  `stamp_codex_native_roles` heuristic for stored ones). Codex trajectories therefore
+  always carry one more user turn than the controller sent.
+  Claude Code does not expose its complete native system prompt;
   each affected output stores `native_system_prompt_unavailable` and both judges/viewer
   show the evidence caveat. Codex rollout state exposes its native base/developer prompt.
 
