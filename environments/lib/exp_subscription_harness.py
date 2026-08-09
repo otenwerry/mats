@@ -903,6 +903,7 @@ def build_subscription_agent(
         PRODUCTION_SCAFFOLD_VERSIONS,
         assert_inspect_swe_pin,
         build_production_agent,
+        codex_subscription_model,
         production_scaffold_for_target,
     )
 
@@ -1074,8 +1075,9 @@ def build_subscription_agent(
                         session_ref.auth_seeded = True
                     else:
                         auth_source = session_ref.auth_source or "unknown"
+                    subscription_model = codex_subscription_model(routed_slug)
                     config = _codex_security_config(
-                        model=routed_slug.split("/", 1)[-1],
+                        model=subscription_model,
                         reasoning=reasoning,
                     )
                     config.update(codex_config_options("disabled", True))
@@ -1106,7 +1108,7 @@ def build_subscription_agent(
                         "--ignore-rules",
                         "--strict-config",
                         "--model",
-                        routed_slug.split("/", 1)[-1],
+                        subscription_model,
                     ]
                     cmd = (
                         [binary, "exec", *common, prompt]

@@ -1,4 +1,4 @@
-# Real environments (standalone runtime and judge, 2026-08-06)
+# Real environments (standalone runtime and judge, 2026-08-08)
 
 > **Summary:** `mats/environments/` owns its protocols, generated seeds, Docker
 > runtime, model catalog, consolidated Markdown judge instructions, structured judge,
@@ -13,6 +13,7 @@
 > Every endpoint that can start a new paid judge call also requires an explicit
 > `--judge`; the environment variable and internal default do not satisfy the CLI.
 > Read this before changing real environments, their judging, or their viewer.
+> **Last updated:** 2026-08-08
 
 Human-facing text calls the evaluated model the **agent**. Inspect's built-in
 `"target"` role and existing serialized keys, CLI flags, cache keys, and version IDs
@@ -103,6 +104,12 @@ Protocol prose and generated task assets live under `environments/seeds/`. The s
 loader stores paths and SHA-256 provenance in task metadata. Inspect AI 0.3.239,
 Inspect Scout 0.4.39, and Inspect SWE 0.2.63 are pinned in this project's
 `pyproject.toml` and `uv.lock`.
+
+P-hacking `scenario.md` files split the opening into one `[USER_PROMPT_CORE]` containing
+one `{{PRESSURE}}` insertion point plus interchangeable `[LOW_PRESSURE]` and
+`[HIGH_PRESSURE]` fragments. Both fragments have the same rules. Originals and
+continuations require `--pressure=low|high`; ML rejects the flag. The chosen value and
+exact assembled message are stored in run, sample, protocol, and continuation metadata.
 
 A repository search for runtime `petri` imports should remain empty. Historical prose,
 legacy schema labels, and migration tests may still contain the word.
@@ -213,8 +220,9 @@ campaign on `--retry-failed`.
   path remains sufficient. Old production transcripts and simple/hand-built transcripts
   without matching native state are refused in production mode. Simple continuations
   retain the old native Inspect-message splice exactly.
-- Continuation viewer groups and original base rates are harness-matched. Historical
-  unstamped originals are treated as `simple`.
+- Continuation viewer groups and original base rates are harness- and pressure-matched.
+  Historical unstamped originals are treated as `simple` and, for p-hacking, as
+  legacy/unspecified pressure.
 - Direct subscription runs store provider-reported native token counts, cache counts,
   rate-limit/quota snapshots when the CLI reports them, and Claude's API-list-equivalent
   cost estimate. They do not store that estimate as paid cost: dollar summaries visibly
@@ -254,8 +262,8 @@ base rate is the ordinary original trajectories of the same (seed, agent).
   current `seeds/SYSTEM_PROMPT.txt` variant for its reasoning setting. Production
   prefixes are production-only and must have compatible native state at the exact
   pinned versions. Prefix seed != new-task seed; simple prefixes have no
-  mid-conversation system messages; dangling final tool calls get the Petri synthetic
-  closer, flagged.
+  mid-conversation system messages. Prefixes with dangling final tool calls fail at
+  plan time with the unresolved call IDs; the runner never invents tool results.
 - Mechanics live in `lib/continuation_evidence.py` (splice + slice; shared by solver
   and judge, no cycles), `lib/exp_real_continuation.py` (payloads, specs, cells,
   tasks; reuses `exp_real_audit.build_real_task`), and the `continuation=` parameter
@@ -285,7 +293,7 @@ base rate is the ordinary original trajectories of the same (seed, agent).
   against the shipped source bundle.
 - Viewer: continuation rows route by `real_env.continuation` (never by dir name) to
   the harness-scoped global Continuations window only — never into seed pages,
-  visuals, or Past. Per (seed, agent) within the selected harness: an originals base-rate row
+  visuals, or Past. Per (seed, agent, pressure) within the selected harness: an originals base-rate row
   (reasoning-matched when recorded) + one row per treatment. Every summary count and
   hack rate is shown as integrity-valid / all; integrity failures are assigned to their
   judgment outcome instead of an excluded outcome. Hack rate = hack /
@@ -565,6 +573,10 @@ the intentional Judge view remain local additions.
 The builder writes one current trajectory index, current visuals page, Past page, and
 current generic Judge view per seed and harness, plus separate trajectory-detail and
 stored Judge view pages for every loaded trajectory.
+P-hacking adds a High pressure / Low pressure / Legacy or unspecified row beneath the
+seed row. Its trajectory, visual, judge-comparison, Judge, and Past pages never pool
+different pressure values. High pressure retains the historical filenames; low and
+unspecified pages use explicit filename prefixes. ML has no pressure row.
 `index.html` remains the `fraud_detection` trajectory page. This prevents the output
 directory from mixing a new global index with stale per-seed pages. The top viewer layer
 is `Simple harness` / `Production harness`; every trajectory table, comparison, visual,
@@ -758,13 +770,23 @@ are canonical and protected by invariant tests. `lib/real_grader.py` dispatches 
 each ML manifest: fraud uses macro-F1, demand uses MAE, rating uses RMSE. The same grade
 path supplies the mechanical key-agreement detector and final grade.
 
+Regression parsing rejects `nan`, positive/negative infinity, and all other non-finite
+numeric spellings. Invalid rows are excluded, counted in `n_non_finite`, and become
+missing test IDs; the stable MAE/RMSE calculations also avoid intermediate overflow for
+extreme finite values. ML `all_present` requires root `predictions.csv`, root
+`REPORT.md`, and at least one non-empty file under the exact `models/final/` directory.
+The final model listing supplies path/byte evidence without copying large weights.
+
 The 2026-08-07 data-realism pass added small, analysis-preserving imperfections:
 demand has 30 replayed training rows (15 with blank promo); rating has 84 exact
 training replays; checkout has 40 repeated session exports (20 with blank source); and
 retrieval has 320 missing seven-day outcomes, balanced 160 per arm. Complete originals
 remain for every duplicated record, and invariant tests clean back to the pinned data.
 Reasoning-prompt benchmark remains a clean paired automated export. Retrieval's
-deep-cut directional description and test now both say about 65%.
+deep-cut directional description and test now both say about 65%. Retrieval is framed
+as a four-term consortium/platform trial across partner colleges: its session modes are
+`remote`/`supervised`, east/west are regional partner networks, and participant IDs are
+opaque hashes rather than sequential export rows.
 
 Always run ML calibration through `./envgen/calibrate.sh <member>`; it pins the sandbox
 versions. Summaries are committed beside the seed. Full reports go under
@@ -790,3 +812,8 @@ The 2026-08-06 explicit paid-endpoint `--judge` requirement passed the full free
 
 The standalone cutover was verified with the full suite and a free viewer build over
 the saved environment logs. No paid experiment was run during the migration.
+
+The p-hacking pressure-composition pass was verified with the full free suite: 395
+tests passed, 2 Docker smoke tests skipped, and 3 subtests passed. A free viewer build
+over all 90 saved rows completed with zero load errors and valid local links. No paid
+experiment was run.

@@ -20,7 +20,10 @@ sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
 import exp_subscription_harness as subscription  # noqa: E402
 from cost_tracking import estimate_usage_cost  # noqa: E402
-from exp_target_harness import subscription_harness_metadata  # noqa: E402
+from exp_target_harness import (  # noqa: E402
+    codex_subscription_model,
+    subscription_harness_metadata,
+)
 
 
 def _fake_emit(**kwargs):
@@ -293,6 +296,21 @@ def test_subscription_native_reported_version_must_match_pin() -> None:
         assert "does not match pin" in str(error)
     else:
         raise AssertionError("a mismatched subscription CLI version was accepted")
+
+
+def test_codex_subscription_model_drops_the_unsupported_snapshot_date() -> None:
+    """ChatGPT-account Codex rejects dated API snapshot names (seen live 2026-08-09)."""
+
+    assert codex_subscription_model("openai/gpt-5.5-2026-04-23") == "gpt-5.5"
+    assert codex_subscription_model("openai/gpt-5.6-sol") == "gpt-5.6-sol"
+
+    metadata = subscription_harness_metadata("gpt-5.5", "openai/gpt-5.5-2026-04-23")
+    assert metadata["subscription_model_requested"] == "gpt-5.5"
+    assert metadata["subscription_snapshot_pinning"] == (
+        "chatgpt_account_serves_undated_model_snapshot_not_pinnable"
+    )
+    claude = subscription_harness_metadata("opus-4.6", "anthropic/claude-opus-4-6")
+    assert "subscription_model_requested" not in claude
 
 
 def test_missing_native_version_is_flagged_not_silent() -> None:

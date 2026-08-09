@@ -80,6 +80,20 @@ def production_scaffold_for_target(target_name: str, routed_slug: str) -> str:
     return "opencode"
 
 
+_DATED_MODEL_SUFFIX_RE = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def codex_subscription_model(routed_slug: str) -> str:
+    """The model name Codex accepts on a ChatGPT account.
+
+    Subscription Codex rejects dated API snapshot names ("'gpt-5.5-2026-04-23'
+    model is not supported when using Codex with a ChatGPT account"), so the
+    undated family name is requested and the served snapshot is not pinnable.
+    """
+
+    return _DATED_MODEL_SUFFIX_RE.sub("", routed_slug.split("/", 1)[-1])
+
+
 def _inspect_swe_version() -> str:
     try:
         return package_version("inspect-swe")
@@ -158,6 +172,16 @@ def subscription_harness_metadata(target_name: str, routed_slug: str) -> dict:
                 if scaffold == "claude_code" else None
             ),
         },
+        **(
+            {
+                "subscription_model_requested": codex_subscription_model(routed_slug),
+                "subscription_snapshot_pinning": (
+                    "chatgpt_account_serves_undated_model_snapshot_not_pinnable"
+                ),
+            }
+            if scaffold == "codex"
+            else {}
+        ),
         "credential_isolation": (
             {
                 "credential_copy": "disposable_container_private_file_or_process_env",
