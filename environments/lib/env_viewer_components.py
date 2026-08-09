@@ -1,9 +1,7 @@
 """Small environment-owned HTML components for judgments and transcripts.
 
-The evidence navigator is intentionally one flat row per dimension.  Its arrows cycle
-only through that dimension's cited turns, then scroll and briefly highlight the exact
-message.  Artifact citations are separate direct links because they are not turns.  A
-smaller floating navigator repeats only the turns cited in the combined justification.
+The stored structured judgment keeps one evidence row per dimension inside Other stuff.
+The always-visible transcript uses Petri's floating judge-cited/user-turn navigator.
 """
 
 from __future__ import annotations
@@ -14,24 +12,18 @@ import json
 import re
 from typing import Any
 
+from judgment_semantics import JUDGE_DIMENSION_LABELS, cited_message_numbers
 
-DIMENSION_LABELS = {
-    # Historical structured judgments can still contain this retired field.
-    "noticed_honeypot": "Honeypot",
-    "environment_failure": "Env failure",
-    "reward_hacking": "Reward hack",
-    "deception": "Deception",
-}
+DIMENSION_LABELS = JUDGE_DIMENSION_LABELS
 
 JUDGE_PROMPT_SECTIONS = (
     ("overall", ("Overall judge instructions",)),
     ("dimensions", ("Dimension rubrics",)),
-    # The second name preserves exact rendering for judgments stored before the
-    # Evidence-scope prose moved into the family-specific overall instructions.
-    ("scope", ("Evidence caveats", "Official evidence scope")),
     ("trajectory", ("Numbered observable trajectory",)),
     ("artifacts", ("Artifact snapshots",)),
 )
+
+LEGACY_SCOPE_HEADINGS = ("Evidence caveats", "Official evidence scope")
 
 
 def esc(value: Any, *, quote: bool = False) -> str:
@@ -46,16 +38,7 @@ def artifact_dom_id(path: str, snapshot: str) -> str:
 def _cited_message_numbers(text: str, candidates: set[int]) -> set[int]:
     """Return candidate message numbers named singly, in groups, or by ranges."""
 
-    cited = {
-        int(number) for number in re.findall(r"\bM(\d+)\b", text)
-    }
-    for start_text, end_text in re.findall(
-        r"\bM(\d+)\s*[-–—]\s*M?(\d+)\b", text
-    ):
-        start, end = int(start_text), int(end_text)
-        if start <= end:
-            cited.update(number for number in candidates if start <= number <= end)
-    return cited
+    return cited_message_numbers(text, candidates)
 
 
 def split_stored_judge_prompt(prompt: str) -> dict[str, str] | None:
@@ -76,7 +59,10 @@ def split_stored_judge_prompt(prompt: str) -> dict[str, str] | None:
     sections: dict[str, str] = {}
     current_key = first_key
     remaining = prompt[len(prefix):]
-    for next_key, next_headings in JUDGE_PROMPT_SECTIONS[1:]:
+    layout = list(JUDGE_PROMPT_SECTIONS[1:])
+    if any(f"\n\n# {heading}\n\n" in remaining for heading in LEGACY_SCOPE_HEADINGS):
+        layout.insert(1, ("legacy_scope", LEGACY_SCOPE_HEADINGS))
+    for next_key, next_headings in layout:
         matches = [
             (remaining.find(delimiter), delimiter)
             for next_heading in next_headings
@@ -133,7 +119,12 @@ def _nested_detail(summary: str, body: str, *, css_class: str = "") -> str:
     )
 
 
-def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
+def _trajectory_scope_marker(
+    judgment: dict,
+    audit: dict,
+    *,
+    trajectory_href: str = "#trajectory-record",
+) -> tuple[str, str]:
     envelope = judgment.get("envelope") or {}
     evidence = envelope.get("evidence") or {}
     source_map = evidence.get("source_message_map") or []
@@ -148,6 +139,11 @@ def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
         scope = "complete trajectory through stage one"
     elif complete:
         scope = "complete observable trajectory"
+    elif (
+        selection
+        == "system_user_and_assistant_content_without_tool_usage_for_stage"
+    ):
+        scope = "system, user, and assistant content without tool usage"
     else:
         scope = str(selection or "scope not recorded").replace("_", " ")
 
@@ -156,13 +152,36 @@ def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
     reasoning_policy = str(evidence.get("native_reasoning_policy") or "not recorded")
     reasoning_messages = evidence.get("native_reasoning_message_count")
     reasoning_blocks = evidence.get("native_reasoning_block_count")
+    plaintext_reasoning = evidence.get("native_reasoning_plaintext_block_count")
+    summarized_reasoning = evidence.get("native_reasoning_summary_block_count")
+    unavailable_reasoning = evidence.get("native_reasoning_unavailable_block_count")
     if isinstance(reasoning_messages, int) and isinstance(reasoning_blocks, int):
         reasoning_detail = (
             f"{reasoning_policy} · {reasoning_blocks} block(s) in "
             f"{reasoning_messages} message(s)"
         )
+        if all(isinstance(value, int) for value in (
+            plaintext_reasoning, summarized_reasoning, unavailable_reasoning,
+        )):
+            reasoning_detail += (
+                f" · {plaintext_reasoning} plaintext, {summarized_reasoning} "
+                f"summary-only, {unavailable_reasoning} unavailable"
+            )
     else:
         reasoning_detail = reasoning_policy
+
+    tool_call_detail = str(evidence.get("tool_calls_policy") or "not recorded")
+    source_tool_calls = evidence.get("source_tool_call_count")
+    embedded_tool_uses = evidence.get("source_embedded_tool_use_block_count")
+    if isinstance(source_tool_calls, int) and isinstance(embedded_tool_uses, int):
+        tool_call_detail += (
+            f" · {source_tool_calls} ordinary call(s), "
+            f"{embedded_tool_uses} embedded block(s) in source"
+        )
+    tool_result_detail = str(evidence.get("tool_results_policy") or "not recorded")
+    source_tool_results = evidence.get("source_tool_result_message_count")
+    if isinstance(source_tool_results, int):
+        tool_result_detail += f" · {source_tool_results} message(s) in source"
 
     policies = [
         ("Messages", f"{scope}; judge labels {labels}"),
@@ -171,8 +190,8 @@ def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
         ("Assistant-visible text", str(
             evidence.get("assistant_visible_text_policy") or "not recorded"
         )),
-        ("Tool calls", str(evidence.get("tool_calls_policy") or "not recorded")),
-        ("Tool results", str(evidence.get("tool_results_policy") or "not recorded")),
+        ("Tool calls", tool_call_detail),
+        ("Tool results", tool_result_detail),
     ]
     if isinstance(omitted_count, int) and omitted_count:
         policies.append((
@@ -193,8 +212,8 @@ def _trajectory_scope_marker(judgment: dict, audit: dict) -> tuple[str, str]:
     )
     body = (
         f'<div class="judge-scope-grid">{facts}</div>'
-        '<a class="judge-trajectory-link" href="#trajectory-record">'
-        'Open the saved trajectory below</a>'
+        f'<a class="judge-trajectory-link" href="{esc(trajectory_href, quote=True)}">'
+        'Open the saved trajectory</a>'
     )
     return summary, body
 
@@ -219,7 +238,7 @@ def _render_provider_interface(envelope: dict) -> str:
             if key not in {"initial_messages", "tools"}
         }
         return "".join(tool_rows) + _nested_detail(
-            "Request controls",
+            "Response mechanics",
             _exact_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True)),
             css_class="judge-controls",
         )
@@ -288,13 +307,16 @@ def render_generic_judge_stage(
             "user turns and assistant submission turns for this stage; "
             f"native reasoning {reasoning}"
         )
+    elif (
+        selection
+        == "system_user_and_assistant_content_without_tool_usage_for_stage"
+    ):
+        trajectory_slot = (
+            "system and user messages plus assistant reasoning and visible text for "
+            f"this stage; tool calls and results excluded; native reasoning {reasoning}"
+        )
     else:
         trajectory_slot = f"{selection.replace('_', ' ')}; native reasoning {reasoning}"
-    scope = _variable_judge_slot(
-        "Trajectory-specific",
-        "evidence-loss caveats are inserted when the call is built",
-    )
-
     body = "".join([
         _nested_detail("Overall instructions", _exact_text(sections["overall"])),
         _nested_detail(
@@ -302,7 +324,6 @@ def render_generic_judge_stage(
             dimensions,
             css_class="judge-section-group",
         ),
-        _nested_detail("Evidence caveats", scope),
         _nested_detail(
             "Numbered trajectory",
             _variable_judge_slot(
@@ -331,15 +352,23 @@ def render_generic_judge_stage(
     )
 
 
-def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
-    """Render the exact stored judge input as compact, nested closed sections.
+def render_judge_view(
+    judgment: dict | None,
+    audit: dict | None = None,
+    *,
+    expanded: bool = False,
+    trajectory_href: str = "#trajectory-record",
+) -> str:
+    """Render the stored judge input as compact, nested closed sections.
 
     The exact numbered trajectory stays inside this view. The broader saved transcript
     remains a separate record because it can contain reasoning or later-stage messages
-    that were not part of this judge call.
+    that were not part of this judge call. Historical evidence-scope sections are parsed
+    for layout compatibility but hidden; their stored issues surface as viewer flags.
     """
 
     audit = audit or {}
+    open_attr = " open" if expanded else ""
     if not judgment:
         return ""
     if judgment.get("format") == "legacy_numeric":
@@ -366,13 +395,13 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
                 'missing parts from current code.</div>'
             )
             return (
-                '<details class="judge-view"><summary><span>Judge view</span>'
+                f'<details class="judge-view"{open_attr}><summary><span>Judge view</span>'
                 '<span class="judge-view-pills">legacy incremental · stored evidence'
                 '</span></summary><div class="judge-view-body">'
                 + availability + "".join(stored_sections) + '</div></details>'
             )
         return (
-            '<details class="judge-view judge-view-unavailable"><summary>'
+            f'<details class="judge-view judge-view-unavailable"{open_attr}><summary>'
             '<span>Judge view</span><span class="judge-view-pills">legacy · '
             'exact evidence not stored</span></summary>'
             '<div class="judge-unavailable">This historical numeric run did not store '
@@ -388,7 +417,7 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
     reasoning = ((envelope.get("evidence") or {}).get("native_reasoning_policy"))
     if sections is None:
         return (
-            '<details class="judge-view judge-view-unavailable"><summary>'
+            f'<details class="judge-view judge-view-unavailable"{open_attr}><summary>'
             f'<span>Judge view</span><span class="judge-view-pills">{esc(stage)} · '
             'exact prompt unavailable</span></summary>'
             '<div class="judge-unavailable">The exact stored judge prompt could not be '
@@ -416,7 +445,11 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
     else:
         artifact_body = _exact_text(sections["artifacts"])
 
-    trajectory_summary, trajectory_body = _trajectory_scope_marker(judgment, audit)
+    trajectory_summary, trajectory_body = _trajectory_scope_marker(
+        judgment,
+        audit,
+        trajectory_href=trajectory_href,
+    )
     call_mode = (
         "stage-one result reused"
         if envelope.get("reused_stage_one") is True
@@ -442,7 +475,6 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
             dimensions,
             css_class="judge-section-group",
         ),
-        _nested_detail("Evidence caveats", _exact_text(sections["scope"])),
         _nested_detail(
             trajectory_summary,
             trajectory_body + _exact_text(sections["trajectory"]),
@@ -460,7 +492,7 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
         ),
     ])
     return (
-        '<details class="judge-view"><summary><span>Judge view</span>'
+        f'<details class="judge-view"{open_attr}><summary><span>Judge view</span>'
         f'<span class="judge-view-pills">{esc(pills)}</span></summary>'
         f'<div class="judge-view-body">{body}</div></details>'
     )
@@ -469,6 +501,8 @@ def render_judge_view(judgment: dict | None, audit: dict | None = None) -> str:
 def _state(dimension: dict) -> str:
     if dimension.get("status") != "ok":
         return str(dimension.get("status") or "invalid")
+    if dimension.get("key") == "noticed":
+        return "neutral"
     value = dimension.get("value")
     if isinstance(value, bool):
         return "yes" if value else "no"
@@ -479,7 +513,9 @@ def _state(dimension: dict) -> str:
     return "neutral"
 
 
-def render_dimension_navigator(judgment: dict | None) -> str:
+def render_dimension_navigator(
+    judgment: dict | None, *, artifact_page_href: str | None = None
+) -> str:
     """Render the flat result/evidence rows for one structured judgment.
 
     Old numeric judgments get a clearly labeled, non-interactive table.  They do not
@@ -546,7 +582,8 @@ def render_dimension_navigator(judgment: dict | None) -> str:
             path = str(artifact.get("path") or "")
             snapshot = str(artifact.get("snapshot") or "")
             artifact_links.append(
-                f'<a class="artifact-ref" href="#{artifact_dom_id(path, snapshot)}">'
+                f'<a class="artifact-ref" href="'
+                f'{esc((artifact_page_href or "") + "#" + artifact_dom_id(path, snapshot), quote=True)}">'
                 f'{esc(path)} · {esc(snapshot)}</a>'
             )
         artifacts = (
@@ -556,7 +593,7 @@ def render_dimension_navigator(judgment: dict | None) -> str:
         explanation = str(dimension.get("explanation") or "")
         why = (
             '<details class="dimension-why"><summary>why</summary>'
-            f'<span>{link_judge_message_refs(explanation, judgment)}</span></details>'
+            f'<span>{link_judge_message_refs(explanation, judgment, artifact_page_href=artifact_page_href)}</span></details>'
             if explanation else ""
         )
         issue_count = len(evidence.get("issues") or [])
@@ -580,80 +617,72 @@ def render_dimension_navigator(judgment: dict | None) -> str:
         f'<span class="judgment-warning">&#9888; {issue_count} stored judgment issue(s)</span>'
         if issue_count else ""
     )
-    overall = str(judgment.get("overall_explanation") or "")
-    overall_html = (
-        f'<div class="judgment-overall">'
-        f'{link_judge_message_refs(overall, judgment)}</div>'
-        if overall else ""
-    )
     return (
         '<section class="judgment-strip" aria-label="judgment and evidence navigation">'
         f'<div class="judgment-format">{esc(schema)}{warning}</div>'
-        f'{overall_html}{"".join(rows)}</section>'
+        f'{"".join(rows)}</section>'
     )
 
 
-def render_justification_turn_nav(judgment: dict | None) -> str:
-    """Render one compact floating turn navigator per cited judgment dimension.
+def render_explanation_turn_nav(judgment: dict | None) -> str:
+    """Render Petri's floating judge-cited and user-turn groups.
 
-    Judge citations use prompt-local message numbers.  A dimension's structured
-    evidence supplies both those prompt numbers and their mapped full-trajectory
-    message numbers, so the viewer never has to infer associations from prose.
+    Current judge citations are prompt-local. The stored source map converts them back
+    to the complete saved transcript before the navigator is written.
     """
 
-    if not judgment or judgment.get("format") != "structured":
-        return ""
-    candidate_prompt_numbers = {
-        reference["prompt_number"]
-        for dimension in judgment.get("dimensions") or []
-        for reference in (dimension.get("evidence") or {}).get("messages") or []
-        if isinstance(reference.get("prompt_number"), int)
-    }
-    cited_prompt_numbers = _cited_message_numbers(
-        str(judgment.get("justification") or ""), candidate_prompt_numbers
-    )
-    if not cited_prompt_numbers:
-        return ""
-
-    rows = []
-    for dimension in judgment.get("dimensions") or []:
-        key = str(dimension.get("key") or "unknown")
-        label = DIMENSION_LABELS.get(key, key.replace("_", " "))
-        targets = []
+    targets: list[str] = []
+    if judgment:
+        text = "\n".join(
+            str(judgment.get(key) or "")
+            for key in ("summary", "explanation", "highlights")
+        )
+        source_map = ((judgment.get("envelope") or {}).get("evidence") or {}).get(
+            "source_message_map"
+        ) or []
+        mapped = {
+            int(item["number"]): int(item["source_index"]) + 1
+            for item in source_map
+            if isinstance(item, dict)
+            and isinstance(item.get("number"), int)
+            and isinstance(item.get("source_index"), int)
+        }
+        candidates = set(mapped) | {
+            int(number) for number in re.findall(r"\bM(\d+)\b", text)
+        }
         seen = set()
-        for reference in (dimension.get("evidence") or {}).get("messages") or []:
-            prompt_number = reference.get("prompt_number")
-            source_number = reference.get("number")
-            if (
-                not isinstance(prompt_number, int)
-                or prompt_number not in cited_prompt_numbers
-                or not isinstance(source_number, int)
-            ):
-                continue
-            target = f"M{source_number}"
+        for number in sorted(_cited_message_numbers(text, candidates)):
+            target = f"M{mapped.get(number, number)}"
             if target not in seen:
                 seen.add(target)
                 targets.append(target)
-        if not targets:
-            continue
+
+    cited_group = ""
+    if targets:
         target_json = esc(json.dumps(targets, separators=(",", ":")), quote=True)
-        rows.append(
-            f'<div class="justification-nav-row" '
-            f'data-justification-targets="{target_json}">'
-            f'<span class="justification-nav-label">{esc(label)}</span>'
-            f'<button type="button" class="justification-prev" '
-            f'aria-label="previous {esc(label, quote=True)} justification turn">'
-            '&#8592;</button>'
-            f'<span class="justification-position">0 / {len(targets)}</span>'
-            f'<button type="button" class="justification-next" '
-            f'aria-label="next {esc(label, quote=True)} justification turn">'
-            '&#8594;</button></div>'
+        cited_group = (
+            '<div class="cnav-grp cited" id="grp-cited"><b>judge-cited</b>'
+            f'<div class="explanation-nav-row cnav-row" '
+            f'data-explanation-targets="{target_json}">'
+            '<button type="button" class="explanation-prev" '
+            'aria-label="previous judge-cited turn">&larr;</button>'
+            f'<span class="explanation-position lbl">0 / {len(targets)}</span>'
+            '<button type="button" class="explanation-next" '
+            'aria-label="next judge-cited turn">&rarr;</button>'
+            '</div></div>'
         )
-    if not rows:
-        return ""
+    user_group = (
+        '<div class="cnav-grp user" id="grp-user">'
+        '<b>user turns <span id="user-cnt"></span></b>'
+        '<div class="cnav-row">'
+        '<button type="button" id="user-prev" title="previous">&larr;</button>'
+        '<span class="lbl" id="user-lbl">&ndash;</span>'
+        '<button type="button" id="user-next" title="next">&rarr;</button>'
+        '</div></div>'
+    )
     return (
-        '<nav class="justification-nav" aria-label="judge justification turns">'
-        f'{"".join(rows)}</nav>'
+        '<nav class="cnav explanation-nav" aria-label="trajectory turns">'
+        f'{cited_group}{user_group}</nav>'
     )
 
 
@@ -673,7 +702,12 @@ def _artifact_anchor(artifacts: list, number: int) -> str | None:
     return artifact_dom_id(path, snapshot) if snapshot else f"judge-artifact-{number}"
 
 
-def link_judge_message_refs(text: str, judgment: dict) -> str:
+def link_judge_message_refs(
+    text: str,
+    judgment: dict,
+    *,
+    artifact_page_href: str | None = None,
+) -> str:
     """Link simple, grouped, and ranged judge citations to saved trajectory turns.
 
     [M#] references link to transcript messages; [A#] references link to the matching
@@ -696,7 +730,8 @@ def link_judge_message_refs(text: str, judgment: dict) -> str:
         if kind == "M":
             return f'<a href="#M{targets.get(number, number)}">{label}</a>'
         anchor = _artifact_anchor(artifacts, number)
-        return f'<a href="#{anchor}">{label}</a>' if anchor else label
+        href = f'{artifact_page_href or ""}#{anchor}' if anchor else None
+        return f'<a href="{esc(href, quote=True)}">{label}</a>' if href else label
 
     def replace_group(match: re.Match) -> str:
         content = match.group(1)
@@ -715,8 +750,10 @@ def link_judge_message_refs(text: str, judgment: dict) -> str:
     return re.sub(r"\[([^\]\n]*\b[MA]\d+[^\]\n]*)\]", replace_group, escaped)
 
 
-def render_judge_narrative(judgment: dict | None) -> str:
-    """Render stored judge summary/highlights without reconstructing missing prose."""
+def render_judge_narrative(
+    judgment: dict | None, *, artifact_page_href: str | None = None
+) -> str:
+    """Render stored judge prose with Petri's shared three-section layout."""
 
     if not judgment:
         return ""
@@ -727,19 +764,19 @@ def render_judge_narrative(judgment: dict | None) -> str:
     else:
         return ""
     sections = []
-    for key, label in (
-        ("summary", "Judge summary"),
-        ("justification", "Judge justification"),
-        ("highlights", "Judge highlights"),
+    for key, label, note_class in (
+        ("summary", "Judge summary", "note"),
+        ("explanation", "Judge explanation", "note explanation"),
+        ("highlights", "Judge highlights", "note hl"),
     ):
         value = str(record.get(key) or "")
         if not value:
             continue
         sections.append(
-            '<details class="panel judge-narrative" open>'
-            f'<summary>{esc(label)}</summary>'
-            '<div class="judge-narrative-text">'
-            f'{link_judge_message_refs(value, judgment)}</div></details>'
+            '<details class="sec" open>'
+            f'<summary><h2>{esc(label)}</h2></summary>'
+            f'<div class="{note_class}">'
+            f'{link_judge_message_refs(value, judgment, artifact_page_href=artifact_page_href)}</div></details>'
         )
     return "".join(sections)
 
@@ -749,33 +786,47 @@ def _json_block(value: Any) -> str:
 
 
 def render_transcript(messages: list[dict]) -> str:
-    """Render normalized messages with the exact anchors used by evidence navigation."""
+    """Render normalized messages with Petri's transcript markup and styling."""
     if not messages:
         return '<p class="empty-transcript">No transcript was stored.</p>'
     rows = []
     for message in messages:
         number = int(message["number"])
         role = str(message.get("role") or "other")
-        role_class = re.sub(r"[^a-z]", "", role.lower()) or "other"
+        role_class = re.sub(r"[^a-z]", "", role.lower().split()[0]) or "other"
+        if role_class not in {"system", "user", "assistant", "tool"}:
+            role_class = "other"
         indices = []
         if message.get("assistant_turn"):
             indices.append(f"A{message['assistant_turn']}")
         if message.get("user_turn"):
             indices.append(f"U{message['user_turn']}")
         index_html = "".join(
-            f'<span class="turn-index">[{esc(index)}]</span>' for index in indices
+            f' <span class="aturn">[{esc(index)}]</span>' for index in indices
         )
-        body = f'<pre class="message-text">{esc(message.get("text") or "")}</pre>'
+        elapsed_time = message.get("elapsed_time")
+        timestamp = message.get("timestamp")
+        timestamp_title = (
+            f' title="{esc(timestamp, quote=True)}"' if timestamp else ""
+        )
+        time_html = (
+            f' <span class="mtime"{timestamp_title}>{esc(elapsed_time)}</span>'
+            if elapsed_time
+            else ""
+        )
+        body = ""
+        if message.get("text"):
+            body += f'<pre>{esc(message["text"])}</pre>'
         if message.get("reasoning"):
             body += (
-                '<details class="message-reasoning"><summary>reasoning</summary>'
+                '<details class="think"><summary class="thead">[Agent reasoning]</summary>'
                 f'<pre>{esc(message["reasoning"])}</pre></details>'
             )
         for call in message.get("tool_calls") or []:
             body += (
-                '<div class="tool-call"><div class="tool-call-head">tool call: '
-                f'{esc(call.get("function") or "unknown")}</div>'
-                f'<pre>{_json_block(call.get("arguments"))}</pre></div>'
+                '<div class="toolcall"><div class="tchead">tool call · '
+                f'<span class="tcname">{esc(call.get("function") or "unknown")}</span></div>'
+                f'<pre class="tcargs">{_json_block(call.get("arguments"))}</pre></div>'
             )
         if message.get("other_content_blocks"):
             body += (
@@ -785,10 +836,19 @@ def render_transcript(messages: list[dict]) -> str:
             )
         if message.get("error"):
             body += f'<pre class="message-error">{_json_block(message["error"])}</pre>'
+        if not body:
+            body = "<pre></pre>"
+        native_role = message.get("native_role")
+        role_label = (
+            f"{role} · {native_role}"
+            if native_role and native_role != role
+            else role
+        )
         rows.append(
-            f'<article class="message role-{role_class}" id="M{number}" '
+            f'<div class="msg role-{role_class}" id="M{number}" '
             f'data-message-number="{number}">'
-            f'<header>[M{number}]{index_html} {esc(role)}</header>{body}</article>'
+            f'<div class="mhead">[M{number}]{index_html} {esc(role_label)}{time_html}</div>'
+            f'{body}</div>'
         )
     return "\n".join(rows)
 
@@ -797,7 +857,6 @@ EVIDENCE_NAV_CSS = r"""
 .judgment-strip{border:1px solid #d8dbe5;border-radius:8px;margin:14px 0;background:#fff}
 .judgment-format{padding:5px 9px;color:#747887;font-size:11px;border-bottom:1px solid #eceef3}
 .judgment-overall{padding:6px 9px;border-bottom:1px solid #eceef3;font-size:12px;color:#4f5360}
-.judge-narrative-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:9px;font-size:12px;line-height:1.5;color:#3f4552}
 .judgment-warning,.evidence-warning{margin-left:8px;color:#9d6300}
 .dimension-row{min-height:32px;display:flex;align-items:center;gap:7px;padding:3px 8px;border-bottom:1px solid #f0f1f5;font-size:13px}
 .dimension-row:last-child{border-bottom:0}.dimension-label{width:92px;color:#555b68;flex:0 0 auto}
@@ -810,19 +869,18 @@ EVIDENCE_NAV_CSS = r"""
 .dimension-why{font-size:11px;margin-left:auto;max-width:52%}.dimension-why summary{cursor:pointer;color:#747887}
 .dimension-why span{display:block;padding:5px 0;color:#4a4e58}.evidence-flash{animation:evidence-flash 1.4s ease-out}
 @keyframes evidence-flash{0%{box-shadow:0 0 0 4px #efc84a;background:#fff8d8}100%{box-shadow:none}}
-.justification-nav{position:fixed;right:14px;bottom:14px;z-index:50;display:flex;flex-direction:column;gap:2px;padding:3px;background:rgba(255,255,255,.95);border:1px solid #dfe2e8;border-radius:6px;box-shadow:0 2px 8px rgba(31,38,55,.12);backdrop-filter:blur(3px)}
-.justification-nav-row{height:25px;display:flex;align-items:center;gap:3px;padding:0 3px;font-size:10.5px;color:#555b68}
-.justification-nav-label{width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.justification-position{min-width:30px;text-align:center;font-variant-numeric:tabular-nums;color:#777d8b}
-.justification-nav button{width:22px;height:20px;padding:0;border:1px solid #d8dbe3;border-radius:4px;background:#f7f8fa;color:#555b68;cursor:pointer;line-height:18px}.justification-nav button:hover{background:#eceef3}
-.message.justification-cited{border-left:3px solid #dfbd58}
+.cnav{position:fixed;bottom:70px;right:18px;width:190px;max-height:calc(100vh - 96px);overflow:auto;background:#fff;border:1px solid #d9dbe3;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.18);padding:10px 12px;font-size:12.5px;z-index:50}
+.cnav-grp{margin-bottom:9px;padding-bottom:8px;border-bottom:1px solid #eceef2}.cnav-grp:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}.cnav-grp.user b{color:#2456a6}
+.cnav-row{display:flex;align-items:center;gap:8px;margin:6px 0 2px}.cnav .lbl{font-variant-numeric:tabular-nums;min-width:46px;text-align:center}.cnav button{cursor:pointer;border:1px solid #c8cad2;background:#f2f3f6;border-radius:5px;padding:2px 10px;font-size:13px}.cnav button:hover{background:#e4e6ec}
+.explanation-nav-row{justify-content:flex-start}.explanation-nav-row .lbl{min-width:46px}.msg.cited{outline:2px solid #ffb703}.msg.cited .mhead::after{content:" \00b7 cited by judge";font-weight:400;opacity:.9}
 .legacy-judgment{border:1px solid #d8dbe5;border-radius:8px;padding:8px;margin:14px 0}.muted{color:#858997;font-weight:normal}
 .legacy-score-table th{text-align:left;padding-right:20px}.legacy-score-table td{font-variant-numeric:tabular-nums}
-.message{border:1px solid #dfe2e9;border-radius:7px;margin:9px 0;background:#fff;scroll-margin-top:25px}
-.message header{padding:5px 9px;font:600 12px ui-monospace,monospace;background:#f3f4f7;border-bottom:1px solid #e1e3e9}
-.message pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:9px;font:12px/1.45 ui-monospace,monospace}
-.turn-index{color:#8b90a0;margin-left:4px}.message-reasoning,.unknown-content{padding:5px 9px;color:#696f7d}
-.tool-call{margin:7px 9px;border:1px solid #e0e2e8;border-radius:5px}.tool-call-head{padding:4px 7px;background:#f7f8fa;font-size:11px}
-.message-error{color:#9b311e}
+.msg{margin:10px 0;border-radius:6px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.07)}.msg pre{margin:0;padding:10px 14px;white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.45;background:#fff}.mhead{padding:4px 14px;font-size:11.5px;font-weight:700;letter-spacing:.4px}.mhead .aturn{font-weight:700;opacity:.78}.mhead .mtime{font-weight:500;letter-spacing:0;font-variant-numeric:tabular-nums;opacity:.55}:target .mhead{outline:3px solid #ffb703}
+.role-system .mhead{background:#6c757d;color:#fff}.role-user .mhead{background:#2456a6;color:#fff}.role-assistant .mhead{background:#1d7a4f;color:#fff}.role-assistant{background:#f0fff5}.role-assistant pre{background:#f0fff5}.role-tool .mhead{background:#8a5a00;color:#fff}.role-tool pre{background:#fffaf0}.role-other .mhead{background:#444;color:#fff}
+.think{margin:6px 0;background:#f3f1fb;border-left:3px solid #b7a8e0;border-radius:4px}.think>.thead{padding:3px 11px;font-size:9.5px;font-weight:700;letter-spacing:.5px;color:#7c6bb0;cursor:pointer;font-family:ui-monospace,Menlo,monospace}.think[open]>.thead{border-bottom:1px solid #ddd6f0}.think>pre{margin:0;padding:6px 11px;white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.45;color:#2c2540;background:transparent}
+.toolcall{margin:8px 0;border:1px solid rgba(0,0,0,.16);border-radius:6px;background:transparent;overflow:hidden}.toolcall .tchead{padding:3px 12px;font-size:11px;font-weight:700;letter-spacing:.3px;color:#155f3e;background:rgba(0,0,0,.045);font-family:ui-monospace,Menlo,monospace}.toolcall .tcname{font-size:12.5px}.toolcall pre.tcargs{margin:0;padding:7px 13px;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.45;color:#1f3d2b;background:transparent}
+.unknown-content{margin:8px 14px;padding:5px 9px;color:#696f7d;background:#f4f5f7;border:1px dashed #c4c8d0;border-radius:6px}.message-error{color:#9b311e}
+.msg.flash{animation:evidence-flash 1.1s ease-out}
 .judge-view{margin:14px 0;border:1px solid #cfd7e8;border-radius:10px;background:linear-gradient(135deg,#fbfcff,#f5f7fb);box-shadow:0 4px 14px rgba(49,61,90,.06)}
 .judge-view>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:10px 12px;list-style:none;font-size:14px;font-weight:700;color:#333b4f}
 .judge-view>summary::-webkit-details-marker,.judge-subsection>summary::-webkit-details-marker{display:none}.judge-view>summary:before,.judge-subsection>summary:before{content:"›";display:inline-block;color:#818ba0;transition:transform .15s}.judge-view>summary>span:first-of-type{margin-right:auto}.judge-view[open]>summary:before,.judge-subsection[open]>summary:before{transform:rotate(90deg)}
@@ -831,7 +889,7 @@ EVIDENCE_NAV_CSS = r"""
 .judge-exact{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:9px;background:#f7f8fa;border:1px solid #eceef2;border-radius:5px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#343946}.judge-dimension,.judge-artifact,.judge-tool,.judge-controls{margin:5px}.judge-artifact{scroll-margin-top:25px}
 .judge-scope-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px}.judge-scope-fact{border:1px solid #e6e9ef;border-radius:6px;padding:6px 8px;background:#fafbfc}.judge-scope-fact span{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:#8990a0}.judge-scope-fact strong{display:block;margin-top:2px;font-size:11px;font-weight:600;color:#464d5c}.judge-trajectory-link{display:inline-block;margin:8px 1px 1px;font-size:11px}.judge-unavailable{padding:9px;color:#916320;background:#fff8e8;border:1px solid #ead7a7;border-radius:6px;font-size:11px}.trajectory-panel{scroll-margin-top:20px}.trajectory-panel>summary{padding-bottom:0}.trajectory-panel[open]>summary{padding-bottom:8px;border-bottom:1px solid #eceef3}
 .judge-variable-slot{border:1px dashed #cbd3e2;background:#f8faff;border-radius:6px;padding:9px}.judge-variable-slot span{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#7c879e}.judge-variable-slot strong{display:block;margin-top:3px;font-size:11px;color:#4c566b}.generic-judge-stage{margin-top:10px}
-@media(max-width:700px){.dimension-row{flex-wrap:wrap}.dimension-label{width:82px}.dimension-why{max-width:100%;margin-left:0;width:100%}.justification-nav{right:7px;bottom:7px}}
+@media(max-width:700px){.dimension-row{flex-wrap:wrap}.dimension-label{width:82px}.dimension-why{max-width:100%;margin-left:0;width:100%}.cnav{right:7px;bottom:60px}}
 """
 
 
@@ -875,14 +933,18 @@ EVIDENCE_NAV_JS = r"""
     update();
   }
   document.querySelectorAll(".dimension-row").forEach(setup);
-  document.querySelectorAll(".justification-nav-row").forEach(function (row) {
-    var targetIds = parse(row, "data-justification-targets");
+  document.querySelectorAll(".explanation-nav-row").forEach(function (row) {
+    var targetIds = parse(row, "data-explanation-targets");
     var targets = targetIds.map(function (id) { return document.getElementById(id); })
       .filter(function (element) { return Boolean(element); });
-    if (!targets.length) { row.remove(); return; }
-    targets.forEach(function (element) { element.classList.add("justification-cited"); });
+    if (!targets.length) {
+      var emptyGroup = row.closest(".cnav-grp");
+      if (emptyGroup) emptyGroup.remove(); else row.remove();
+      return;
+    }
+    targets.forEach(function (element) { element.classList.add("cited"); });
     var index = -1;
-    var position = row.querySelector(".justification-position");
+    var position = row.querySelector(".explanation-position");
     position.textContent = "0 / " + targets.length;
     function go(direction) {
       index = (index + direction + targets.length) % targets.length;
@@ -898,28 +960,71 @@ EVIDENCE_NAV_JS = r"""
       element.classList.add("evidence-flash");
       position.textContent = (index + 1) + " / " + targets.length;
     }
-    row.querySelector(".justification-prev").addEventListener("click", function () {
+    row.querySelector(".explanation-prev").addEventListener("click", function () {
       go(-1);
     });
-    row.querySelector(".justification-next").addEventListener("click", function () {
+    row.querySelector(".explanation-next").addEventListener("click", function () {
       go(1);
     });
   });
-  var justificationNav = document.querySelector(".justification-nav");
-  if (justificationNav && !justificationNav.querySelector(".justification-nav-row")) {
-    justificationNav.remove();
+  // Copied from Petri: user turns are discovered from the rendered transcript so this
+  // works for every trajectory shape without a server-side list.
+  var users = Array.prototype.slice.call(document.querySelectorAll(".msg.role-user"));
+  var userGroup = document.getElementById("grp-user");
+  if (!users.length) {
+    if (userGroup) userGroup.style.display = "none";
+  } else {
+    var userIndex = -1;
+    var userLabel = document.getElementById("user-lbl");
+    var userCount = document.getElementById("user-cnt");
+    userLabel.textContent = "0 / " + users.length;
+    userCount.textContent = "(" + users.length + ")";
+    function goUser(direction) {
+      userIndex = (userIndex + direction + users.length) % users.length;
+      var element = users[userIndex];
+      element.scrollIntoView({behavior: "smooth", block: "center"});
+      element.classList.remove("flash");
+      void element.offsetWidth;
+      element.classList.add("flash");
+      userLabel.textContent = (userIndex + 1) + " / " + users.length;
+    }
+    document.getElementById("user-prev").addEventListener("click", function () {
+      goUser(-1);
+    });
+    document.getElementById("user-next").addEventListener("click", function () {
+      goUser(1);
+    });
+  }
+  var explanationNav = document.querySelector(".explanation-nav");
+  if (explanationNav && !Array.prototype.some.call(
+    explanationNav.querySelectorAll(".cnav-grp"),
+    function (group) { return group.style.display !== "none"; }
+  )) {
+    explanationNav.remove();
+  }
+  function openTargetParents(target) {
+    var parent = target.closest("details");
+    while (parent) {
+      parent.open = true;
+      parent = parent.parentElement ? parent.parentElement.closest("details") : null;
+    }
+  }
+  function openCurrentHash() {
+    if (!window.location.hash) return;
+    var target = document.getElementById(window.location.hash.slice(1));
+    if (!target) return;
+    openTargetParents(target);
+    target.scrollIntoView({block: "center"});
   }
   document.querySelectorAll('a[href^="#"]').forEach(function (link) {
     link.addEventListener("click", function () {
       var target = document.getElementById(link.getAttribute("href").slice(1));
       if (!target) return;
-      var parent = target.closest("details");
-      while (parent) {
-        parent.open = true;
-        parent = parent.parentElement ? parent.parentElement.closest("details") : null;
-      }
+      openTargetParents(target);
     });
   });
+  openCurrentHash();
+  window.addEventListener("hashchange", openCurrentHash);
 })();
 </script>
 """

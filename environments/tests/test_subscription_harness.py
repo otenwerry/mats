@@ -197,6 +197,17 @@ def test_codex_rollout_records_native_system_usage_and_quota(monkeypatch) -> Non
                 "payload": {
                     "type": "message",
                     "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "<environment_context>\n<cwd>/workspace</cwd>",
+                    }],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
                     "content": [{"type": "input_text", "text": "question"}],
                 },
             },
@@ -244,8 +255,14 @@ def test_codex_rollout_records_native_system_usage_and_quota(monkeypatch) -> Non
         "system",
         "system",
         "user",
+        "user",
         "assistant",
     ]
+    assert (parsed.messages[1].metadata or {}).get("native_role") == "developer"
+    assert (parsed.messages[2].metadata or {}).get("native_role") == (
+        "environment_context"
+    )
+    assert parsed.messages[3].metadata is None
     assert parsed.system_prompt_observed is True
     assert parsed.usage[0]["input"] == 75
     assert parsed.usage[0]["cache_read"] == 25

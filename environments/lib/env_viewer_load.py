@@ -351,11 +351,16 @@ def normalize_messages(
 
         error = getattr(message, "error", None)
         timing = timing_records[number - 1] if number <= len(timing_records) else {}
+        message_metadata = getattr(message, "metadata", None) or {}
         normalized.append({
             "number": number,
             "id": f"M{number}",
             "source_id": getattr(message, "id", None),
             "role": role,
+            "native_role": (
+                str(message_metadata.get("native_role"))
+                if message_metadata.get("native_role") else None
+            ),
             "text": text,
             "reasoning": reasoning,
             "other_content_blocks": other_blocks,
@@ -372,6 +377,38 @@ def normalize_messages(
             "user_turn": user_index if role == "user" else None,
         })
     return normalized
+
+
+_CODEX_NATIVE_USER_TAGS = ("environment_context", "user_instructions")
+
+
+def stamp_codex_native_roles(messages: list[dict]) -> None:
+    """Label Codex-injected preamble turns with their native identity.
+
+    Codex sends its instruction message under the OpenAI "developer" role
+    (stored as a second system message) and injects workspace facts as a
+    tagged user turn; both arrive before the first assistant turn. Roles and
+    numbering stay exactly what the model saw — this only fills native_role
+    for display. Parser-stamped metadata wins where present.
+    """
+
+    seen_system = False
+    for message in messages:
+        if message.get("role") == "assistant":
+            break
+        if message.get("native_role"):
+            seen_system = seen_system or message.get("role") == "system"
+            continue
+        if message.get("role") == "system":
+            if seen_system:
+                message["native_role"] = "developer"
+            seen_system = True
+        elif message.get("role") == "user":
+            text = str(message.get("text") or "").lstrip()
+            for tag in _CODEX_NATIVE_USER_TAGS:
+                if text.startswith(f"<{tag}>"):
+                    message["native_role"] = tag
+                    break
 
 
 def transcript_text(messages: list[dict]) -> str:
@@ -1115,6 +1152,8 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         attachments,
         _message_timings(sample, target_model),
     )
+    if ((real_env.get("harness") or {}).get("scaffold")) == "codex":
+        stamp_codex_native_roles(messages)
     present_messages = {message["number"] for message in messages}
     source_lookup = {
         "ids": {

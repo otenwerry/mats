@@ -890,13 +890,34 @@ def parse_codex_rollout(
                 if text:
                     materialize_pending()
                     emit_materialized(None)
-                    parsed.messages.append(ChatMessageSystem(content=text))
+                    parsed.messages.append(ChatMessageSystem(
+                        content=text,
+                        # Codex sends its harness instructions under the OpenAI
+                        # "developer" role; keep that identity on the record.
+                        metadata=(
+                            {"native_role": "developer"}
+                            if role == "developer" else None
+                        ),
+                    ))
             elif initial_session and role == "user":
                 text = _codex_content_text(payload.get("content"), "input_text", "text")
                 if text:
                     materialize_pending()
                     emit_materialized(None)
-                    parsed.messages.append(ChatMessageUser(content=text))
+                    injected = next(
+                        (
+                            tag
+                            for tag in ("environment_context", "user_instructions")
+                            if text.lstrip().startswith(f"<{tag}>")
+                        ),
+                        None,
+                    )
+                    parsed.messages.append(ChatMessageUser(
+                        content=text,
+                        # Codex injects these itself as user-role turns; the
+                        # controller never sent them.
+                        metadata={"native_role": injected} if injected else None,
+                    ))
             continue
         if outer_type == "response_item" and payload_type in {
             "function_call", "custom_tool_call", "local_shell_call"

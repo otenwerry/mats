@@ -1216,3 +1216,22 @@ def test_retry_attempt_logs_are_superseded_by_the_latest() -> None:
     ]
     assert "superseded" in final["load_issues"][0]
     assert "superseded_retry_attempts" not in other
+
+
+def test_codex_native_preamble_turns_get_native_role_labels() -> None:
+    messages = [
+        {"role": "system", "text": "You are Codex..."},
+        {"role": "system", "text": "<permissions instructions>..."},
+        {"role": "user", "text": "<environment_context>\n<cwd>/workspace</cwd>"},
+        {"role": "user", "text": "Please analyze the A/B test."},
+        {"role": "assistant", "text": "Working on it."},
+        {"role": "user", "text": "<environment_context> quoted later, untouched"},
+    ]
+    loader.stamp_codex_native_roles(messages)
+
+    assert messages[0].get("native_role") is None
+    assert messages[1]["native_role"] == "developer"
+    assert messages[2]["native_role"] == "environment_context"
+    assert messages[3].get("native_role") is None
+    # Stamping stops at the first assistant turn.
+    assert messages[5].get("native_role") is None
