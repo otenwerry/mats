@@ -155,6 +155,9 @@ class ParsedInvocation:
     # Model responses the CLI emitted without any usage record. Kept as a
     # queryable count so under-reported usage totals never pass silently.
     unmetered_model_calls: int = 0
+    # Codex's own cumulative session usage from its last token_count record;
+    # a stored cross-check for the summed per-response usage list.
+    native_total_usage: dict | None = None
 
 
 def _host_home() -> Path:
@@ -708,28 +711,23 @@ def parse_codex_rollout(
     from inspect_ai.tool import ToolCall
 
     parsed = ParsedInvocation(messages=[] if initial_session else list(prior_messages))
-    # One provider response can span several rollout items (reasoning, then a
-    # visible message, then tool calls) before its single token_count record.
-    # Accumulate them into ONE assistant message so no item is dropped and the
-    # usage attaches to the whole response.
+    # One provider response spans several rollout items in this order (verified
+    # against a real 0.146.1 rollout): reasoning, assistant message, tool calls,
+    # tool OUTPUTS, and only then its single token_count. So the assistant
+    # message must enter the transcript as soon as an output follows it (to keep
+    # message order), while the accounting event stays open until the usage
+    # arrives.
     pending_reasoning: list[ContentReasoning] = []
     pending_texts: list[ContentText] = []
     pending_tool_calls: list[ToolCall] = []
+    materialized: tuple[list[Any], Any] | None = None
 
-    def finish_pending(usage_raw: dict | None) -> None:
-        if not (pending_reasoning or pending_texts or pending_tool_calls):
+    def emit_materialized(usage_raw: dict | None) -> None:
+        nonlocal materialized
+        if materialized is None:
             return
-        assistant = ChatMessageAssistant(
-            content=[*pending_reasoning, *pending_texts] or "",
-            tool_calls=list(pending_tool_calls) or None,
-            model=routed_slug,
-            source="generate",
-        )
-        pending_reasoning.clear()
-        pending_texts.clear()
-        pending_tool_calls.clear()
-        event_input = list(parsed.messages)
-        parsed.messages.append(assistant)
+        event_input, assistant = materialized
+        materialized = None
         usage = _usage_record(usage_raw, openai_total_input=True)
         event = _emit_model_event(
             routed_slug=routed_slug,
@@ -745,6 +743,27 @@ def parse_codex_rollout(
         else:
             parsed.unmetered_model_calls += 1
         parsed.output = event.output
+
+    def materialize_pending() -> None:
+        nonlocal materialized
+        if not (pending_reasoning or pending_texts or pending_tool_calls):
+            return
+        # A new response is starting while an earlier one still awaits its
+        # token_count: emit the earlier one as unmetered instead of merging two
+        # responses into one message.
+        emit_materialized(None)
+        assistant = ChatMessageAssistant(
+            content=[*pending_reasoning, *pending_texts] or "",
+            tool_calls=list(pending_tool_calls) or None,
+            model=routed_slug,
+            source="generate",
+        )
+        pending_reasoning.clear()
+        pending_texts.clear()
+        pending_tool_calls.clear()
+        event_input = list(parsed.messages)
+        parsed.messages.append(assistant)
+        materialized = (event_input, assistant)
 
     for raw in records:
         outer_type = raw.get("type")
@@ -778,12 +797,14 @@ def parse_codex_rollout(
             elif initial_session and role in {"developer", "system"}:
                 text = _codex_content_text(payload.get("content"), "input_text", "text")
                 if text:
-                    finish_pending(None)
+                    materialize_pending()
+                    emit_materialized(None)
                     parsed.messages.append(ChatMessageSystem(content=text))
             elif initial_session and role == "user":
                 text = _codex_content_text(payload.get("content"), "input_text", "text")
                 if text:
-                    finish_pending(None)
+                    materialize_pending()
+                    emit_materialized(None)
                     parsed.messages.append(ChatMessageUser(content=text))
             continue
         if outer_type == "response_item" and payload_type in {
@@ -806,9 +827,9 @@ def parse_codex_rollout(
         if outer_type == "response_item" and payload_type in {
             "function_call_output", "custom_tool_call_output", "local_shell_call_output"
         }:
-            # Rollouts normally record token_count before outputs; flushing here
-            # only protects message order if a rollout ever inverts that.
-            finish_pending(None)
+            # The response's token_count arrives AFTER its outputs, so only
+            # place the assistant message; its accounting event stays open.
+            materialize_pending()
             parsed.messages.append(ChatMessageTool(
                 content=_text(payload.get("output")),
                 tool_call_id=str(payload.get("call_id") or "") or None,
@@ -817,7 +838,13 @@ def parse_codex_rollout(
             continue
         if outer_type == "event_msg" and payload_type == "token_count":
             info = payload.get("info") or {}
-            finish_pending(info.get("last_token_usage"))
+            materialize_pending()
+            emit_materialized(info.get("last_token_usage"))
+            total = info.get("total_token_usage")
+            if isinstance(total, dict):
+                parsed.native_total_usage = _usage_record(
+                    total, openai_total_input=True
+                )
             rate_limits = payload.get("rate_limits")
             if isinstance(rate_limits, dict):
                 parsed.rate_limits.append(rate_limits)
@@ -833,7 +860,8 @@ def parse_codex_rollout(
 
     # A future CLI may omit token_count on an otherwise successful final message.
     # Keep the response; the unmetered_model_calls counter records the gap.
-    finish_pending(None)
+    materialize_pending()
+    emit_materialized(None)
     return parsed
 
 
@@ -1160,6 +1188,7 @@ def build_subscription_agent(
                     "native_session_id_changed": session_id_change,
                     "usage": parsed.usage,
                     "unmetered_model_calls": parsed.unmetered_model_calls,
+                    "native_total_token_usage": parsed.native_total_usage,
                     "rate_limits": parsed.rate_limits,
                     "loss_events": parsed.loss_events,
                     "system_prompt_observed": parsed.system_prompt_observed,

@@ -167,7 +167,9 @@ def test_codex_rollout_records_native_system_usage_and_quota(monkeypatch) -> Non
 
 
 def test_codex_rollout_merges_one_turn_into_one_assistant_message(monkeypatch) -> None:
-    """A reasoning + message + tool-call turn is one response, not three."""
+    """One response = reasoning + message + tool calls, with its outputs BEFORE
+    its single token_count (real 0.146.1 rollout ordering, verified 2026-08-09).
+    The usage arriving after the outputs must still attach to the response."""
 
     monkeypatch.setattr(subscription, "_emit_model_event", _fake_emit)
     parsed = subscription.parse_codex_rollout(
@@ -197,15 +199,12 @@ def test_codex_rollout_merges_one_turn_into_one_assistant_message(monkeypatch) -
                 },
             },
             {
-                "type": "event_msg",
+                "type": "response_item",
                 "payload": {
-                    "type": "token_count",
-                    "info": {
-                        "last_token_usage": {
-                            "input_tokens": 40,
-                            "output_tokens": 10,
-                        }
-                    },
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call-2",
+                    "arguments": '{"command": "cat file.txt"}',
                 },
             },
             {
@@ -214,6 +213,30 @@ def test_codex_rollout_merges_one_turn_into_one_assistant_message(monkeypatch) -
                     "type": "function_call_output",
                     "call_id": "call-1",
                     "output": "file.txt",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-2",
+                    "output": "contents",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 40,
+                            "output_tokens": 10,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 40,
+                            "output_tokens": 10,
+                        },
+                    },
                 },
             },
         ],
@@ -227,14 +250,18 @@ def test_codex_rollout_merges_one_turn_into_one_assistant_message(monkeypatch) -
         "user",
         "assistant",
         "tool",
+        "tool",
     ]
     assistant = parsed.messages[1]
     assert assistant.tool_calls is not None
-    assert assistant.tool_calls[0].id == "call-1"
+    assert [call.id for call in assistant.tool_calls] == ["call-1", "call-2"]
     assert "running the check" in assistant.text
     assert len(parsed.usage) == 1
+    assert parsed.usage[0]["output"] == 10
     assert parsed.unmetered_model_calls == 0
+    assert parsed.native_total_usage["output"] == 10
     assert parsed.messages[2].tool_call_id == "call-1"
+    assert parsed.messages[3].tool_call_id == "call-2"
 
 
 def test_codex_rollout_counts_a_response_missing_its_token_count(monkeypatch) -> None:
