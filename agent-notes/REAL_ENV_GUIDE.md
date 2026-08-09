@@ -166,10 +166,15 @@ campaign on `--retry-failed`.
   scripted follow-ups. The generic `seeds/SYSTEM_PROMPT.txt` is not applied in this
   mode; only the scaffold's native system prompt is used. Native tools replace the
   simple file-tool schemas; ML `check_time` is retained as a bridged MCP tool.
-- `subscription` keeps the same scaffold/model/tool assignment and exact pins. Claude
-  Code and Codex run their native headless CLIs with a disposable copy of the user's
-  subscription login. OpenCode has no supported subscription path here and deliberately
-  delegates to the API-backed production adapter. Local preflight accepts Claude's
+- `subscription` keeps the same scaffold/model/tool assignment and exact CLI pins.
+  Claude Code and Codex run their native headless CLIs with a disposable copy of the
+  user's subscription login. One model caveat: ChatGPT-account Codex rejects dated API
+  snapshot names, so Codex requests the undated family name
+  (`codex_subscription_model`, e.g. `gpt-5.5-2026-04-23` → `gpt-5.5`); the served
+  snapshot is not pinnable and the harness metadata records
+  `subscription_model_requested` + `subscription_snapshot_pinning`. OpenCode has no
+  supported subscription path here and deliberately delegates to the API-backed
+  production adapter. Local preflight accepts Claude's
   OAuth env token, base64 credentials env (`CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64`),
   credentials file, or macOS keychain and Codex's access token,
   gzip-base64 auth JSON, raw base64 auth JSON, or auth file. AWS requires the
