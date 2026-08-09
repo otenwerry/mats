@@ -1036,9 +1036,12 @@ def build_subscription_agent(
                         stream=False,
                     )
                     if not result.success:
+                        # Both streams: CLIs put harmless notes on stderr and the
+                        # real JSON error events on stdout.
                         raise RuntimeError(
-                            f"Claude Code subscription agent failed ({result.returncode}): "
-                            + (result.stderr or result.stdout)[-2000:]
+                            f"Claude Code subscription agent failed ({result.returncode}); "
+                            f"stderr tail: {(result.stderr or '')[-1000:]!r}; "
+                            f"stdout tail: {(result.stdout or '')[-2000:]!r}"
                         )
                     parsed = parse_claude_stream(
                         _json_lines(result.stdout),
@@ -1121,8 +1124,9 @@ def build_subscription_agent(
                     )
                     if not result.success:
                         raise RuntimeError(
-                            f"Codex subscription agent failed ({result.returncode}): "
-                            + (result.stderr or result.stdout)[-2000:]
+                            f"Codex subscription agent failed ({result.returncode}); "
+                            f"stderr tail: {(result.stderr or '')[-1000:]!r}; "
+                            f"stdout tail: {(result.stdout or '')[-2000:]!r}"
                         )
                     stdout_records = _json_lines(result.stdout)
                     if initial:
