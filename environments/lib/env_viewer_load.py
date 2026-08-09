@@ -1191,6 +1191,11 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
             retrospective.get("condition")
             if retrospective is not None else run_metadata.get("condition")
         ),
+        "pressure": (
+            retrospective.get("pressure")
+            if retrospective is not None
+            else run_metadata.get("pressure") or real_env.get("pressure")
+        ),
         "judgment_role": (
             "retrospective_rejudge" if retrospective is not None else "official"
         ),
@@ -1392,6 +1397,39 @@ def attach_integrity_sidecar(mode_dir: Path, audits: list[dict]) -> list[dict]:
     return []
 
 
+def _supersede_retry_attempts(audits: list[dict]) -> list[dict]:
+    """Keep only the final eval-set attempt per trajectory identity.
+
+    Inspect ``eval_set`` retries a failed task by writing a NEW ``.eval`` file
+    into the same run directory, so a retried trajectory appears once per
+    attempt. The latest attempt is authoritative (eval-set never retries a
+    completed sample); earlier attempts are dropped here, with the drop stored
+    on the survivor and surfaced through its visible load issues.
+    """
+
+    groups: dict[str, list[dict]] = {}
+    for audit in audits:
+        groups.setdefault(traj_key(audit), []).append(audit)
+    survivors: dict[int, dict] = {}
+    for group in groups.values():
+        ordered = sorted(group, key=lambda item: str(item.get("log_file") or ""))
+        survivor = ordered[-1]
+        if len(ordered) > 1:
+            survivor["superseded_retry_attempts"] = [
+                {
+                    "log_file": earlier.get("log_file"),
+                    "real_ended_reason": earlier.get("real_ended_reason"),
+                }
+                for earlier in ordered[:-1]
+            ]
+            survivor.setdefault("load_issues", []).append(
+                f"{len(ordered) - 1} earlier retry attempt log(s) superseded by "
+                f"{survivor.get('log_file')}"
+            )
+        survivors[id(survivor)] = survivor
+    return [audit for audit in audits if id(audit) in survivors]
+
+
 async def load_mode(
     mode_dir: Path, *, cache_root: Path | None = None, use_cache: bool = True
 ) -> list[dict]:
@@ -1417,14 +1455,17 @@ async def load_mode(
         roles = getattr(log.eval, "model_roles", None) or {}
         run_metadata = _plain(getattr(log.eval, "metadata", None) or {})
         for sample in getattr(log, "samples", None) or []:
-            audits.append(sample_to_audit(
+            audit = sample_to_audit(
                 mode=mode_dir.name,
                 mode_mtime=mode_mtime,
                 task=str(log.eval.task),
                 run_metadata=run_metadata,
                 roles=roles,
                 sample=sample,
-            ))
+            )
+            audit["log_file"] = Path(str(getattr(log_info, "name", log_info))).name
+            audits.append(audit)
+    audits = _supersede_retry_attempts(audits)
     sidecar_issues = attach_remote_compute(mode_dir, audits)
     sidecar_issues.extend(attach_integrity_sidecar(mode_dir, audits))
     for audit in audits:
