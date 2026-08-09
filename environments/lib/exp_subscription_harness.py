@@ -158,6 +158,11 @@ class ParsedInvocation:
     # Codex's own cumulative session usage from its last token_count record;
     # a stored cross-check for the summed per-response usage list.
     native_total_usage: dict | None = None
+    # The CLI's own authoritative usage for THIS invocation (Claude result
+    # modelUsage). Claude's per-record usage snapshots are partial (verified
+    # live: they under-count output and repeat cache reads), so totals and the
+    # official Inspect tally come from here when present.
+    authoritative_usage: dict | None = None
 
 
 def _host_home() -> Path:
@@ -459,6 +464,19 @@ def _usage_record(raw: dict | None, *, openai_total_input: bool) -> dict:
     }
 
 
+def _sum_usage_records(records: Sequence[dict]) -> dict:
+    """Element-wise sum of usage records, reported only if any input was."""
+
+    totals = {
+        key: sum(int(record.get(key) or 0) for record in records)
+        for key in ("input", "output", "cache_read", "cache_write", "reasoning", "total")
+    }
+    return {
+        "reported": any(record.get("reported") for record in records),
+        **totals,
+    }
+
+
 def _inspect_usage(record: dict):
     from inspect_ai.model import ModelUsage
 
@@ -484,6 +502,7 @@ def _emit_model_event(
     assistant: Any,
     usage: dict,
     reasoning_effort: str | None,
+    record_usage: bool = True,
 ) -> Any:
     from inspect_ai.event import ModelEvent
     from inspect_ai.log import transcript
@@ -505,7 +524,8 @@ def _emit_model_event(
         output=output,
     )
     transcript()._event(event)
-    _record_subscription_usage(routed_slug, usage)
+    if record_usage:
+        _record_subscription_usage(routed_slug, usage)
     return event
 
 
@@ -560,6 +580,48 @@ def parse_claude_stream(
         getattr(message, "role", None) == "system" for message in parsed.messages
     ):
         parsed.messages.insert(0, ChatMessageSystem(content=CLAUDE_HIDDEN_SYSTEM_MARKER))
+
+    # Claude Code streams one assistant record PER CONTENT BLOCK; records
+    # sharing a message id are chunks of ONE provider response (a thinking-only
+    # chunk is not an empty response). Each record repeats a partial usage
+    # snapshot, so usage is taken once per response, from the last snapshot.
+    pending_id: str | None = None
+    pending_content: list[Any] = []
+    pending_tool_calls: list[Any] = []
+    pending_usage_raw: dict | None = None
+
+    def flush_response() -> None:
+        nonlocal pending_id, pending_usage_raw
+        if pending_content or pending_tool_calls:
+            assistant = ChatMessageAssistant(
+                content=list(pending_content) or "",
+                tool_calls=list(pending_tool_calls) or None,
+                model=routed_slug,
+                source="generate",
+            )
+            usage = _usage_record(pending_usage_raw, openai_total_input=False)
+            event = _emit_model_event(
+                routed_slug=routed_slug,
+                input_messages=parsed.messages,
+                assistant=assistant,
+                usage=usage,
+                reasoning_effort="medium" if reasoning else None,
+                # Snapshots are partial; the official tally is recorded once
+                # per invocation from the authoritative result usage.
+                record_usage=False,
+            )
+            parsed.messages.append(assistant)
+            parsed.model_events.append(event)
+            if usage["reported"]:
+                parsed.usage.append(usage)
+            else:
+                parsed.unmetered_model_calls += 1
+            parsed.output = event.output
+        pending_id = None
+        pending_content.clear()
+        pending_tool_calls.clear()
+        pending_usage_raw = None
+
     for raw in records:
         record_type = raw.get("type")
         if record_type == "system":
@@ -586,57 +648,46 @@ def parse_claude_stream(
             continue
         if record_type == "assistant":
             message = raw.get("message") or {}
-            content = []
-            tool_calls = []
+            message_id = str(message.get("id") or "") or None
+            if pending_id is not None and message_id != pending_id:
+                flush_response()
+            pending_id = message_id
             for block in message.get("content") or []:
                 if not isinstance(block, dict):
                     continue
                 kind = block.get("type")
                 if kind == "text":
-                    content.append(ContentText(text=str(block.get("text") or "")))
+                    pending_content.append(
+                        ContentText(text=str(block.get("text") or ""))
+                    )
                 elif kind == "thinking":
                     thinking = str(block.get("thinking") or "")
-                    content.append(ContentReasoning(
+                    pending_content.append(ContentReasoning(
                         reasoning=thinking,
                         summary=thinking or None,
                         signature=block.get("signature"),
                     ))
                 elif kind == "redacted_thinking":
-                    content.append(ContentReasoning(
+                    pending_content.append(ContentReasoning(
                         reasoning="",
                         summary=None,
                         redacted=True,
                         internal={"redacted_data_present": bool(block.get("data"))},
                     ))
                 elif kind == "tool_use":
-                    tool_calls.append(ToolCall(
+                    pending_tool_calls.append(ToolCall(
                         id=str(block.get("id") or uuid.uuid4().hex),
                         function=str(block.get("name") or "unknown_tool"),
                         arguments=_arguments(block.get("input")),
                     ))
-            assistant = ChatMessageAssistant(
-                content=content or "",
-                tool_calls=tool_calls or None,
-                model=routed_slug,
-                source="generate",
-            )
-            usage = _usage_record(message.get("usage"), openai_total_input=False)
-            event = _emit_model_event(
-                routed_slug=routed_slug,
-                input_messages=parsed.messages,
-                assistant=assistant,
-                usage=usage,
-                reasoning_effort="medium" if reasoning else None,
-            )
-            parsed.messages.append(assistant)
-            parsed.model_events.append(event)
-            if usage["reported"]:
-                parsed.usage.append(usage)
-            else:
-                parsed.unmetered_model_calls += 1
-            parsed.output = event.output
+            if isinstance(message.get("usage"), dict):
+                pending_usage_raw = message["usage"]
+            if message_id is None:
+                # No id to group by: treat this record as a complete response.
+                flush_response()
             continue
         if record_type == "user":
+            flush_response()
             for block in (raw.get("message") or {}).get("content") or []:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
@@ -651,11 +702,14 @@ def parse_claude_stream(
                 ))
             continue
         if record_type == "result":
+            flush_response()
             parsed.native_session_id = (
                 str(raw.get("session_id") or "") or parsed.native_session_id
             )
             # total_cost_usd is an API-list equivalent for subscribers, not a bill.
             model_usage = raw.get("modelUsage") or raw.get("model_usage") or {}
+            if not isinstance(model_usage, dict):
+                model_usage = {}
             parsed.rate_limits.append({
                 "source": "claude_code_result",
                 "session_id": raw.get("session_id"),
@@ -663,9 +717,46 @@ def parse_claude_stream(
                 "duration_ms": raw.get("duration_ms"),
                 "duration_api_ms": raw.get("duration_api_ms"),
                 "api_list_equivalent_usd": raw.get("total_cost_usd"),
-                "model_usage": model_usage if isinstance(model_usage, dict) else {},
+                "model_usage": model_usage,
             })
+            authoritative = _claude_result_usage(model_usage)
+            if authoritative is not None:
+                parsed.authoritative_usage = authoritative
+    flush_response()
     return parsed
+
+
+def _claude_result_usage(model_usage: dict) -> dict | None:
+    """This invocation's authoritative usage from Claude's own result record.
+
+    Covers every model the CLI used (helper models included), unlike the
+    partial per-record stream snapshots.
+    """
+
+    by_model: dict[str, dict] = {}
+    totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    for model_name, raw in model_usage.items():
+        if not isinstance(raw, dict):
+            continue
+        row = {
+            "input": int(raw.get("inputTokens") or 0),
+            "output": int(raw.get("outputTokens") or 0),
+            "cache_read": int(raw.get("cacheReadInputTokens") or 0),
+            "cache_write": int(raw.get("cacheCreationInputTokens") or 0),
+        }
+        by_model[str(model_name)] = row
+        for key in totals:
+            totals[key] += row[key]
+    if not by_model:
+        return None
+    return {
+        "reported": True,
+        **totals,
+        "reasoning": None,
+        "total": sum(totals.values()),
+        "source": "claude_code_result_model_usage",
+        "by_model": by_model,
+    }
 
 
 def _codex_content_text(content: Any, *types: str) -> str:
@@ -1090,6 +1181,12 @@ def build_subscription_agent(
                             "to": parsed.native_session_id,
                         }
                         session_ref.value = parsed.native_session_id
+                    # One official tally record per invocation, from Claude's
+                    # own accounting (stream snapshots are partial).
+                    _record_subscription_usage(
+                        routed_slug,
+                        parsed.authoritative_usage or _sum_usage_records(parsed.usage),
+                    )
                 else:
                     binary = await ensure_agent_binary_installed(
                         codex_cli_binary_source(),
@@ -1187,6 +1284,7 @@ def build_subscription_agent(
                     "native_session_id": session_ref.value,
                     "native_session_id_changed": session_id_change,
                     "usage": parsed.usage,
+                    "authoritative_usage": parsed.authoritative_usage,
                     "unmetered_model_calls": parsed.unmetered_model_calls,
                     "native_total_token_usage": parsed.native_total_usage,
                     "rate_limits": parsed.rate_limits,
@@ -1240,8 +1338,20 @@ def subscription_agent_record(session_ref: NativeSessionRef | None) -> dict:
         for invocation in session_ref.invocations
         for usage in invocation.get("usage") or []
     ]
+    per_invocation_usage: list[dict] = []
+    usage_sources: list[str] = []
+    for invocation in session_ref.invocations:
+        authoritative = invocation.get("authoritative_usage")
+        if isinstance(authoritative, dict) and authoritative.get("reported"):
+            per_invocation_usage.append(authoritative)
+            usage_sources.append("cli_reported_result_usage")
+        else:
+            per_invocation_usage.append(
+                _sum_usage_records(invocation.get("usage") or [])
+            )
+            usage_sources.append("per_call_stream_sum")
     usage_totals = {
-        key: sum(int(usage.get(key) or 0) for usage in all_usage)
+        key: sum(int(usage.get(key) or 0) for usage in per_invocation_usage)
         for key in ("input", "output", "cache_read", "cache_write", "reasoning", "total")
     }
     native_versions = list(dict.fromkeys(
@@ -1280,6 +1390,7 @@ def subscription_agent_record(session_ref: NativeSessionRef | None) -> dict:
         "native_versions": native_versions,
         "native_version": native_versions[-1] if native_versions else None,
         "usage_totals": usage_totals,
+        "usage_totals_source": sorted(set(usage_sources)),
         "all_usage": all_usage,
         "all_rate_limits": [
             snapshot

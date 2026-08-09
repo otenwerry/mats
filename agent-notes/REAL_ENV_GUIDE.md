@@ -241,7 +241,15 @@ campaign on `--retry-failed`.
   lookup would otherwise price it as the underlying API model. CLI responses lacking a
   usage record are counted in `unmetered_model_call_count` (shown on the viewer's
   subscription-usage line), and the summed `api_list_equivalent_usd_total` appears as
-  the metadata cell "agent cost (API-list equivalent)". Claude Code does not expose its complete native system prompt;
+  the metadata cell "agent cost (API-list equivalent)".
+  Claude Code streams one assistant record PER CONTENT BLOCK (verified live: 119
+  records = 37 responses) with repeated partial usage snapshots; the parser merges
+  records sharing a message id into one assistant message/model event (a
+  thinking-only chunk is not an "empty response"), and both `usage_totals` and the
+  official tally come from the result record's own `modelUsage`
+  (`authoritative_usage`, `usage_totals_source`) rather than snapshot sums, which
+  under-count output and over-count cache reads. Codex per-response `token_count`
+  sums were verified exact and stay authoritative there. Claude Code does not expose its complete native system prompt;
   each affected output stores `native_system_prompt_unavailable` and both judges/viewer
   show the evidence caveat. Codex rollout state exposes its native base/developer prompt.
 

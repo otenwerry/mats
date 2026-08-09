@@ -86,6 +86,93 @@ def test_claude_stream_records_hidden_system_prompt_and_subscription_usage(
     assert parsed.unmetered_model_calls == 0
 
 
+def test_claude_per_block_records_merge_into_one_response(monkeypatch) -> None:
+    """Claude Code streams one record per content block; blocks sharing a
+    message id are ONE response (a thinking-only chunk is not an empty
+    response), and usage comes once per response from the last snapshot."""
+
+    monkeypatch.setattr(subscription, "_emit_model_event", _fake_emit)
+    parsed = subscription.parse_claude_stream(
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [{"type": "thinking", "thinking": "let me look"}],
+                    "usage": {"input_tokens": 3, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "text", "text": "checking the file"},
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Read",
+                            "input": {"file_path": "/workspace/a.py"},
+                        },
+                    ],
+                    "usage": {"input_tokens": 3, "output_tokens": 20},
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "tool-1",
+                        "content": "print('hi')",
+                    }],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_2",
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": {"input_tokens": 9, "output_tokens": 5},
+                },
+            },
+            {
+                "type": "result",
+                "session_id": "session",
+                "total_cost_usd": 0.5,
+                "modelUsage": {
+                    "claude-opus-4-6": {
+                        "inputTokens": 12,
+                        "outputTokens": 700,
+                        "cacheReadInputTokens": 1000,
+                        "cacheCreationInputTokens": 50,
+                    },
+                },
+            },
+        ],
+        prior_messages=[ChatMessageUser(content="question")],
+        routed_slug="anthropic/claude-opus-4-6",
+        reasoning=True,
+        include_system_marker=False,
+    )
+
+    assert [message.role for message in parsed.messages] == [
+        "user", "assistant", "tool", "assistant",
+    ]
+    merged = parsed.messages[1]
+    assert merged.tool_calls is not None and merged.tool_calls[0].id == "tool-1"
+    assert "checking the file" in merged.text
+    assert any(
+        getattr(block, "reasoning", None) == "let me look"
+        for block in merged.content
+    )
+    assert [usage["output"] for usage in parsed.usage] == [20, 5]
+    assert parsed.unmetered_model_calls == 0
+    assert parsed.authoritative_usage["output"] == 700
+    assert parsed.authoritative_usage["cache_read"] == 1000
+    assert parsed.authoritative_usage["by_model"]["claude-opus-4-6"]["output"] == 700
+
+
 def test_codex_rollout_records_native_system_usage_and_quota(monkeypatch) -> None:
     monkeypatch.setattr(subscription, "_emit_model_event", _fake_emit)
     parsed = subscription.parse_codex_rollout(
@@ -360,8 +447,15 @@ def test_subscription_agent_record_aggregates_dollars_and_unmetered_calls() -> N
     session_ref = subscription.NativeSessionRef(value="session")
     session_ref.invocations = [
         {
-            "usage": [{"input": 100, "output": 10, "cache_read": 0,
-                       "cache_write": 0, "reasoning": 0, "total": 110}],
+            # Partial stream snapshots lose to the CLI's own reported usage.
+            "usage": [{"reported": True, "input": 100, "output": 10,
+                       "cache_read": 0, "cache_write": 0, "reasoning": 0,
+                       "total": 110}],
+            "authoritative_usage": {
+                "reported": True, "input": 120, "output": 900,
+                "cache_read": 5000, "cache_write": 40, "reasoning": None,
+                "total": 6060,
+            },
             "unmetered_model_calls": 0,
             "rate_limits": [{
                 "source": "claude_code_result",
@@ -369,7 +463,10 @@ def test_subscription_agent_record_aggregates_dollars_and_unmetered_calls() -> N
             }],
         },
         {
-            "usage": [],
+            "usage": [{"reported": True, "input": 7, "output": 3,
+                       "cache_read": 0, "cache_write": 0, "reasoning": 0,
+                       "total": 10}],
+            "authoritative_usage": None,
             "unmetered_model_calls": 1,
             "rate_limits": [{
                 "source": "claude_code_result",
@@ -384,8 +481,12 @@ def test_subscription_agent_record_aggregates_dollars_and_unmetered_calls() -> N
     assert record["api_list_equivalent_usd_per_invocation"] == [0.10, 0.05]
     assert abs(record["api_list_equivalent_usd_total"] - 0.15) < 1e-9
     assert record["unmetered_model_call_count"] == 1
-    assert record["model_call_count"] == 1
-    assert record["usage_totals"]["input"] == 100
+    assert record["model_call_count"] == 2
+    assert record["usage_totals"]["output"] == 903
+    assert record["usage_totals"]["input"] == 127
+    assert record["usage_totals_source"] == [
+        "cli_reported_result_usage", "per_call_stream_sum",
+    ]
 
 
 def test_subscription_resume_requires_a_native_session_id() -> None:
