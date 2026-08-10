@@ -361,6 +361,10 @@ def normalize_messages(
                 str(message_metadata.get("native_role"))
                 if message_metadata.get("native_role") else None
             ),
+            "scaffold_injected": (
+                str(message_metadata.get("scaffold_injected"))
+                if message_metadata.get("scaffold_injected") else None
+            ),
             "text": text,
             "reasoning": reasoning,
             "other_content_blocks": other_blocks,
@@ -383,20 +387,20 @@ _CODEX_NATIVE_USER_TAGS = ("environment_context", "user_instructions")
 
 
 def stamp_codex_native_roles(messages: list[dict]) -> None:
-    """Label Codex-injected preamble turns with their native identity.
+    """Recover Codex-native identity for runs stored before parser stamping.
 
-    Codex sends its instruction message under the OpenAI "developer" role
-    (stored as a second system message) and injects workspace facts as a
-    tagged user turn; both arrive before the first assistant turn. Roles and
-    numbering stay exactly what the model saw — this only fills native_role
-    for display. Parser-stamped metadata wins where present.
+    Codex sends its instruction message under the OpenAI "developer" role —
+    the true wire role, typed as a second system message only because Inspect
+    has no developer message type — and injects workspace facts as tagged,
+    genuinely user-role turns. Both arrive before the first assistant turn.
+    M#/U# numbering stays what the model saw. Parser-stamped metadata wins.
     """
 
     seen_system = False
     for message in messages:
         if message.get("role") == "assistant":
             break
-        if message.get("native_role"):
+        if message.get("native_role") or message.get("scaffold_injected"):
             seen_system = seen_system or message.get("role") == "system"
             continue
         if message.get("role") == "system":
@@ -407,7 +411,7 @@ def stamp_codex_native_roles(messages: list[dict]) -> None:
             text = str(message.get("text") or "").lstrip()
             for tag in _CODEX_NATIVE_USER_TAGS:
                 if text.startswith(f"<{tag}>"):
-                    message["native_role"] = tag
+                    message["scaffold_injected"] = tag
                     break
 
 

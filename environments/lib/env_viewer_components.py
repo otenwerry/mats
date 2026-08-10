@@ -838,11 +838,12 @@ def render_transcript(messages: list[dict]) -> str:
             body += f'<pre class="message-error">{_json_block(message["error"])}</pre>'
         if not body:
             body = "<pre></pre>"
-        native_role = message.get("native_role")
+        # native_role is the true wire role (Inspect typing has no developer
+        # role); scaffold_injected tags content the scaffold sent itself.
+        display_role = message.get("native_role") or role
+        injected_tag = message.get("scaffold_injected")
         role_label = (
-            f"{role} · {native_role}"
-            if native_role and native_role != role
-            else role
+            f"{display_role} · {injected_tag}" if injected_tag else display_role
         )
         rows.append(
             f'<div class="msg role-{role_class}" id="M{number}" '

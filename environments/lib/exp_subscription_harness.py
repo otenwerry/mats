@@ -914,9 +914,9 @@ def parse_codex_rollout(
                     )
                     parsed.messages.append(ChatMessageUser(
                         content=text,
-                        # Codex injects these itself as user-role turns; the
-                        # controller never sent them.
-                        metadata={"native_role": injected} if injected else None,
+                        # Genuinely user-role on the wire, but Codex injected
+                        # the content itself; the controller never sent it.
+                        metadata={"scaffold_injected": injected} if injected else None,
                     ))
             continue
         if outer_type == "response_item" and payload_type in {

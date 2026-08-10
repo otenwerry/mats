@@ -1231,7 +1231,10 @@ def test_codex_native_preamble_turns_get_native_role_labels() -> None:
 
     assert messages[0].get("native_role") is None
     assert messages[1]["native_role"] == "developer"
-    assert messages[2]["native_role"] == "environment_context"
+    assert messages[2]["scaffold_injected"] == "environment_context"
+    assert messages[2].get("native_role") is None
     assert messages[3].get("native_role") is None
+    assert messages[3].get("scaffold_injected") is None
     # Stamping stops at the first assistant turn.
     assert messages[5].get("native_role") is None
+    assert messages[5].get("scaffold_injected") is None

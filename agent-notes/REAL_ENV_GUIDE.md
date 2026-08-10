@@ -252,11 +252,13 @@ campaign on `--retry-failed`.
   sums were verified exact and stay authoritative there.
   Codex natively sends a second instruction message under the OpenAI "developer"
   role and injects `<environment_context>`/`<user_instructions>` blocks as USER-role
-  turns before the first assistant turn. Roles and M#/U# numbering stay exactly what
-  the model saw; the transcript labels them "system · developer" /
-  "user · environment_context" via `native_role` (parser metadata for new runs,
-  `stamp_codex_native_roles` heuristic for stored ones). Codex trajectories therefore
-  always carry one more user turn than the controller sent.
+  turns before the first assistant turn. M#/U# numbering stays exactly what the
+  model saw. The stored metadata separates two truths: `native_role` = the true wire
+  role ("developer" — typed as a system message only because Inspect has no
+  developer type; shown as "developer"), and `scaffold_injected` = a content tag on
+  genuinely user-role turns (shown as "user · environment_context"). Parser metadata
+  covers new runs; `stamp_codex_native_roles` recovers both for stored ones. Codex
+  trajectories therefore always carry one more user turn than the controller sent.
   Claude Code does not expose its complete native system prompt;
   each affected output stores `native_system_prompt_unavailable` and both judges/viewer
   show the evidence caveat. Codex rollout state exposes its native base/developer prompt.

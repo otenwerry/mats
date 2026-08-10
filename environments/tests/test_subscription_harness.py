@@ -259,7 +259,7 @@ def test_codex_rollout_records_native_system_usage_and_quota(monkeypatch) -> Non
         "assistant",
     ]
     assert (parsed.messages[1].metadata or {}).get("native_role") == "developer"
-    assert (parsed.messages[2].metadata or {}).get("native_role") == (
+    assert (parsed.messages[2].metadata or {}).get("scaffold_injected") == (
         "environment_context"
     )
     assert parsed.messages[3].metadata is None
