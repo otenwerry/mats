@@ -11,8 +11,12 @@ import pathlib
 import sys
 import tomllib
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 from inspect_ai.model import ChatMessageUser
+from inspect_ai.tool import MCPServerConfigHTTP
+from inspect_swe._util.toml import to_toml
 
 
 ENVIRONMENTS = pathlib.Path(__file__).resolve().parents[1]
@@ -22,6 +26,7 @@ import exp_subscription_harness as subscription  # noqa: E402
 from cost_tracking import estimate_usage_cost  # noqa: E402
 from exp_target_harness import (  # noqa: E402
     codex_subscription_model,
+    opencode_go_model_spec,
     subscription_harness_metadata,
 )
 
@@ -412,6 +417,141 @@ def test_subscription_metadata_and_cost_are_explicitly_not_metered() -> None:
         "source": "subscription_not_metered",
     }
 
+    go_metadata = subscription_harness_metadata(
+        "qwen3.7-max", "openrouter/qwen/qwen3.7-max"
+    )
+    assert go_metadata["agent_billing"] == "subscription_included_usage"
+    assert go_metadata["subscription_provider"] == "opencode_go"
+    assert go_metadata["subscription_model_requested"] == (
+        "opencode-go/qwen3.7-max"
+    )
+    assert go_metadata["credential_isolation"]["sandbox_copy"] is False
+    assert go_metadata["network_policy"]["container"] == "none"
+    assert estimate_usage_cost(
+        "anthropic/opencode-go/qwen3.7-max",
+        {"input": 100, "output": 10, "total_cost": 99.0},
+    )["source"] == "subscription_not_metered"
+
+    fallback = subscription_harness_metadata(
+        "qwen3-32b", "openrouter/qwen/qwen3-32b"
+    )
+    assert fallback["agent_billing"] == "api_fallback"
+    assert fallback["per_run_agent_cost_available"] is True
+
+
+def test_opencode_go_catalog_mapping_is_explicit() -> None:
+    assert opencode_go_model_spec(
+        "qwen3.7-max", "openrouter/qwen/qwen3.7-max"
+    ) == {
+        "model": "qwen3.7-max",
+        "protocol": "anthropic",
+        "output_tokens": 65_536,
+    }
+    assert opencode_go_model_spec(
+        "glm-5.2", "openrouter/z-ai/glm-5.2"
+    ) == {
+        "model": "glm-5.2",
+        "protocol": "openai_compatible",
+        "output_tokens": 131_072,
+    }
+    assert opencode_go_model_spec(
+        "qwen3-32b", "openrouter/qwen/qwen3-32b"
+    ) is None
+
+
+def test_opencode_go_auth_uses_official_env_name_and_rejects_reasoning_off(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(subscription.OPENCODE_GO_API_KEY_ENV, "test-go-key")
+    assert subscription.require_opencode_go_auth(reasoning=True) == (
+        subscription.OPENCODE_GO_API_KEY_ENV
+    )
+    with pytest.raises(SystemExit, match="reasoning=yes"):
+        subscription.require_opencode_go_auth(reasoning=False)
+
+
+def test_opencode_go_model_stays_on_host_and_is_aliased_into_bridge(
+    monkeypatch,
+) -> None:
+    host_model = object()
+    monkeypatch.setattr(subscription, "build_opencode_go_model", lambda *a, **k: host_model)
+    with (
+        patch("exp_target_harness.assert_inspect_swe_pin"),
+        patch(
+            "exp_target_harness.build_production_agent",
+            return_value=("go-agent", None),
+        ) as build,
+    ):
+        agent, session_ref = subscription.build_subscription_agent(
+            "qwen3.7-max",
+            "openrouter/qwen/qwen3.7-max",
+            reasoning=True,
+        )
+
+    assert agent == "go-agent" and session_ref is None
+    kwargs = build.call_args.kwargs
+    assert kwargs["opencode_model_override"] == "opencode-go/qwen3.7-max"
+    assert kwargs["opencode_model_aliases"] == {
+        "qwen3.7-max": host_model,
+        "opencode-go/qwen3.7-max": host_model,
+    }
+    assert subscription.OPENCODE_GO_API_KEY_ENV not in kwargs
+
+
+def test_opencode_go_host_model_uses_the_documented_wire_protocol(monkeypatch) -> None:
+    monkeypatch.setenv(subscription.OPENCODE_GO_API_KEY_ENV, "test-go-key")
+    with patch("inspect_ai.model.get_model", side_effect=["qwen", "glm"]) as get:
+        assert subscription.build_opencode_go_model(
+            "qwen3.7-max",
+            "openrouter/qwen/qwen3.7-max",
+            reasoning=True,
+        ) == "qwen"
+        assert subscription.build_opencode_go_model(
+            "glm-5.2",
+            "openrouter/z-ai/glm-5.2",
+            reasoning=True,
+        ) == "glm"
+
+    qwen_call, glm_call = get.call_args_list
+    assert qwen_call.args == ("anthropic/opencode-go/qwen3.7-max",)
+    assert qwen_call.kwargs["role"] == "target"
+    assert qwen_call.kwargs["config"].max_tokens == 65_536
+    assert qwen_call.kwargs["base_url"] == subscription.OPENCODE_GO_BASE_URL
+    assert qwen_call.kwargs["api_key"] == "test-go-key"
+    assert glm_call.args == ("openai-api/opencode-go/glm-5.2",)
+    assert glm_call.kwargs["role"] == "target"
+    assert glm_call.kwargs["config"].max_tokens == 131_072
+    assert glm_call.kwargs["base_url"] == subscription.OPENCODE_GO_BASE_URL
+    assert glm_call.kwargs["api_key"] == "test-go-key"
+    assert glm_call.kwargs["responses_api"] is False
+    assert glm_call.kwargs["strict_tools"] is False
+
+
+def test_opencode_go_host_model_providers_construct_without_other_api_keys(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(subscription.OPENCODE_GO_API_KEY_ENV, "test-go-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    qwen = subscription.build_opencode_go_model(
+        "qwen3.7-max",
+        "openrouter/qwen/qwen3.7-max",
+        reasoning=True,
+    )
+    glm = subscription.build_opencode_go_model(
+        "glm-5.2",
+        "openrouter/z-ai/glm-5.2",
+        reasoning=True,
+    )
+
+    assert qwen.api.service_model_name() == "qwen3.7-max"
+    assert qwen.api.base_url == subscription.OPENCODE_GO_BASE_URL
+    assert qwen.config.max_tokens == 65_536
+    assert glm.api.service_model_name() == "glm-5.2"
+    assert glm.api.base_url == subscription.OPENCODE_GO_BASE_URL
+    assert glm.config.max_tokens == 131_072
+
 
 def test_subscription_native_reported_version_must_match_pin() -> None:
     harness = {
@@ -442,6 +582,49 @@ def test_codex_subscription_model_drops_the_unsupported_snapshot_date() -> None:
     )
     claude = subscription_harness_metadata("opus-4.6", "anthropic/claude-opus-4-6")
     assert "subscription_model_requested" not in claude
+
+
+def test_codex_bridge_config_translates_inspect_mcp_schema() -> None:
+    mcp = MCPServerConfigHTTP(
+        name="environment",
+        type="http",
+        url="http://localhost:1234/mcp/environment",
+        tools=["check_time"],
+    )
+
+    config_text = to_toml(
+        {"mcp_servers.environment": subscription._codex_mcp_server_config(mcp)}
+    )
+    parsed = tomllib.loads(config_text)
+
+    assert parsed["mcp_servers"]["environment"] == {
+        "url": "http://localhost:1234/mcp/environment",
+        "enabled_tools": ["check_time"],
+    }
+    assert "type =" not in config_text
+
+
+def test_codex_bridge_config_rejects_legacy_sse() -> None:
+    mcp = MCPServerConfigHTTP(
+        name="environment",
+        type="sse",
+        url="http://localhost:1234/mcp/environment",
+    )
+
+    with pytest.raises(RuntimeError, match="requires streamable HTTP"):
+        subscription._codex_mcp_server_config(mcp)
+
+
+def test_codex_bridge_config_rejects_headers_the_toml_writer_would_drop() -> None:
+    mcp = MCPServerConfigHTTP(
+        name="environment",
+        type="http",
+        url="http://localhost:1234/mcp/environment",
+        headers={"X-Bridge": "local"},
+    )
+
+    with pytest.raises(RuntimeError, match="does not support MCP headers"):
+        subscription._codex_mcp_server_config(mcp)
 
 
 def test_missing_native_version_is_flagged_not_silent() -> None:
@@ -650,11 +833,17 @@ def test_subscription_native_tools_cannot_read_cli_credentials() -> None:
     assert claude["sandbox"]["enabled"] is True
     assert claude["sandbox"]["failIfUnavailable"] is True
     assert claude["sandbox"]["allowUnsandboxedCommands"] is False
+    assert claude["sandbox"]["enableWeakerNestedSandbox"] is True
     assert "/root/.claude" in claude["sandbox"]["filesystem"]["denyRead"]
     assert "Read(//root/.claude/**)" in claude["permissions"]["deny"]
     assert claude["sandbox"]["credentials"]["envVars"] == [
         {"name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny"}
     ]
+    # Claude Code's general subprocess scrub forces its stronger /proc setup and
+    # breaks nested bubblewrap. The credential-specific rules above remain active.
+    assert "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB" not in (
+        subscription._subscription_env_base()
+    )
 
     codex = subscription._codex_security_config(
         model="gpt-5.6-sol", reasoning=True
@@ -691,4 +880,7 @@ def test_subscription_images_install_required_nested_sandbox_helpers() -> None:
     ):
         compose = (ENVIRONMENTS / relative).read_text()
         assert "seccomp:unconfined" in compose
+        assert "apparmor:unconfined" in compose
+        assert "cap_add" not in compose
+        assert "privileged:" not in compose
         assert "mats-environments-" in compose

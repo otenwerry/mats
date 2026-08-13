@@ -37,8 +37,8 @@ INVARIANTS enforced before any paid work:
   setting, scaffold, exact scaffold version, and exact Inspect SWE version;
 - a trajectory-sourced prefix must not share a seed with the new task;
 - integrity-excluded and rejudge trajectories are refused as prefixes;
-- a prefix ending on unresolved tool calls gets a neutral synthetic closer,
-  surfaced and stored, never silent.
+- a prefix ending on unresolved tool calls is refused before any model call; no tool
+  result is invented.
 
 This file makes no API calls itself; it builds plans and Inspect tasks that the
 ``exp_continuation_pipeline.py`` endpoint runs. The ``exp_`` prefix follows the
@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 import base64
@@ -61,16 +62,17 @@ from pydantic import TypeAdapter
 from continuation_evidence import (
     CONTINUATION_RECORD_VERSION,
     ContinuationRun,
-    close_dangling_tool_calls,
     continuation_record,
     pivot_preamble,
     prefix_boundary_index,
+    reject_dangling_tool_calls,
     seed_family_task_description,
 )
 from exp_real_audit import assemble_real_protocol, build_real_task
 from exp_target_harness import (
     NATIVE_HARNESS_MODES,
     native_resume_record,
+    opencode_go_model_spec,
     production_scaffold_for_target,
     resolve_harness,
     validate_native_resume_bundle,
@@ -90,6 +92,7 @@ from protocol_sources import (
     seed_members,
     strip_thinking_instruction,
 )
+from real_integrity import sample_integrity_record
 
 
 PREFIX_FORMAT = "environments-continuation-prefix-v1"
@@ -232,10 +235,22 @@ def _integrity_status(mode_dir: Path, task: str, seed: str, epoch: int) -> dict 
     return None
 
 
-def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
+def reconstruct_prefix_payload(
+    trajectory_id: int,
+    entry: dict,
+    *,
+    _visited: set[int] | None = None,
+) -> dict:
     """Rebuild one stored trajectory's exact agent-visible conversation."""
 
     from inspect_ai.log import list_eval_logs, read_eval_log
+
+    visited = set(_visited or ())
+    if trajectory_id in visited:
+        raise SystemExit(
+            f"trajectory #{trajectory_id}: circular continuation source chain"
+        )
+    visited.add(trajectory_id)
 
     mode_dir = LOGS_ROOT / entry["mode"]
     if not mode_dir.is_dir():
@@ -244,12 +259,18 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
         )
     sample = None
     run_metadata: dict = {}
+    target_model = ""
     for log_info in list_eval_logs(str(mode_dir)):
         header = read_eval_log(log_info, header_only=True)
         if header.eval.task != entry["task"]:
             continue
         log = read_eval_log(log_info, resolve_attachments=True)
         run_metadata = dict(log.eval.metadata or {})
+        roles = getattr(log.eval, "model_roles", None) or {}
+        target_role = roles.get("target")
+        target_model = str(
+            getattr(target_role, "model", None) or target_role or ""
+        )
         for candidate in log.samples or []:
             if (
                 str(candidate.id) == entry["seed"]
@@ -274,15 +295,19 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
     integrity = _integrity_status(
         mode_dir, entry["task"], entry["seed"], entry["epoch"]
     )
-    if integrity is None:
-        print(
-            f"  NOTE: trajectory #{trajectory_id} has no pipeline_integrity record; "
-            "proceeding without an integrity check."
+    current_status = sample_integrity_record(
+        entry["task"], sample, target_model, stored_record=integrity
+    )
+    if not current_status["prefix_eligible"]:
+        reasons = ", ".join(
+            tag["label"] for tag in current_status.get("status_tags") or []
+        ) or ", ".join(
+            current_status.get("issues") or current_status.get("prefix_issues") or []
         )
-    elif integrity.get("status") == "excluded":
         raise SystemExit(
-            f"trajectory #{trajectory_id} is integrity-excluded "
-            f"({integrity.get('issues')}); refusing it as a prefix"
+            f"trajectory #{trajectory_id} is "
+            f"{current_status['mechanical_status'].replace('_', ' ')} "
+            f"({reasons}); refusing it as a prefix"
         )
 
     real_env = sample_metadata.get("real_env") or {}
@@ -291,6 +316,22 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
             f"  NOTE: trajectory #{trajectory_id} is itself a continuation; its "
             "whole conversation (earlier prefix included) becomes the new prefix."
         )
+        source_id = (
+            (real_env.get("continuation", {}).get("prefix") or {})
+            .get("source_trajectory_id")
+        )
+        if source_id is not None:
+            try:
+                source_id = int(source_id)
+            except (TypeError, ValueError) as error:
+                raise SystemExit(
+                    f"trajectory #{trajectory_id}: invalid source trajectory ID "
+                    f"{source_id!r}"
+                ) from error
+            source_entry = _registry_entries([source_id])[source_id]
+            reconstruct_prefix_payload(
+                source_id, source_entry, _visited=visited
+            )
     target_name = run_metadata.get("target_name")
     if target_name not in TARGET_CHOICES:
         raise SystemExit(
@@ -363,6 +404,8 @@ def reconstruct_prefix_payload(trajectory_id: int, entry: dict) -> dict:
 
 
 def reconstruct_prefix_payloads(trajectory_ids: list[int]) -> list[dict]:
+    if not trajectory_ids:
+        return []
     entries = _registry_entries(trajectory_ids)
     return [
         reconstruct_prefix_payload(trajectory_id, entries[trajectory_id])
@@ -381,12 +424,11 @@ class PrefixSpec:
     payload: dict
     sha256: str
     payload_path: Path | None
-    messages: tuple[ChatMessage, ...]  # closed; head is the verified system message
+    messages: tuple[ChatMessage, ...]  # validated; head is verified system message
     target_name: str                   # catalog key
     reasoning: bool
     family: str | None                 # source seed family; None for external
     source_seed: str | None
-    synthesized_closer: bool
     system_prompt_inserted: bool
     boundary_index: int
     native_resume: dict | None
@@ -400,7 +442,6 @@ class PrefixSpec:
             "target_name": self.target_name,
             "reasoning": self.reasoning,
             "family": self.family,
-            "synthesized_closer": self.synthesized_closer,
             "system_prompt_inserted": self.system_prompt_inserted,
             **{f"source_{key}": value for key, value in self.payload["source"].items()},
         }
@@ -516,21 +557,23 @@ def build_prefix_spec(
             )
 
     messages = _ensure_unique_message_ids(list(messages))
-    closed, synthesized = close_dangling_tool_calls(messages)
+    try:
+        reject_dangling_tool_calls(messages)
+    except ValueError as error:
+        raise SystemExit(f"prefix {origin!r}: {error}") from error
     source = payload["source"]
     return PrefixSpec(
         name=payload["name"],
         payload=payload,
         sha256=payload_sha256(payload),
         payload_path=payload_path,
-        messages=tuple(closed),
+        messages=tuple(messages),
         target_name=payload["target"],
         reasoning=payload["reasoning"],
         family=source.get("family"),
         source_seed=source.get("seed"),
-        synthesized_closer=synthesized,
         system_prompt_inserted=system_prompt_inserted,
-        boundary_index=prefix_boundary_index(closed),
+        boundary_index=prefix_boundary_index(messages),
         native_resume=native_resume if harness in NATIVE_HARNESS_MODES else None,
     )
 
@@ -546,6 +589,30 @@ def load_prefix_specs(
         specs.append(build_prefix_spec(payload, payload_path=path, harness=harness))
     for file_path in payload_files:
         payload = load_prefix_payload_file(file_path)
+        source = payload.get("source") or {}
+        source_id = source.get("trajectory_id")
+        # AWS workers intentionally receive the payload but not the local registry.
+        # Wherever the source logs are available (local runs and the AWS controller),
+        # recheck even an old, already-exported trajectory payload under today's rules.
+        if source.get("kind") == "trajectory":
+            if REGISTRY_FILE.is_file():
+                if source_id is None:
+                    raise SystemExit(
+                        f"{file_path}: trajectory-sourced prefix has no trajectory_id"
+                    )
+                try:
+                    source_id = int(source_id)
+                except (TypeError, ValueError) as error:
+                    raise SystemExit(
+                        f"{file_path}: invalid source trajectory ID {source_id!r}"
+                    ) from error
+                source_entry = _registry_entries([source_id])[source_id]
+                reconstruct_prefix_payload(source_id, source_entry)
+            elif not os.environ.get("MATS_REMOTE_RUN_DIR"):
+                raise SystemExit(
+                    f"{file_path}: cannot verify this trajectory-sourced prefix "
+                    f"because {REGISTRY_FILE} is missing"
+                )
         specs.append(build_prefix_spec(
             payload, payload_path=Path(file_path), harness=harness
         ))
@@ -638,6 +705,7 @@ def build_continuation_tasks(
     task_id_suffix: str | None = None,
     execution_metadata: dict | None = None,
     harness: str,
+    pressure: str | None = None,
 ) -> list:
     """One Inspect task per cell, sharing build_real_task with plain audits."""
 
@@ -652,6 +720,10 @@ def build_continuation_tasks(
             else ""
         )
         target_slug = resolve_target(prefix.target_name)
+        opencode_go_subscription = (
+            harness == "subscription"
+            and opencode_go_model_spec(prefix.target_name, target_slug) is not None
+        )
         target_build = build_target(
             target_slug,
             reasoning_on=prefix.reasoning,
@@ -667,7 +739,9 @@ def build_continuation_tasks(
                 prefix.reasoning,
                 prefix.sha256,
                 cell.member,
+                pressure,
             )[:40],
+            construct_model=not opencode_go_subscription,
         )
         descriptor = (
             None
@@ -675,7 +749,9 @@ def build_continuation_tasks(
             else seed_family_task_description(cell.family)
         )
         pivot = pivot_preamble(descriptor)
-        spec = assemble_real_protocol(cell.unit_path, condition, unit_sp)
+        spec = assemble_real_protocol(
+            cell.unit_path, condition, unit_sp, pressure
+        )
         record = continuation_record(
             treatment=treatment,
             prefix=prefix.record(),
@@ -685,6 +761,7 @@ def build_continuation_tasks(
             opening_user_message=spec.opening_user_message,
             cross_family=cell.cross_family,
         )
+        record["pressure"] = spec.pressure
         continuation = ContinuationRun(
             prefix_messages=prefix.messages,
             pivot_text=pivot,
@@ -727,12 +804,12 @@ def build_continuation_tasks(
                 "prefix_target_name": prefix.target_name,
                 "prefix_message_count": len(prefix.messages),
                 "prefix_boundary_index": prefix.boundary_index,
-                "prefix_synthesized_closer": prefix.synthesized_closer,
                 "prefix_system_prompt_inserted": prefix.system_prompt_inserted,
                 "pivot_preamble": pivot,
                 "cross_family": cell.cross_family,
             },
             harness=harness,
+            pressure=pressure,
         ))
     return tasks
 
@@ -753,8 +830,6 @@ def describe_plan(
             else f"external ({source.get('description') or 'no description'})"
         )
         flags = []
-        if spec.synthesized_closer:
-            flags.append("synthetic tool-result closer")
         if spec.system_prompt_inserted:
             flags.append("system prompt inserted")
         flag_note = f"  [{'; '.join(flags)}]" if flags else ""

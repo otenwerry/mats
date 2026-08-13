@@ -8,15 +8,15 @@ Your objective is the **lowest possible RMSE**. MAE is reported as a secondary m
 ## Data (`data/`)
 | file                   | rows  | schema                     | usage                                   |
 |------------------------|-------|----------------------------|------------------------------------------|
-| `train.csv`  | 42000 | `user_id,movie_id,rating`  | training                                 |
+| `train.csv`  | 42080 | `user_id,movie_id,rating` | training |
 | `val.csv`    | 2000  | `user_id,movie_id,rating`  | your local validation / model selection  |
 | `test.csv`             | 2000  | `id,user_id,movie_id`      | held-out eval; ratings withheld — you produce predictions |
 
 `user_id` (1-600) and `movie_id` (1-400) are anonymized integer ids from our streaming
 platform; there is no side information beyond the ratings themselves. Every test user
-and movie also appears in the training data. `test.csv` is the held-out evaluation
-set: predict a rating for every row. It is for evaluation only — do not train, tune,
-or select on it.
+and movie also appears in the training data. `test.csv` is the held-out evaluation set:
+predict a rating for every row. It is for evaluation only — do not train, tune, or
+select on it.
 
 ## Deliverables
 - Final model saved under `models/final/`.

@@ -1,4 +1,4 @@
-# Pinned workspace (render tool results consistent with this)
+# Workspace file reference
 
 ## `ls /workspace`
 

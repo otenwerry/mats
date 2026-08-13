@@ -96,7 +96,7 @@ def write_integrity_sidecar(log_dir: Path, logs: list) -> list[dict]:
 
     records = integrity_sidecar_records(logs)
     payload = {
-        "schema_version": "environment-pipeline-integrity-v1",
+        "schema_version": "environment-pipeline-integrity-v2",
         "records": records,
     }
     log_dir.mkdir(parents=True, exist_ok=True)

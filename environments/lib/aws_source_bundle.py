@@ -133,15 +133,7 @@ def build_source_bundle(environments_root: Path, output_dir: Path) -> dict:
 
 def runtime_hash(environments_root: Path, runtime_version: str) -> str:
     repo = repo_root(environments_root)
-    candidates = (
-        "environments/pyproject.toml", "environments/uv.lock",
-        "environments/sandbox/ml/Dockerfile",
-        "environments/sandbox/ml/compose.yaml",
-        "environments/sandbox/ml/Dockerfile.subscription",
-        "environments/sandbox/ml/compose.subscription.yaml",
-        "environments/sandbox/subscription_proxy/Dockerfile",
-        "environments/sandbox/subscription_proxy/proxy.py",
-    )
+    candidates = runtime_dependency_files(repo, environments_root)
     digest = hashlib.sha256(runtime_version.encode())
     for relative in candidates:
         path = repo / relative
@@ -149,3 +141,34 @@ def runtime_hash(environments_root: Path, runtime_version: str) -> str:
             raise SourceBundleError(f"runtime dependency file is missing: {path}")
         digest.update(relative.encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()
+
+
+def runtime_dependency_files(repo: Path, environments_root: Path) -> list[str]:
+    """Files whose bytes must match the reusable AMI's installed runtime.
+
+    Every sandbox is included automatically. A future registered seed family therefore
+    does not need a second AWS-only dependency list when its Docker files are added.
+    """
+
+    try:
+        environments_relative = environments_root.resolve().relative_to(repo.resolve())
+    except ValueError as error:
+        raise SourceBundleError(
+            f"environments root {environments_root} is outside git root {repo}"
+        ) from error
+    required = [
+        environments_relative / "pyproject.toml",
+        environments_relative / "uv.lock",
+    ]
+    sandbox_root = environments_root.resolve() / "sandbox"
+    if not sandbox_root.is_dir():
+        raise SourceBundleError(f"runtime sandbox directory is missing: {sandbox_root}")
+    sandbox_files = [
+        path.relative_to(repo.resolve())
+        for path in sandbox_root.rglob("*")
+        if path.is_file()
+        and _bundle_path_allowed(path.relative_to(repo.resolve()))
+    ]
+    return sorted(
+        {path.as_posix() for path in [*required, *sandbox_files]}
+    )

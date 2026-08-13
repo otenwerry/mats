@@ -28,11 +28,11 @@ stored boundary index and the omission is declared as an evidence caveat.
 
 Usage (from mats/environments/):
   uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=12,17 \
-      --seed-dir=p_hacking --seeds=all --epochs=5 --harness=simple --compute=local \
-      --judge=gpt-5.6-luna
+      --seed-dir=p_hacking --seeds=all --epochs=5 --harness=simple \
+      --pressure=high
   uv run exp_continuation_pipeline.py --treatment=full-hack --prefixes=12 \
       --seed-dir=ml_training_data_misuse --seeds=demand_forecasting --epochs=5 \
-      --harness=production --judge=gpt-5.6-luna
+      --harness=production
   uv run exp_continuation_pipeline.py ... --dry-run     # FREE: plan (and AWS preflight)
 
 Flags:
@@ -48,15 +48,17 @@ Flags:
   --harness=simple|production|subscription  REQUIRED. simple keeps native prefix
                           message splicing. production uses API-backed native
                           scaffolds. subscription uses Claude/Codex subscription login
-                          quota; OpenCode remains API-backed.
+                          quota and OpenCode Go for mapped models; other OpenCode
+                          models remain API-backed.
   --condition=<c>         allow only (default).
-  --judge=<m>            REQUIRED. alignment judge; see lib/judge_selection.py.
+  --pressure=low|high     p_hacking new tasks only; defaults to low.
+  --judge=<m>            alignment judge; defaults to gpt-5.6-luna.
   --gate-model=<m>       defaults to and must equal --judge.
   --concurrency=<N>       LLM parallelism (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
-  --time-limit=<sec>      family default (ml 7200 / p_hacking 1800).
-  --compute=aws|local     ML defaults to aws; p-hacking local. AWS ships each prefix
-                          payload to its worker with SHA-256 verification.
+  --time-limit=<sec>      family default (ml 4200 / p_hacking 1800).
+  --compute=aws|local     defaults to aws for every new-task seed family. AWS ships
+                          each prefix payload with SHA-256 verification.
   --vm-concurrency / --aws-region / --aws-instance-type / --aws-bucket /
   --aws-secret-env        as in exp_real_audit_pipeline.
   --resume-campaign=<id> / --retry-failed=<id>  continuation campaigns supported.
@@ -112,14 +114,16 @@ from exp_real_continuation import (
     load_prefix_specs,
     validate_treatment,
 )
-from judge_selection import require_judge_arg, resolve_judge
+from judge_selection import resolve_judge
 from model_catalog import resolve_target
 from exp_target_harness import resolve_harness
 from pipeline_cli import positive_int_arg, validate_cli_args, value_arg
 from project_paths import DATA_ROOT as DATA, VIEWER_ROOT as OUT
 from protocol_sources import (
+    load_protocol_sources,
     reject_retired_fixed_system_prompt_flag,
     resolve_condition,
+    resolve_pressure,
     resolve_seeds,
 )
 
@@ -128,7 +132,7 @@ DEFAULT_CONCURRENCY = 50
 
 _VALUE_FLAGS = {
     "--treatment", "--prefixes", "--prefix-files", "--seed-dir", "--seeds",
-    "--epochs", "--harness", "--condition", "--judge", "--gate-model", "--concurrency",
+    "--epochs", "--harness", "--condition", "--pressure", "--judge", "--gate-model", "--concurrency",
     "--sandbox-concurrency", "--time-limit", "--compute", "--vm-concurrency",
     "--aws-region", "--aws-instance-type", "--aws-bucket", "--aws-secret-env",
     "--resume-campaign", "--retry-failed",
@@ -240,17 +244,12 @@ def _parse_args() -> dict:
         if (resolved_seed_path / "manifest.json").is_file()
         else resolved_seed_path.name
     )
-    compute = _arg("--compute") or (
-        "aws" if family == "ml_training_data_misuse" else "local"
-    )
+    pressure = resolve_pressure(_arg("--pressure"), family)
+    compute = _arg("--compute") or "aws"
     if compute not in {"aws", "local"}:
         raise SystemExit("--compute must be aws or local")
-    if compute == "aws" and family != "ml_training_data_misuse":
-        raise SystemExit("--compute=aws is currently scoped to ML real environments only")
     time_limit = resolve_time_limit(_arg("--time-limit"), family)
-    if compute == "aws" and time_limit != 7200:
-        raise SystemExit("AWS ML trajectories use the fixed two-hour --time-limit=7200")
-    judge_arg = require_judge_arg(_arg("--judge"))
+    judge_arg = _arg("--judge")
 
     return {
         "treatment": treatment,
@@ -263,6 +262,7 @@ def _parse_args() -> dict:
         "epochs": epochs,
         "harness": harness,
         "condition": condition,
+        "pressure": pressure,
         "judge": judge_arg,
         "judge_resolved": resolve_judge(judge_arg),
         "gate_model": resolve_gate_model(_arg("--gate-model"), judge_arg),
@@ -296,6 +296,8 @@ def _load_plan(cfg: dict):
         cfg["prefix_ids"], cfg["prefix_files"], harness=cfg["harness"]
     )
     cells = build_continuation_cells(specs, cfg["seeds_path"], cfg["seeds"])
+    for unit_path in {cell.unit_path for cell in cells}:
+        load_protocol_sources(unit_path, pressure=cfg["pressure"])
     print(describe_plan(cfg["treatment"], specs, cells))
     expected = len(cells) * cfg["epochs"]
     print(f"  {len(cells)} cell(s) x epochs={cfg['epochs']} = {expected} "
@@ -327,8 +329,11 @@ def run_local_stage(cfg: dict, cells: list) -> tuple[object, pathlib.Path, int, 
     print("=" * 72)
     print(f"STAGE 1/2  CONTINUATION + STRUCTURED JUDGE  ->  {log_dir.name}")
     print("=" * 72)
-    print(f"  treatment={cfg['treatment']}  seeds={cfg['seeds']}  "
-          f"condition={cfg['condition']}")
+    pressure_text = f"  pressure={cfg['pressure']}" if cfg["pressure"] else ""
+    print(
+        f"  treatment={cfg['treatment']}  seeds={cfg['seeds']}  "
+        f"condition={cfg['condition']}{pressure_text}"
+    )
     print(f"  harness={cfg['harness']}")
     print(f"  judge={cfg['judge_resolved']}  gate={cfg['gate_model']}")
     print(f"  epochs={cfg['epochs']}  concurrency={cfg['concurrency']}  "
@@ -354,6 +359,7 @@ def run_local_stage(cfg: dict, cells: list) -> tuple[object, pathlib.Path, int, 
             task_id_suffix=task_suffix,
             execution_metadata=execution_metadata,
             harness=cfg["harness"],
+            pressure=cfg["pressure"],
         )
         success, logs = run_eval(
             tasks, cfg["epochs"], cfg["concurrency"], log_dir,
@@ -419,6 +425,7 @@ def _aws_payload_descriptors(specs: list) -> list[dict]:
             "local_path": str(spec.payload_path),
             "target": spec.target_name,
             "target_model": resolve_target(spec.target_name),
+            "reasoning": spec.reasoning,
         })
     return descriptors
 
@@ -458,12 +465,11 @@ def main() -> None:
                 "treatment": cfg["treatment"],
                 "payloads": _aws_payload_descriptors(specs),
             }
-            cfg["targets"] = list(dict.fromkeys(
-                spec.target_name for spec in specs
-            ))
-            cfg["target_models"] = list(dict.fromkeys(
-                resolve_target(spec.target_name) for spec in specs
-            ))
+            target_models = {
+                spec.target_name: resolve_target(spec.target_name) for spec in specs
+            }
+            cfg["targets"] = list(target_models)
+            cfg["target_models"] = list(target_models.values())
             state = run_campaign(cfg, _ENVIRONMENTS, DATA, dry_run=cfg["dry_run"])
             if cfg["dry_run"]:
                 return

@@ -1,7 +1,7 @@
-"""Environment-owned model catalog, provider routing, and target construction.
+"""Environment-owned model catalog, provider routing, and agent construction.
 
 The catalog contains experiment configuration, not Petri behavior.  Inspect is imported
-only when a target model is actually constructed, so free planning and validation can
+only when an agent model is actually constructed, so free planning and validation can
 use the rest of this module without loading the evaluation runtime.
 """
 
@@ -90,7 +90,7 @@ def resolve_target(name: str) -> str:
 
     value = name.strip()
     if value not in TARGET_CHOICES:
-        raise SystemExit(f"unknown target {value!r}; choices: {sorted(TARGET_CHOICES)}")
+        raise SystemExit(f"unknown agent {value!r}; choices: {sorted(TARGET_CHOICES)}")
     return route(TARGET_CHOICES[value])
 
 
@@ -99,7 +99,7 @@ def resolve_target_names(names: Iterable[str]) -> list[str]:
 
     selected = list(dict.fromkeys(name.strip() for name in names if name.strip()))
     if not selected:
-        raise SystemExit(f"no target names were supplied; choices: {sorted(TARGET_CHOICES)}")
+        raise SystemExit(f"no agent names were supplied; choices: {sorted(TARGET_CHOICES)}")
     return [resolve_target(name) for name in selected]
 
 
@@ -115,8 +115,9 @@ def build_target(
     reasoning_on: bool,
     effort: str = REASONING_EFFORT,
     prompt_cache_key: str | None = None,
+    construct_model: bool = True,
 ) -> TargetModelBuild:
-    """Construct an Inspect target with provider-appropriate reasoning settings.
+    """Construct an Inspect agent model with provider-appropriate reasoning settings.
 
     OpenRouter exposes a boolean reasoning switch and needs non-strict tool schemas.
     First-party Anthropic/OpenAI use Inspect's public ``GenerateConfig`` fields.  Native
@@ -165,7 +166,11 @@ def build_target(
 
     if config_kwargs:
         model_kwargs["config"] = GenerateConfig(**config_kwargs)
-    model = get_model(routed, **model_kwargs) if model_kwargs else routed
+    model = (
+        get_model(routed, **model_kwargs)
+        if construct_model and model_kwargs
+        else routed
+    )
     return TargetModelBuild(
         model=model,
         routed_slug=routed,

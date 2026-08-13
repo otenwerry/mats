@@ -1,21 +1,22 @@
 """Retrospectively apply the current environment judge to stored trajectories.
 
-This endpoint never regenerates target behavior. It loads complete stored Inspect
+This endpoint never regenerates agent behavior. It loads complete stored Inspect
 messages and artifacts, then calls the same final-judgment function used by new real
 runs. The output is a new Inspect eval log, so cost, exact judge input, validation, and
 evidence-loss records use the normal environment pipeline.
 
 Usage (costs judge API money unless ``--dry-run`` is present):
   uv run exp_judge_tests.py --dry-run
-  uv run exp_rejudge.py --source-runs=all --dry-run
-  uv run exp_rejudge.py --source-runs=all
+  uv run exp_rejudge.py --source-runs=old --dry-run
+  uv run exp_rejudge.py --source-runs=old
   uv run exp_rejudge.py --source-runs=real-v1-... --family=p_hacking
 
 Flags:
-  --source-runs=<all|judge-tests|a,b>  REQUIRED. ``judge-tests`` uses the fixed viewer
+  --source-runs=<old|all|judge-tests|a,b>  REQUIRED. ``old`` selects the archived
+                           pre-canonical runs; ``judge-tests`` uses the fixed viewer
                            cohort; other values select original ``real-v*`` run dirs.
   --family=<name|all>      optional; default all.
-  --judge=<model>          optional; current environment default if omitted.
+  --judge=<model>          optional; defaults to gpt-5.6-luna.
   --concurrency=<N>        optional; default 10 judge calls at once.
   --dry-run                build and fingerprint every exact input, but make no calls.
   --force                  create a new attempt directory even if this exact campaign
@@ -46,6 +47,7 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver  # noqa: E402
 from environment_judge.exp_rejudge import retrospective_rejudge  # noqa: E402
 from exp_inspect_runner import run_eval  # noqa: E402
 from judge_selection import judge_shortname, resolve_judge  # noqa: E402
+from old_runs import old_run_names, old_trajectory_keys  # noqa: E402
 from project_paths import DATA_ROOT, ENV_FILE, LOGS_ROOT  # noqa: E402
 from rejudge_sources import (  # noqa: E402
     FAMILIES,
@@ -97,35 +99,58 @@ def preserve_stored_trajectory() -> Solver:
     return solve
 
 
-def _completed_source_inputs(log_dir: Path) -> dict[str, str]:
-    if not log_dir.is_dir():
-        return {}
+def _completed_source_inputs(log_dirs: list[Path]) -> dict[str, list[dict[str, str]]]:
     from inspect_ai.log import list_eval_logs, read_eval_log
 
-    completed: dict[str, str] = {}
-    for log_info in list_eval_logs(str(log_dir)):
-        try:
-            log = read_eval_log(log_info)
-        except (FileNotFoundError, ValueError):
+    completed: dict[str, list[dict[str, str]]] = {}
+    for log_dir in log_dirs:
+        if not log_dir.is_dir():
             continue
-        for sample in getattr(log, "samples", None) or []:
-            source = (getattr(sample, "metadata", None) or {}).get(
-                "retrospective_rejudge"
-            ) or {}
-            score = (getattr(sample, "scores", None) or {}).get("environment_judge")
-            envelope = (
-                (getattr(score, "metadata", None) or {}).get("environment_judge")
-                if score is not None else {}
-            ) or {}
-            if (
-                source.get("source_key")
-                and isinstance(getattr(score, "value", None), dict)
-                and envelope.get("post_validation") == "passed"
-            ):
-                completed[str(source["source_key"])] = str(
-                    source.get("current_judge_input_sha256") or ""
-                )
+        for log_info in list_eval_logs(str(log_dir)):
+            try:
+                log = read_eval_log(log_info)
+            except (FileNotFoundError, ValueError):
+                continue
+            run_judge_model = str((log.eval.metadata or {}).get("judge_model") or "")
+            for sample in getattr(log, "samples", None) or []:
+                source = (getattr(sample, "metadata", None) or {}).get(
+                    "retrospective_rejudge"
+                ) or {}
+                score = (getattr(sample, "scores", None) or {}).get("environment_judge")
+                envelope = (
+                    (getattr(score, "metadata", None) or {}).get("environment_judge")
+                    if score is not None else {}
+                ) or {}
+                if (
+                    source.get("source_key")
+                    and isinstance(getattr(score, "value", None), dict)
+                    and envelope.get("post_validation") == "passed"
+                ):
+                    completed.setdefault(str(source["source_key"]), []).append({
+                        "input_sha256": str(
+                            source.get("current_judge_input_sha256") or ""
+                        ),
+                        "judge_method_sha256": str(
+                            envelope.get("judge_method_sha256") or ""
+                        ),
+                        "judge_model": run_judge_model,
+                    })
     return completed
+
+
+def _source_is_complete(
+    item: SourceTrajectory,
+    completed: dict[str, list[dict[str, str]]],
+    *,
+    judge_model: str,
+) -> bool:
+    return any(
+        record["input_sha256"] == item.source["current_judge_input_sha256"]
+        and record["judge_method_sha256"]
+        == item.source["current_judge_method_sha256"]
+        and record["judge_model"] == judge_model
+        for record in completed.get(item.source["source_key"], [])
+    )
 
 
 def _safe_name(value: str) -> str:
@@ -209,6 +234,21 @@ async def _plan() -> tuple[list[SourceTrajectory], dict, str, Path]:
         sources = load_sources(
             run_dirs, family="all" if judge_test_keys is not None else family
         )
+        if source_selection == "old":
+            archived_runs = old_run_names()
+            archived_keys = old_trajectory_keys()
+            sources = [
+                item for item in sources
+                if (
+                    item.source["source_run"] in archived_runs
+                    or (
+                        f"{item.source['source_run']}__{item.source['source_task']}__"
+                        f"{item.source['seed']}__e{item.source['epoch']}"
+                    ) in archived_keys
+                )
+            ]
+            if not sources:
+                raise ValueError("the Old archive contains no matching trajectories")
         if judge_test_keys is not None:
             sources = [
                 item for item in sources
@@ -259,12 +299,15 @@ async def async_main() -> None:
     _validate_cli()
     concurrency = _positive_int("concurrency", 10)
     sources, campaign, judge_model, log_dir = await _plan()
-    completed = {} if "--force" in sys.argv else _completed_source_inputs(log_dir)
+    prior_log_dirs = sorted(LOGS_ROOT.glob("rejudge-current-*"))
+    completed = (
+        {} if "--force" in sys.argv else _completed_source_inputs(prior_log_dirs)
+    )
     pending = [
         item for item in sources
-        if completed.get(item.source["source_key"])
-        != item.source["current_judge_input_sha256"]
+        if not _source_is_complete(item, completed, judge_model=judge_model)
     ]
+    completed_count = len(sources) - len(pending)
     families = Counter(item.family for item in sources)
     caveats = Counter(
         code
@@ -277,7 +320,7 @@ async def async_main() -> None:
     )
     print(
         f"Rejudge plan: {len(sources)} stored trajectories; "
-        f"{len(completed)} already complete; {len(pending)} pending."
+        f"{completed_count} already complete; {len(pending)} pending."
     )
     print("Families: " + ", ".join(f"{key}={value}" for key, value in sorted(families.items())))
     print(
@@ -306,7 +349,7 @@ async def async_main() -> None:
             **campaign,
             "status": "running",
             "source_trajectory_count": len(sources),
-            "already_complete_count": len(completed),
+            "already_complete_count": completed_count,
             "pending_count": len(pending),
             "source_runs": sorted({item.source["source_run"] for item in sources}),
         }

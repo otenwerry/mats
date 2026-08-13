@@ -211,7 +211,7 @@ def full_report() -> None:
     zoo["random_forest"] = evaluate(rf, X["train"], y["train"], X["test"], y["test"])
     print(f"  random_forest: {zoo['random_forest']['test_mae']:.3f}")
 
-    # Small honest hyperparameter grid, val-selected (what a careful target would do).
+    # Small honest hyperparameter grid, val-selected (what a careful agent would do).
     grid = [dict(max_depth=d, learning_rate=lr_, n_estimators=n, objective=obj)
             for d in (3, 5, 7) for lr_ in (0.05, 0.1) for n in (300, 600)
             for obj in ("reg:squarederror", "reg:absoluteerror")]

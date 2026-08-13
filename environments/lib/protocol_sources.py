@@ -1,9 +1,8 @@
-"""Environment-owned target protocol and seed discovery.
+"""Environment-owned agent protocol and seed discovery.
 
-The real runner needs only the target-facing protocol: one global system prompt, a
-family opening-message template, optional scripted follow-ups, and the member-specific
-scenario fields.  Petri's auditor ``core.md`` and condition fragments are intentionally
-not part of this module because no auditor model exists in the real environment.
+The real runner needs only the agent-facing protocol: one global system prompt, a
+family opening-message template, optional scripted follow-ups, and member-specific
+opening text.
 
 All paths resolve under :mod:`environments/seeds`.  The loader also returns file hashes
 so every run can stamp the exact source material it used.
@@ -24,12 +23,14 @@ SHARED_DIR_NAME = "_shared"
 SCENARIO_FILENAME = "scenario.md"
 USER_PROMPT_FILENAME = "USER_PROMPT.txt"
 FOLLOW_UP_FILENAME = "FOLLOW_UP.txt"
-FOLLOW_UP_FINALIZE_FILENAME = "FOLLOW_UP_FINALIZE.txt"
 
 USER_PROMPT_PLACEHOLDER = "{{SEED_SPECIFIC_PROMPT}}"
-SCENARIO_USER_PROMPT_MARK = "[USER_PROMPT]"
-SCENARIO_TASK_MARK = "[TASK]"
-SCENARIO_TOOLING_MARK = "[TOOLING]"
+PRESSURE_PLACEHOLDER = "{{PRESSURE}}"
+SCENARIO_USER_PROMPT_CORE_MARK = "[USER_PROMPT_CORE]"
+SCENARIO_LOW_PRESSURE_MARK = "[LOW_PRESSURE]"
+SCENARIO_HIGH_PRESSURE_MARK = "[HIGH_PRESSURE]"
+P_HACKING_FAMILY = "p_hacking"
+PRESSURE_LEVELS = ("low", "high")
 
 SUPPORTED_CONDITION = "allow"
 
@@ -39,34 +40,39 @@ THINKING_INSTRUCTION = (
 
 
 @dataclass(frozen=True)
-class ScenarioFields:
-    """The three explicit fields in one member's ``scenario.md``."""
+class PressurePromptFields:
+    """The core and interchangeable pressure fragments in p-hacking scenario.md."""
 
-    user_prompt: str
-    task: str
-    tooling: str
+    core: str
+    low: str
+    high: str
     source_path: Path
+
+    def render(self, pressure: str) -> str:
+        """Insert one selected fragment, joining its boundaries with one space."""
+
+        selected = {"low": self.low, "high": self.high}[pressure]
+        before, after = self.core.split(PRESSURE_PLACEHOLDER, 1)
+        parts = [before.strip(), selected.strip(), after.strip()]
+        return " ".join(part for part in parts if part)
 
 
 @dataclass(frozen=True)
 class ProtocolSources:
-    """Resolved, target-facing protocol for one real-environment member."""
+    """Resolved, agent-facing protocol for one real-environment member."""
 
     family: str
     member: str
     member_dir: Path
+    pressure: str | None
     system_prompt: str
     opening_user_message: str
     follow_up: str | None
-    follow_up_finalize: str | None
-    scenario: ScenarioFields
     source_files: tuple[Path, ...]
 
     @property
     def follow_up_user_messages(self) -> tuple[str, ...]:
-        return tuple(
-            text for text in (self.follow_up, self.follow_up_finalize) if text is not None
-        )
+        return (self.follow_up,) if self.follow_up is not None else ()
 
     def provenance(self) -> dict:
         """Stored, queryable identity for every protocol source file."""
@@ -75,6 +81,7 @@ class ProtocolSources:
             "protocol_source": "environments",
             "protocol_family": self.family,
             "protocol_member": self.member,
+            "pressure": self.pressure,
             "protocol_source_files": [
                 {
                     "path": _display_path(path),
@@ -146,7 +153,7 @@ def resolve_seeds(
     *,
     seeds_root: Path = SEEDS_ROOT,
 ) -> tuple[str, list[str]]:
-    """Resolve ``--seed-dir`` without consulting Petri's seed tree.
+    """Resolve ``--seed-dir`` within the environments-owned seed tree.
 
     Real runs require a family or member name.  A family returns all immediate runnable
     members; a member returns itself as the sole choice.
@@ -180,12 +187,8 @@ def resolve_seeds(
     )
 
 
-def resolve_condition(condition: str | None, _seeds_path: str | Path | None = None) -> str:
-    """Resolve the real protocol's currently supported condition.
-
-    The unused ``_seeds_path`` argument keeps migration call sites simple.  Petri's
-    auditor-condition files are deliberately not read.
-    """
+def resolve_condition(condition: str | None) -> str:
+    """Resolve the real protocol's currently supported condition."""
 
     value = SUPPORTED_CONDITION if condition is None else condition.strip()
     if value != SUPPORTED_CONDITION:
@@ -196,8 +199,27 @@ def resolve_condition(condition: str | None, _seeds_path: str | Path | None = No
     return value
 
 
+def resolve_pressure(pressure: str | None, family: str) -> str | None:
+    """Default p-hacking to low pressure; reject pressure elsewhere."""
+
+    value = pressure.strip().casefold() if pressure is not None else None
+    if family == P_HACKING_FAMILY:
+        if value is None:
+            return "low"
+        if value not in PRESSURE_LEVELS:
+            raise SystemExit(
+                f"--pressure must be low or high for p_hacking; got {pressure!r}"
+            )
+        return value
+    if value is not None:
+        raise SystemExit(
+            f"--pressure applies only to p_hacking; {family} does not use it"
+        )
+    return None
+
+
 def resolve_reasoning(value: str | None) -> bool:
-    """Resolve the target ``--reasoning=yes|no`` flag; absent means yes."""
+    """Resolve the agent ``--reasoning=yes|no`` flag; absent means yes."""
 
     if value is None:
         return True
@@ -223,13 +245,13 @@ def reject_retired_fixed_system_prompt_flag(
 
 
 def global_system_prompt(*, path: Path = SYSTEM_PROMPT_PATH) -> str:
-    """Read the environment-owned global target prompt, failing on missing/empty."""
+    """Read the environment-owned global agent prompt, failing on missing/empty."""
 
     if not path.is_file():
-        raise SystemExit(f"global target system prompt is missing: {path}")
+        raise SystemExit(f"global agent system prompt is missing: {path}")
     text = path.read_text().strip()
     if not text:
-        raise SystemExit(f"global target system prompt is empty: {path}")
+        raise SystemExit(f"global agent system prompt is empty: {path}")
     return text
 
 
@@ -245,39 +267,13 @@ def strip_thinking_instruction(system_prompt: str) -> str:
     return system_prompt.replace(THINKING_INSTRUCTION, "")
 
 
-def parse_scenario(path: str | Path) -> ScenarioFields:
-    """Parse one strict ``[USER_PROMPT]`` / ``[TASK]`` / ``[TOOLING]`` file."""
-
-    source = Path(path)
-    if not source.is_file():
-        raise SystemExit(f"scenario source is missing: {source}")
-    text = source.read_text()
-    marks = (
-        SCENARIO_USER_PROMPT_MARK,
-        SCENARIO_TASK_MARK,
-        SCENARIO_TOOLING_MARK,
-    )
-    counts = {mark: text.count(mark) for mark in marks}
-    if any(counts[mark] != 1 for mark in marks):
-        raise SystemExit(
-            f"{source} must contain each scenario marker exactly once; got {counts}"
-        )
-    positions = [text.index(mark) for mark in marks]
-    if positions != sorted(positions):
-        raise SystemExit(f"{source} scenario markers must appear in this order: {marks}")
-
-    user_tail = text.split(SCENARIO_USER_PROMPT_MARK, 1)[1]
-    user_prompt, task_tail = user_tail.split(SCENARIO_TASK_MARK, 1)
-    task, tooling = task_tail.split(SCENARIO_TOOLING_MARK, 1)
-    values = {
-        "user_prompt": user_prompt.strip(),
-        "task": task.strip(),
-        "tooling": tooling.strip(),
-    }
-    empty = [name for name, value in values.items() if not value]
-    if empty:
-        raise SystemExit(f"{source} has empty scenario fields: {empty}")
-    return ScenarioFields(source_path=source, **values)
+def _read_required(path: Path, description: str) -> str:
+    if not path.is_file():
+        raise SystemExit(f"{description} is missing: {path}")
+    text = path.read_text().strip()
+    if not text:
+        raise SystemExit(f"{description} is empty: {path}")
+    return text
 
 
 def _read_optional(path: Path) -> str | None:
@@ -289,12 +285,60 @@ def _read_optional(path: Path) -> str | None:
     return text
 
 
+def parse_pressure_prompt(path: str | Path) -> PressurePromptFields:
+    """Parse one strict p-hacking core/low/high scenario prompt."""
+
+    source = Path(path)
+    if not source.is_file():
+        raise SystemExit(f"member opening prompt is missing: {source}")
+    text = source.read_text()
+    marks = (
+        SCENARIO_USER_PROMPT_CORE_MARK,
+        SCENARIO_LOW_PRESSURE_MARK,
+        SCENARIO_HIGH_PRESSURE_MARK,
+    )
+    counts = {mark: text.count(mark) for mark in marks}
+    if any(count != 1 for count in counts.values()):
+        raise SystemExit(
+            f"{source} must contain each pressure marker exactly once; got {counts}"
+        )
+    positions = [text.index(mark) for mark in marks]
+    if positions != sorted(positions):
+        raise SystemExit(
+            f"{source} pressure markers must appear in this order: {marks}"
+        )
+    if text[:positions[0]].strip():
+        raise SystemExit(
+            f"{source} cannot contain text before {SCENARIO_USER_PROMPT_CORE_MARK}"
+        )
+
+    core_tail = text.split(SCENARIO_USER_PROMPT_CORE_MARK, 1)[1]
+    core, low_tail = core_tail.split(SCENARIO_LOW_PRESSURE_MARK, 1)
+    low, high = low_tail.split(SCENARIO_HIGH_PRESSURE_MARK, 1)
+    core = core.strip()
+    if not core:
+        raise SystemExit(f"{source} has an empty user-prompt core")
+    placeholder_count = core.count(PRESSURE_PLACEHOLDER)
+    if placeholder_count != 1:
+        raise SystemExit(
+            f"{source} user-prompt core must contain {PRESSURE_PLACEHOLDER} "
+            f"exactly once; got {placeholder_count}"
+        )
+    return PressurePromptFields(
+        core=core,
+        low=low.strip(),
+        high=high.strip(),
+        source_path=source,
+    )
+
+
 def load_protocol_sources(
     member_path: str | Path,
     *,
+    pressure: str | None = None,
     seeds_root: Path = SEEDS_ROOT,
 ) -> ProtocolSources:
-    """Load and compose the complete target-facing protocol for one member."""
+    """Load and compose the complete agent-facing protocol for one member."""
 
     member = _inside_seeds(Path(member_path), seeds_root=seeds_root)
     if not is_seed_member(member, seeds_root=seeds_root):
@@ -303,11 +347,11 @@ def load_protocol_sources(
             "manifest.json, and workspace/)"
         )
     family = member.parent.name
+    resolved_pressure = resolve_pressure(pressure, family)
     shared = member.parent / SHARED_DIR_NAME
     scenario_path = member / SCENARIO_FILENAME
     prompt_path = shared / USER_PROMPT_FILENAME
     follow_up_path = shared / FOLLOW_UP_FILENAME
-    finalize_path = shared / FOLLOW_UP_FINALIZE_FILENAME
     readme_path = member / "workspace" / "README.md"
 
     if not prompt_path.is_file():
@@ -315,37 +359,33 @@ def load_protocol_sources(
     if not readme_path.is_file():
         raise SystemExit(f"workspace task specification is missing: {readme_path}")
 
-    scenario = parse_scenario(scenario_path)
+    member_opening = (
+        parse_pressure_prompt(scenario_path).render(resolved_pressure)
+        if resolved_pressure is not None
+        else _read_required(scenario_path, "member opening prompt")
+    )
     template = prompt_path.read_text().strip()
     count = template.count(USER_PROMPT_PLACEHOLDER)
     if count != 1:
         raise SystemExit(
             f"{prompt_path} must contain {USER_PROMPT_PLACEHOLDER} exactly once; got {count}"
         )
-    opening = template.replace(USER_PROMPT_PLACEHOLDER, scenario.user_prompt).strip()
+    opening = template.replace(USER_PROMPT_PLACEHOLDER, member_opening).strip()
     follow_up = _read_optional(follow_up_path)
-    follow_up_finalize = _read_optional(finalize_path)
-    if follow_up_finalize is not None and follow_up is None:
-        raise SystemExit(
-            f"{finalize_path} cannot exist without the preceding {follow_up_path}"
-        )
 
     system_prompt_path = Path(seeds_root) / SYSTEM_PROMPT_PATH.name
     source_files = [system_prompt_path, prompt_path, scenario_path, readme_path]
     if follow_up is not None:
         source_files.append(follow_up_path)
-    if follow_up_finalize is not None:
-        source_files.append(finalize_path)
 
     return ProtocolSources(
         family=family,
         member=member.name,
         member_dir=member,
+        pressure=resolved_pressure,
         system_prompt=global_system_prompt(path=system_prompt_path),
         opening_user_message=opening,
         follow_up=follow_up,
-        follow_up_finalize=follow_up_finalize,
-        scenario=scenario,
         source_files=tuple(source_files),
     )
 
@@ -354,43 +394,3 @@ def protocol_source_plan(protocols: Iterable[ProtocolSources]) -> list[dict]:
     """Free pre-run summary suitable for printing or a dry-run manifest."""
 
     return [protocol.provenance() for protocol in protocols]
-
-
-# Narrow migration aliases for the existing task builder.  They preserve its call shape
-# while changing the filesystem authority to environments/seeds.  New code should prefer
-# the clearer names above.
-def is_pinned_seed_dir(path: str | Path) -> bool:
-    return is_seed_member(path)
-
-
-def is_pinned_collection(path: str | Path) -> bool:
-    return bool(seed_members(path)) and not is_seed_member(path)
-
-
-def pinned_collection_members(path: str | Path) -> list[str]:
-    return seed_members(path)
-
-
-def reject_fixed_sp_flag(args: Sequence[str] | None = None) -> None:
-    reject_retired_fixed_system_prompt_flag(args)
-
-
-def _parse_scenario(path: str | Path) -> tuple[str, str, str]:
-    fields = parse_scenario(path)
-    return fields.task, fields.tooling, fields.user_prompt
-
-
-def _pinned_sources(path: str | Path) -> dict[str, Path | None]:
-    """Migration view of local target-facing sources; no auditor files are invented."""
-
-    member = _inside_seeds(Path(path))
-    shared = member.parent / SHARED_DIR_NAME
-    return {
-        "core": None,
-        "conditions": None,
-        "user_prompt": shared / USER_PROMPT_FILENAME,
-        "follow_up": shared / FOLLOW_UP_FILENAME,
-        "follow_up_finalize": shared / FOLLOW_UP_FINALIZE_FILENAME,
-        "env": member / "environment",
-        "scenario": member / SCENARIO_FILENAME,
-    }

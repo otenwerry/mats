@@ -32,6 +32,8 @@ from env_viewer_cache import (
     viewer_build_lock,
     write_pickle_atomic as _write_pickle_atomic,
 )
+from env_viewer_turns import number_message_turns
+from interrupted_native_transcript import recover_interrupted_opencode_messages
 from judgment_semantics import (
     CURRENT_STRUCTURED_DIMENSIONS,
     FAMILY_STRUCTURED_DIMENSIONS,
@@ -203,7 +205,11 @@ def _iso_timestamp(value: Any) -> str | None:
     return text or None
 
 
-def _message_timings(sample: Any, target_model: str | None) -> list[dict]:
+def _message_timings(
+    sample: Any,
+    target_model: str | None,
+    messages: Iterable[Any] | None = None,
+) -> list[dict]:
     """Map saved messages to their existing Inspect event time.
 
     Inspect stores timing on ModelEvent and ToolEvent rather than ChatMessage. Model
@@ -213,7 +219,11 @@ def _message_timings(sample: Any, target_model: str | None) -> list[dict]:
     three agent harnesses.
     """
 
-    messages = list(getattr(sample, "messages", None) or [])
+    messages = list(
+        messages
+        if messages is not None
+        else (getattr(sample, "messages", None) or [])
+    )
     candidates: dict[str, tuple[int, float, str | None, str]] = {}
 
     def remember(
@@ -328,15 +338,9 @@ def normalize_messages(
     attachments = attachments or {}
     timing_records = list(timings or [])
     normalized: list[dict] = []
-    assistant_index = 0
-    user_index = 0
     for number, message in enumerate(messages or [], start=1):
         role = str(getattr(message, "role", "other") or "other")
         text, reasoning, other_blocks = _message_content(message, attachments)
-        if role == "assistant":
-            assistant_index += 1
-        if role == "user":
-            user_index += 1
 
         calls = []
         for call in getattr(message, "tool_calls", None) or []:
@@ -377,9 +381,10 @@ def normalize_messages(
             "elapsed_seconds": timing.get("elapsed_seconds"),
             "elapsed_time": _format_elapsed_time(timing.get("elapsed_seconds")),
             "timestamp_source": timing.get("timestamp_source"),
-            "assistant_turn": assistant_index if role == "assistant" else None,
-            "user_turn": user_index if role == "user" else None,
+            "assistant_turn": None,
+            "user_turn": None,
         })
+    number_message_turns(normalized)
     return normalized
 
 
@@ -393,7 +398,8 @@ def stamp_codex_native_roles(messages: list[dict]) -> None:
     the true wire role, typed as a second system message only because Inspect
     has no developer message type — and injects workspace facts as tagged,
     genuinely user-role turns. Both arrive before the first assistant turn.
-    M#/U# numbering stays what the model saw. Parser-stamped metadata wins.
+    M# numbering stays what the model saw. Scaffold-injected messages do not receive
+    an experimental U# label. Parser-stamped metadata wins.
     """
 
     seen_system = False
@@ -413,6 +419,7 @@ def stamp_codex_native_roles(messages: list[dict]) -> None:
                 if text.startswith(f"<{tag}>"):
                     message["scaffold_injected"] = tag
                     break
+    number_message_turns(messages)
 
 
 def transcript_text(messages: list[dict]) -> str:
@@ -647,9 +654,7 @@ def _structured_dimension(
             display = "yes" if value else "no"
         else:
             display = str(value) if valid else "invalid"
-    elif key in {
-        "noticed_honeypot", "situational_awareness", "environment_failure",
-    }:
+    elif key in {"noticed_honeypot", "environment_failure"}:
         value = raw_dict.get("value")
         valid = isinstance(value, bool)
         display = "yes" if value is True else "no" if value is False else "invalid"
@@ -1150,11 +1155,27 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         if retrospective is not None
         else _role_model(roles, "target") or run_metadata.get("target_model")
     )
-    raw_messages = getattr(sample, "messages", None) or []
+    raw_messages = list(getattr(sample, "messages", None) or [])
+    transcript_source = "sample_messages"
+    recovery = None
+    if (
+        retrospective is None
+        and ((real_env.get("harness") or {}).get("scaffold")) == "opencode"
+    ):
+        raw_messages, recovery = recover_interrupted_opencode_messages(
+            raw_messages,
+            list(getattr(sample, "events", None) or []),
+            target_model=target_model,
+            applied_before_judging=False,
+            attachments=attachments,
+        )
+        if recovery is not None:
+            real_env["interrupted_native_transcript"] = recovery
+            transcript_source = "reconstructed_interrupted_opencode_events"
     messages = normalize_messages(
         raw_messages,
         attachments,
-        _message_timings(sample, target_model),
+        _message_timings(sample, target_model, raw_messages),
     )
     if ((real_env.get("harness") or {}).get("scaffold")) == "codex":
         stamp_codex_native_roles(messages)
@@ -1197,6 +1218,19 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         score_explanation=score_explanation,
         judgment=judgment,
     )
+    judgment_transcript_coverage = None
+    if recovery is not None:
+        judgment_transcript_coverage = {
+            "complete": False,
+            "stored_judgment_predates_reconstruction": score is not None,
+            "messages_seen_by_stored_judgment": recovery["original_message_count"],
+            "messages_shown_after_reconstruction": recovery[
+                "reconstructed_message_count"
+            ],
+            "recovered_messages_not_seen_by_stored_judgment": recovery[
+                "added_message_count"
+            ],
+        }
     protocol = (real_env.get("protocol") or {}) if isinstance(real_env, dict) else {}
     ended_reason = protocol.get("ended_reason")
     assistant_messages = [message for message in messages if message["role"] == "assistant"]
@@ -1285,7 +1319,9 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         "judge_failure": judge_failure,
         "messages": messages,
         "transcript": transcript_text(messages),
-        "transcript_source": "sample_messages",
+        "transcript_source": transcript_source,
+        "interrupted_native_transcript": recovery,
+        "judgment_transcript_coverage": judgment_transcript_coverage,
         "real_env": real_env,
         "real_ended_reason": ended_reason,
         "dead": not has_target_output and target_output_tokens == 0,
@@ -1296,7 +1332,13 @@ def sample_to_audit(*, mode: str, mode_mtime: float, task: str,
         "compactions": compactions,
         "model_usage": _usage_dict(getattr(sample, "model_usage", None)),
         "role_usage": _usage_dict(getattr(sample, "role_usage", None)),
-        "load_issues": list((judgment or {}).get("issues") or []),
+        "load_issues": [
+            *list((judgment or {}).get("issues") or []),
+            *([{
+                "kind": "stored_judgment_missing_recovered_messages",
+                "recovered_message_count": recovery["added_message_count"],
+            }] if recovery is not None and score is not None else []),
+        ],
     }
     return finalize_audit_integrity(audit)
 

@@ -58,6 +58,55 @@ class InspectRunnerTests(unittest.TestCase):
         self.assertEqual(logs[0].samples[0].id, "completed-sample")
         self.assertEqual(manifest["status"], "complete")
 
+    def test_dead_targets_accepts_undated_included_usage_names(self):
+        log = SimpleNamespace(stats=SimpleNamespace(model_usage={
+            "openai-api/opencode-go/deepseek-v4-pro": SimpleNamespace(
+                output_tokens=24_158
+            ),
+            "openai-api/opencode-go/kimi-k2.6": SimpleNamespace(
+                output_tokens=18_634
+            ),
+            "subscription/openai/gpt-5.5": SimpleNamespace(output_tokens=10_000),
+        }))
+
+        dead = runner.dead_targets(
+            [log],
+            [
+                "openrouter/deepseek/deepseek-v4-pro-20260423",
+                "openrouter/moonshotai/kimi-k2.6-20260420",
+                "openai/gpt-5.5-2026-04-23",
+            ],
+        )
+
+        self.assertEqual(dead, [])
+
+    def test_dead_targets_still_reports_a_genuinely_silent_target(self):
+        log = SimpleNamespace(stats=SimpleNamespace(model_usage={
+            "openai-api/opencode-go/kimi-k2.6": SimpleNamespace(output_tokens=1),
+        }))
+
+        dead = runner.dead_targets(
+            [log],
+            [
+                "openrouter/deepseek/deepseek-v4-pro-20260423",
+                "openrouter/moonshotai/kimi-k2.6-20260420",
+            ],
+        )
+
+        self.assertEqual(dead, ["deepseek-v4-pro-20260423"])
+
+    def test_dead_targets_does_not_guess_between_two_snapshot_versions(self):
+        log = SimpleNamespace(stats=SimpleNamespace(model_usage={
+            "provider/example": SimpleNamespace(output_tokens=1),
+        }))
+
+        dead = runner.dead_targets(
+            [log],
+            ["provider/example-20260101", "provider/example-20260202"],
+        )
+
+        self.assertEqual(dead, ["example-20260101", "example-20260202"])
+
 
 if __name__ == "__main__":
     unittest.main()

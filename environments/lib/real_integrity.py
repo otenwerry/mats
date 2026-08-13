@@ -16,6 +16,29 @@ BLOCKING_TARGET_PROVIDER_EVENT_KINDS = frozenset({
 })
 
 
+JUDGMENT_FAILURE_ISSUES = frozenset({
+    "judge_not_judged",
+    "missing_environment_judge_score",
+    "missing_structured_result",
+    "judge_post_validation",
+    "unusable_judgment",
+    "judge_missing_recovered_messages",
+})
+
+ENVIRONMENT_FAILURE_ISSUES = frozenset({"environment_failure"})
+
+TECHNICAL_FAILURE_ISSUES = frozenset({
+    "missing_protocol_record",
+    "finalize_error",
+    "missing_final_artifact_record",
+    "gate_error",
+    "ended_early",
+    "production_prefix_boundary_lost",
+    "native_resume_bundle_unavailable",
+    *JUDGMENT_FAILURE_ISSUES,
+})
+
+
 EVIDENCE_CAVEAT_FLAGS = {
     "messages_excluded_by_family_policy": (
         "messages_excluded_by_family_policy", "judge messages omitted"
@@ -56,6 +79,10 @@ EVIDENCE_CAVEAT_FLAGS = {
     ),
     "prior_unrelated_task_omitted": (
         "prior_unrelated_task_omitted", "prior task omitted"
+    ),
+    "interrupted_native_transcript_reconstructed": (
+        "interrupted_native_transcript_reconstructed",
+        "interrupted transcript recovered",
     ),
 }
 
@@ -100,12 +127,15 @@ def sample_has_target_output(sample: Any) -> bool:
     return False
 
 
-def _visible_response(event: Any) -> bool:
+def _response_presence(event: Any) -> tuple[bool, bool]:
+    """Return (visible/actionable content, readable native reasoning)."""
+
     output = getattr(event, "output", None)
     choices = getattr(output, "choices", None) or []
     choice = choices[0] if choices else None
     message = getattr(choice, "message", None)
     content = getattr(message, "content", None)
+    reasoning = ""
     if isinstance(content, str):
         visible = content
     else:
@@ -116,10 +146,43 @@ def _visible_response(event: Any) -> bool:
             )
             for block in (content or [])
         )
+        reasoning = "".join(
+            str(
+                (block.get("reasoning") or block.get("summary") or block.get("text") or "")
+                if isinstance(block, dict)
+                else (
+                    getattr(block, "reasoning", None)
+                    or getattr(block, "summary", None)
+                    or getattr(block, "text", None)
+                    or ""
+                )
+            )
+            for block in (content or [])
+            if (
+                (block.get("type") if isinstance(block, dict) else getattr(block, "type", None))
+                == "reasoning"
+            )
+        )
     return bool(
         visible.strip()
         or str(getattr(message, "refusal", None) or "").strip()
         or (getattr(message, "tool_calls", None) or [])
+    ), bool(reasoning.strip())
+
+
+def _interrupted_opencode_sample(sample: Any) -> bool:
+    metadata = _get(sample, "metadata", {}) or {}
+    real_env = _get(metadata, "real_env", {}) or {}
+    harness = _get(real_env, "harness", {}) or {}
+    protocol = _get(real_env, "protocol", {}) or {}
+    recovery = _get(real_env, "interrupted_native_transcript", {}) or {}
+    return (
+        _get(harness, "scaffold") == "opencode"
+        and (
+            bool(_get(recovery, "reconstructed"))
+            or _get(protocol, "ended_reason")
+            in {"wall_clock_limit", "cancelled", "interrupted"}
+        )
     )
 
 
@@ -168,7 +231,7 @@ def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
         choices = getattr(output, "choices", None) or []
         choice = choices[0] if choices else None
         usage = getattr(output, "usage", None)
-        visible = _visible_response(event)
+        visible, reasoning = _response_presence(event)
         error = getattr(event, "error", None)
         stop_reason = str(getattr(choice, "stop_reason", None) or "unknown").lower()
         next_event = events[index + 1] if index + 1 < len(events) else None
@@ -195,6 +258,25 @@ def target_provider_events(sample: Any, target_model: str | None) -> list[dict]:
                 "attempt": index + 1,
                 "error": type(error).__name__,
             })
+        elif not visible and reasoning:
+            out.append({
+                "kind": "reasoning_only_response",
+                "attempt": index + 1,
+                "stop_reason": stop_reason,
+            })
+        elif not visible and next_event is not None:
+            out.append({
+                "kind": "empty_response_retried",
+                "attempt": index + 1,
+                "next_attempt": index + 2,
+                "stop_reason": stop_reason,
+            })
+        elif not visible and _interrupted_opencode_sample(sample):
+            out.append({
+                "kind": "empty_response_interrupted",
+                "attempt": index + 1,
+                "stop_reason": stop_reason,
+            })
         elif not visible:
             out.append({
                 "kind": "empty_response",
@@ -213,6 +295,202 @@ def blocking_provider_events(events: list[dict] | None) -> list[dict]:
     ]
 
 
+def _get(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
+
+def has_unfinished_action(messages: list[Any] | None) -> bool:
+    """Whether the stored trajectory ends with an unresolved assistant tool call."""
+
+    messages = messages or []
+    if not messages:
+        return False
+    last = messages[-1]
+    return _get(last, "role") == "assistant" and bool(_get(last, "tool_calls", []) or [])
+
+
+def _normalized_environment_failed(judgment: dict) -> bool:
+    for dimension in judgment.get("dimensions") or []:
+        if (
+            isinstance(dimension, dict)
+            and dimension.get("key") == "environment_failure"
+            and dimension.get("status") == "ok"
+        ):
+            return dimension.get("value") is True
+    result = (judgment.get("envelope") or {}).get("result") or {}
+    return ((result.get("environment_failure") or {}).get("value") is True)
+
+
+def _raw_environment_failed(envelope: dict) -> bool:
+    result = envelope.get("result") or {}
+    return ((result.get("environment_failure") or {}).get("value") is True)
+
+
+def _status_tags(
+    issues: list[str],
+    prefix_issues: list[str],
+    *,
+    ended_reason: str | None,
+    has_output: bool,
+    unfinished_action: bool,
+    source_tags: list[dict] | None = None,
+) -> list[dict]:
+    """Return the small, human-readable explanation used by the status column."""
+
+    issue_set = set(issues)
+    prefix_issue_set = set(prefix_issues)
+    all_issues = issue_set | prefix_issue_set
+    tags: list[dict] = []
+
+    def add(code: str, label: str, detail: str, *, severity: str) -> None:
+        existing = next((tag for tag in tags if tag["code"] == code), None)
+        if existing is None:
+            tags.append({
+                "code": code,
+                "label": label,
+                "detail": detail,
+                "severity": severity,
+            })
+        elif severity == "error":
+            # A reason can have both a prefix-only and an invalidating cause. Red
+            # wins only when that reason independently invalidates this trajectory.
+            existing["severity"] = "error"
+
+    if "target_no_output" in all_issues:
+        add(
+            "no_output",
+            "no output",
+            "The agent produced no visible output or tool call.",
+            severity="error",
+        )
+    elif ended_reason not in (None, "protocol_end") or unfinished_action:
+        ended_codes = {
+            "wall_clock_limit" if ended_reason == "wall_clock_limit" else "ended_early",
+        }
+        if unfinished_action:
+            ended_codes.add("unfinished_action")
+        if ended_reason == "gate_error_end":
+            ended_codes.add("gate_error")
+        add(
+            "ended_partway",
+            "ended partway",
+            "The scripted run did not reach its normal end.",
+            severity="error" if ended_codes & issue_set else "warning",
+        )
+
+    if all_issues & JUDGMENT_FAILURE_ISSUES:
+        add(
+            "judgment_failed",
+            "judgment failed",
+            "No usable final judgment was stored.",
+            severity="error",
+        )
+    if all_issues & ENVIRONMENT_FAILURE_ISSUES:
+        add(
+            "environment_failed",
+            "environment failed",
+            "The judge found that the environment failed.",
+            severity="error",
+        )
+    if "source_prefix_ineligible" in all_issues:
+        add(
+            "prefix_ineligible",
+            "prefix ineligible",
+            "This continuation was built from a source that cannot serve as a prefix.",
+            severity="error",
+        )
+
+    if ended_reason == "wall_clock_limit":
+        add(
+            "time_limit",
+            "time limit",
+            "The wall-clock limit ended the run.",
+            severity=(
+                "error" if "wall_clock_limit" in issue_set else "warning"
+            ),
+        )
+    if unfinished_action:
+        add(
+            "unfinished_action",
+            "unfinished action",
+            "The final assistant tool call has no stored result.",
+            severity="error" if "unfinished_action" in issue_set else "warning",
+        )
+    technical_codes = {
+        code for code in all_issues
+        if code.startswith("target_provider_") or code in TECHNICAL_FAILURE_ISSUES
+    }
+    if technical_codes:
+        add(
+            "technical_failure",
+            "technical failure",
+            "A technical failure blocked completion.",
+            severity="error" if technical_codes & issue_set else "warning",
+        )
+
+    # A continuation sourced from an ineligible run should expose the source's
+    # concrete qualifier without making the continuation itself look timed out.
+    if "source_prefix_ineligible" in all_issues:
+        for tag in source_tags or []:
+            code = str(tag.get("code") or "")
+            if code in {"time_limit", "unfinished_action", "technical_failure"}:
+                add(
+                    code,
+                    str(tag.get("label") or code.replace("_", " ")),
+                    str(tag.get("detail") or ""),
+                    severity=str(tag.get("severity") or "warning"),
+                )
+
+    if (issues or prefix_issues) and not tags:
+        add(
+            "other",
+            "other",
+            "See the trajectory details for the underlying issue.",
+            severity="error" if issues else "warning",
+        )
+    return tags
+
+
+def mechanical_status_record(
+    *,
+    issues: list[str],
+    prefix_issues: list[str],
+    continuation: bool,
+    ended_reason: str | None,
+    has_output: bool,
+    unfinished_action: bool,
+    source_tags: list[dict] | None = None,
+) -> dict:
+    """Classify benchmark and prefix eligibility from orthogonal issue lists."""
+
+    issues = list(dict.fromkeys(str(code) for code in issues))
+    prefix_issues = list(dict.fromkeys(str(code) for code in prefix_issues))
+    if issues:
+        status = "invalid"
+    elif prefix_issues and not continuation:
+        status = "benchmark_only"
+    else:
+        status = "valid"
+    return {
+        "mechanical_status": status,
+        "benchmark_eligible": not issues,
+        "prefix_eligible": not issues and not prefix_issues,
+        "integrity_status": "excluded" if issues else "included",
+        "integrity_issues": issues,
+        "prefix_issues": prefix_issues,
+        "status_tags": _status_tags(
+            issues,
+            prefix_issues,
+            ended_reason=ended_reason,
+            has_output=has_output,
+            unfinished_action=unfinished_action,
+            source_tags=source_tags,
+        ),
+    }
+
+
 def _flag(code: str, label: str, *, severity: str, detail: str) -> dict:
     return {
         "code": code,
@@ -229,12 +507,16 @@ def finalize_audit_integrity(audit: dict) -> dict:
     protocol = real_env.get("protocol") or {}
     flags: list[dict] = []
     integrity: list[str] = []
+    prefix_issues: list[str] = []
+    continuation = bool(real_env.get("continuation"))
 
     def add(code: str, label: str, *, severity: str, detail: str,
-            excludes: bool = False) -> None:
+            excludes: bool = False, prefix_only: bool = False) -> None:
         flags.append(_flag(code, label, severity=severity, detail=detail))
         if excludes:
             integrity.append(code)
+        if prefix_only:
+            prefix_issues.append(code)
 
     if not protocol:
         add("missing_protocol_record", "missing protocol", severity="error",
@@ -279,6 +561,19 @@ def finalize_audit_integrity(audit: dict) -> dict:
             ).strip(),
             excludes=True,
         )
+    coverage = audit.get("judgment_transcript_coverage") or {}
+    if coverage.get("stored_judgment_predates_reconstruction"):
+        missing = coverage.get("recovered_messages_not_seen_by_stored_judgment")
+        add(
+            "judge_missing_recovered_messages",
+            "judgment missed transcript",
+            severity="error",
+            detail=(
+                f"The stored judgment did not receive {missing} recovered transcript "
+                "message(s) that are now visible."
+            ),
+            excludes=True,
+        )
     if judgment.get("format") == "structured":
         envelope = judgment.get("envelope") or {}
         if not isinstance(envelope.get("result"), dict):
@@ -291,6 +586,14 @@ def finalize_audit_integrity(audit: dict) -> dict:
     elif judgment.get("format") not in {"legacy_numeric", None}:
         add("unusable_judgment", "unusable judgment", severity="error",
             detail="The judgment format is not usable.", excludes=True)
+    if _normalized_environment_failed(judgment):
+        add(
+            "environment_failure",
+            "environment failed",
+            severity="error",
+            detail="The structured judge found that the environment failed.",
+            excludes=True,
+        )
 
     compute = real_env.get("compute") or {}
     exit_code = compute.get("pipeline_exit_code")
@@ -303,16 +606,32 @@ def finalize_audit_integrity(audit: dict) -> dict:
             ))
     ended_reason = protocol.get("ended_reason") or audit.get("real_ended_reason")
     if ended_reason == "wall_clock_limit":
-        add("wall_clock_limit", "clock limit", severity="warning",
-            detail="The trajectory ended at its wall-clock limit.")
+        add(
+            "wall_clock_limit",
+            "clock limit",
+            severity="error" if continuation else "warning",
+            detail="The trajectory ended at its wall-clock limit.",
+            excludes=continuation,
+            prefix_only=not continuation,
+        )
     elif ended_reason not in (None, "protocol_end", "gate_error_end"):
         # protocol_end is the one normal ending; gate_error_end is already an
         # excluding gate_error flag above. Anything else (interrupted, cancelled,
         # unknown historical values) ended the run before the scripted protocol
         # finished and must stay visible once the metadata "ended" cell is gone.
-        add("ended_early", f"ended: {ended_reason}", severity="warning",
+        add("ended_early", f"ended: {ended_reason}", severity="error",
             detail=f"The run ended before the scripted protocol finished "
-                   f"(ended_reason: {ended_reason}).")
+                   f"(ended_reason: {ended_reason}).", excludes=True)
+    unfinished_action = has_unfinished_action(audit.get("messages"))
+    if unfinished_action:
+        add(
+            "unfinished_action",
+            "unfinished action",
+            severity="error" if continuation else "warning",
+            detail="The final assistant tool call has no stored result.",
+            excludes=continuation,
+            prefix_only=not continuation,
+        )
     truncations = audit.get("tool_truncations") or []
     if truncations:
         add("tool_output_truncated", f"tool truncation ×{len(truncations)}",
@@ -322,10 +641,18 @@ def finalize_audit_integrity(audit: dict) -> dict:
     if compactions:
         add("context_compacted", f"compacted ×{len(compactions)}", severity="warning",
             detail="Inspect compacted the model context during this trajectory.")
-    continuation = real_env.get("continuation") or {}
+    recovery = real_env.get("interrupted_native_transcript") or {}
+    if recovery.get("reconstructed"):
+        add(
+            "interrupted_native_transcript_reconstructed",
+            f"partial transcript recovered ×{recovery.get('added_message_count', '?')}",
+            severity="warning",
+            detail=str(recovery.get("limitation") or ""),
+        )
+    continuation_record = real_env.get("continuation") or {}
     native_prefix = (
-        continuation.get("production_native_resume")
-        or continuation.get("subscription_native_resume")
+        continuation_record.get("production_native_resume")
+        or continuation_record.get("subscription_native_resume")
         or {}
     )
     if native_prefix.get("boundary_lost"):
@@ -348,12 +675,12 @@ def finalize_audit_integrity(audit: dict) -> dict:
         add(
             "native_resume_bundle_unavailable",
             "native resume unavailable",
-            severity="error",
+            severity="warning",
             detail=(
                 "The native scaffold's session bundle was not saved, so "
                 "this trajectory cannot be resumed literally."
             ),
-            excludes=True,
+            prefix_only=True,
         )
     monitoring = harness_record.get("native_loss_monitoring") or {}
     if (
@@ -448,14 +775,33 @@ def finalize_audit_integrity(audit: dict) -> dict:
         )
 
     # A pipeline sidecar may contain additional per-sample issues.  Preserve these
-    # without turning a historical exit-code warning into an exclusion.
+    # without turning a historical exit-code warning into an exclusion. Provider
+    # anomalies are fully recomputed from the raw events above; an older sidecar's
+    # superseded empty-response policy must not override that current classification.
     stored = audit.get("stored_integrity") or {}
+    current_provider_issues = {
+        f"target_provider_{event['kind']}"
+        for event in blocking_provider_events(audit.get("target_provider_events"))
+    }
     for code in stored.get("issues") or []:
         code = str(code)
+        if code.startswith("target_provider_") and code not in current_provider_issues:
+            continue
+        if code == "native_resume_bundle_unavailable":
+            if code not in prefix_issues:
+                prefix_issues.append(code)
+            continue
         if code not in integrity:
             integrity.append(code)
         if not any(item["code"] == code for item in flags):
             add(code, code.replace("_", " "), severity="error",
+                detail="Stored by the experiment pipeline.")
+    for code in stored.get("prefix_issues") or []:
+        code = str(code)
+        if code not in prefix_issues:
+            prefix_issues.append(code)
+        if not any(item["code"] == code for item in flags):
+            add(code, code.replace("_", " "), severity="warning",
                 detail="Stored by the experiment pipeline.")
 
     retrospective = audit.get("retrospective_rejudge") or {}
@@ -474,9 +820,113 @@ def finalize_audit_integrity(audit: dict) -> dict:
             integrity.append(str(code))
 
     audit["flags"] = flags
-    audit["integrity_issues"] = list(dict.fromkeys(integrity))
-    audit["integrity_status"] = "excluded" if audit["integrity_issues"] else "included"
+    status = mechanical_status_record(
+        issues=integrity,
+        prefix_issues=prefix_issues,
+        continuation=continuation,
+        ended_reason=ended_reason,
+        has_output=not audit.get("dead"),
+        unfinished_action=unfinished_action,
+    )
+    audit.update(status)
     return audit
+
+
+def sample_integrity_record(
+    task: str,
+    sample: Any,
+    target_model: str | None,
+    *,
+    stored_record: dict | None = None,
+) -> dict:
+    """Classify one raw sample for both sidecars and continuation preflight."""
+
+    real_env = (getattr(sample, "metadata", None) or {}).get("real_env") or {}
+    protocol = real_env.get("protocol") or {}
+    continuation = bool(real_env.get("continuation"))
+    target_usage = (getattr(sample, "role_usage", None) or {}).get("target")
+    output_tokens = getattr(target_usage, "output_tokens", 0) or 0
+    has_output = sample_has_target_output(sample) or output_tokens > 0
+    messages = getattr(sample, "messages", None) or []
+    unfinished_action = has_unfinished_action(messages)
+    score = (getattr(sample, "scores", None) or {}).get("environment_judge")
+    score_metadata = (getattr(score, "metadata", None) or {}) if score else {}
+    envelope = score_metadata.get("environment_judge") or {}
+    issues: list[str] = []
+    prefix_issues: list[str] = []
+
+    if not protocol:
+        issues.append("missing_protocol_record")
+    if not real_env.get("artifacts"):
+        issues.append("missing_final_artifact_record")
+    if real_env.get("finalize_error"):
+        issues.append("finalize_error")
+    if (
+        (real_env.get("harness") or {}).get("mode") in {"production", "subscription"}
+        and (real_env.get("native_resume_bundle") or {}).get("available") is not True
+    ):
+        prefix_issues.append("native_resume_bundle_unavailable")
+    if any(gate.get("verdict") == "error" for gate in real_env.get("gates", [])) \
+            or protocol.get("ended_reason") == "gate_error_end":
+        issues.append("gate_error")
+    if not has_output:
+        issues.append("target_no_output")
+
+    events = target_provider_events(sample, target_model)
+    current_provider_issues = {
+        f"target_provider_{event['kind']}"
+        for event in blocking_provider_events(events)
+    }
+    issues.extend(current_provider_issues)
+    if score is None:
+        issues.append("missing_environment_judge_score")
+    if not isinstance(envelope.get("result"), dict):
+        issues.append("missing_structured_result")
+    if envelope.get("post_validation") != "passed":
+        issues.append("judge_post_validation")
+    if _raw_environment_failed(envelope):
+        issues.append("environment_failure")
+
+    ended_reason = protocol.get("ended_reason")
+    if ended_reason == "wall_clock_limit":
+        (issues if continuation else prefix_issues).append("wall_clock_limit")
+    elif ended_reason not in (None, "protocol_end", "gate_error_end"):
+        issues.append("ended_early")
+    if unfinished_action:
+        (issues if continuation else prefix_issues).append("unfinished_action")
+
+    # Old sidecars remain useful for failures that cannot be reconstructed from
+    # the sample. Reinterpret the former native-resume exclusion as prefix-only.
+    for code in (stored_record or {}).get("issues") or []:
+        code = str(code)
+        if code.startswith("target_provider_") and code not in current_provider_issues:
+            continue
+        destination = prefix_issues if code == "native_resume_bundle_unavailable" else issues
+        destination.append(code)
+    prefix_issues.extend(
+        str(code) for code in (stored_record or {}).get("prefix_issues") or []
+    )
+
+    status = mechanical_status_record(
+        issues=issues,
+        prefix_issues=prefix_issues,
+        continuation=continuation,
+        ended_reason=ended_reason,
+        has_output=has_output,
+        unfinished_action=unfinished_action,
+    )
+    return {
+        "task": str(task),
+        "sample": str(sample.id),
+        "epoch": sample.epoch,
+        # Preserve the old field for pipeline callers while storing the clearer
+        # benchmark/prefix decisions alongside it.
+        "status": status["integrity_status"],
+        "issues": status["integrity_issues"],
+        "prefix_status": "eligible" if status["prefix_eligible"] else "ineligible",
+        "target_provider_events": events,
+        **status,
+    }
 
 
 def integrity_sidecar_records(logs: list[Any]) -> list[dict]:
@@ -488,48 +938,48 @@ def integrity_sidecar_records(logs: list[Any]) -> list[dict]:
         target_role = roles.get("target")
         target_model = str(getattr(target_role, "model", None) or target_role or "")
         for sample in getattr(log, "samples", None) or []:
-            real_env = (getattr(sample, "metadata", None) or {}).get("real_env") or {}
-            target_usage = (getattr(sample, "role_usage", None) or {}).get("target")
-            output_tokens = getattr(target_usage, "output_tokens", 0) or 0
-            has_target_output = sample_has_target_output(sample)
-            score = (getattr(sample, "scores", None) or {}).get("environment_judge")
-            score_metadata = getattr(score, "metadata", None) or {} if score else {}
-            envelope = score_metadata.get("environment_judge") or {}
-            issues = []
-            if not real_env.get("protocol"):
-                issues.append("missing_protocol_record")
-            if not real_env.get("artifacts"):
-                issues.append("missing_final_artifact_record")
-            if real_env.get("finalize_error"):
-                issues.append("finalize_error")
-            if (
-                (real_env.get("harness") or {}).get("mode")
-                in {"production", "subscription"}
-                and (real_env.get("native_resume_bundle") or {}).get("available")
-                is not True
-            ):
-                issues.append("native_resume_bundle_unavailable")
-            if any(gate.get("verdict") == "error" for gate in real_env.get("gates", [])):
-                issues.append("gate_error")
-            if not has_target_output and output_tokens == 0:
-                issues.append("target_no_output")
-            events = target_provider_events(sample, target_model)
-            issues.extend(
-                f"target_provider_{event['kind']}"
-                for event in blocking_provider_events(events)
-            )
-            if score is None:
-                issues.append("missing_environment_judge_score")
-            if not isinstance(envelope.get("result"), dict):
-                issues.append("missing_structured_result")
-            if envelope.get("post_validation") != "passed":
-                issues.append("judge_post_validation")
-            records.append({
-                "task": str(log.eval.task),
-                "sample": str(sample.id),
-                "epoch": sample.epoch,
-                "status": "excluded" if issues else "included",
-                "issues": list(dict.fromkeys(issues)),
-                "target_provider_events": events,
-            })
+            records.append(sample_integrity_record(
+                str(log.eval.task), sample, target_model
+            ))
     return records
+
+
+def mark_ineligible_prefix_source(audit: dict, source: dict) -> dict:
+    """Invalidate a continuation whose source cannot mechanically be a prefix."""
+
+    if not (audit.get("real_env") or {}).get("continuation"):
+        return audit
+    if source.get("prefix_eligible", True):
+        return audit
+
+    issue = "source_prefix_ineligible"
+    issues = list(audit.get("integrity_issues") or [])
+    if issue not in issues:
+        issues.append(issue)
+    prefix_issues = list(audit.get("prefix_issues") or [])
+    source_id = source.get("id") or source.get("trajectory_id") or "unknown"
+    detail = (
+        f"Source trajectory #{source_id} has status "
+        f"{source.get('mechanical_status') or 'prefix-ineligible'}."
+    )
+    flags = [
+        flag for flag in (audit.get("flags") or [])
+        if flag.get("code") != issue
+    ]
+    flags.append(_flag(issue, "prefix ineligible", severity="error", detail=detail))
+    audit["flags"] = flags
+    ended_reason = (
+        ((audit.get("real_env") or {}).get("protocol") or {}).get("ended_reason")
+        or audit.get("real_ended_reason")
+    )
+    status = mechanical_status_record(
+        issues=issues,
+        prefix_issues=prefix_issues,
+        continuation=True,
+        ended_reason=ended_reason,
+        has_output=not audit.get("dead"),
+        unfinished_action=has_unfinished_action(audit.get("messages")),
+        source_tags=source.get("status_tags") or [],
+    )
+    audit.update(status)
+    return audit

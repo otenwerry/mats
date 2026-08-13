@@ -1,4 +1,4 @@
-"""Canonical target-facing tool schemas for the real-environment project.
+"""Canonical agent-facing tool schemas for the real-environment project.
 
 The implementations live in :mod:`real_target_tools`.  Keeping the wire protocol in a
 small dependency-free module makes it easy to review and fingerprint without importing

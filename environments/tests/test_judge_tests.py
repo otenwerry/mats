@@ -14,7 +14,11 @@ ENVIRONMENTS = Path(__file__).resolve().parents[1]
 
 def test_judge_tests_defaults_to_fixed_cohort_without_running_it() -> None:
     main = Mock()
-    with patch.object(sys, "argv", ["exp_judge_tests.py", "--dry-run"]), patch.dict(
+    with patch.object(
+        sys,
+        "argv",
+        ["exp_judge_tests.py", "--dry-run"],
+    ), patch.dict(
         sys.modules, {"exp_rejudge": SimpleNamespace(main=main)}
     ):
         runpy.run_path(str(ENVIRONMENTS / "exp_judge_tests.py"), run_name="__main__")
@@ -27,7 +31,14 @@ def test_judge_tests_defaults_to_fixed_cohort_without_running_it() -> None:
 def test_explicit_source_selection_is_preserved() -> None:
     main = Mock()
     with patch.object(
-        sys, "argv", ["exp_judge_tests.py", "--source-runs=one", "--dry-run"]
+        sys,
+        "argv",
+        [
+            "exp_judge_tests.py",
+            "--source-runs=one",
+            "--judge=gpt-5.6-luna",
+            "--dry-run",
+        ],
     ), patch.dict(sys.modules, {"exp_rejudge": SimpleNamespace(main=main)}):
         runpy.run_path(str(ENVIRONMENTS / "exp_judge_tests.py"), run_name="__main__")
         arguments = list(sys.argv)

@@ -6,7 +6,7 @@ This is where I keep track of how each experiment runs. If you edit some code an
 
 - [stuff in brackets=xyz] means the flag is optional, with xyz being the default value.
 - Petri judge: petri/lib/judge_models.py or $PETRI_JUDGE; default gpt-5.6-luna.
-- Environments judge choices: environments/lib/judge_selection.py; paid endpoints require --judge.
+- Environments judge: environments/lib/judge_selection.py or $ENVIRONMENTS_JUDGE; default gpt-5.6-luna.
 
 # Environments
 
@@ -22,21 +22,36 @@ uv run exp_real_audit_pipeline.py
     --seeds=x,y,z/all
     --epochs=n
     --harness=simple/production/subscription
+    [--judge=gpt-5.6-luna]
     [--condition=allow]
+    [--pressure=low/high]  # p_hacking only; default low
     [--reasoning=yes/no]
-    --judge=x
     [--gate-model=<judge>]
     [--concurrency=50]
-    [--compute=aws/local]  # default ML aws; p_hacking local
-    [--vm-concurrency=50]
+    [--compute=aws/local]  # default aws for all seed families
+    [--vm-concurrency=75]
     [--aws-region=us-west-2]
     [--aws-instance-type=c7a.xlarge]
     [--aws-bucket=<name>]
     [--aws-secret-env=NAME,...]
     [--sandbox-concurrency=8]
-    [--time-limit=<sec>]  # ML 7200; p_hacking 1800
+    [--time-limit=<sec>]  # ML 4200; p_hacking 1800
     [--dry-run]
     [--skip-viewer]
+
+## Fraud detection base-rate batch
+
+uv run exp_fraud_base_rate_batch.py
+    [--epochs=40]
+    [--vm-concurrency=75]
+    [--reasoning=yes/no]
+    [--judge=gpt-5.6-luna]
+    [--aws-region=us-west-2]
+    [--aws-instance-type=c7a.xlarge]
+    [--aws-bucket=<name>]
+    [--aws-secret-env=NAME,...]
+    [--skip-viewer]
+    [--dry-run]
 
 ## Continuations
 
@@ -48,17 +63,18 @@ uv run exp_continuation_pipeline.py
     --harness=simple/production/subscription
     --prefixes=<viewer ids> and/or --prefix-files=<paths>
     [--condition=allow]
-    --judge=x
+    [--pressure=low/high]  # p_hacking only; default low
+    [--judge=gpt-5.6-luna]
     [--gate-model=<judge>]
     [--concurrency=50]
     [--sandbox-concurrency=8]
-    [--compute=aws/local]  # default ML aws; p_hacking local
-    [--vm-concurrency=50]
+    [--compute=aws/local]  # default aws for all seed families
+    [--vm-concurrency=75]
     [--aws-region=us-west-2]
     [--aws-instance-type=c7a.xlarge]
     [--aws-bucket=<name>]
     [--aws-secret-env=NAME,...]
-    [--time-limit=<sec>]  # ML 7200; p_hacking 1800
+    [--time-limit=<sec>]  # ML 4200; p_hacking 1800
     [--resume-campaign=<id>]
     [--retry-failed=<id>]
     [--dry-run]
@@ -76,12 +92,65 @@ uv run exp_nq_prefix.py
     [--max-questions=500]
     [--dry-run]
 
+## Fixed-question prefixes
+
+uv run exp_science_ethics_prefix.py
+    --model=<target>
+    --harness=simple/production/subscription
+    [--reasoning=yes/no]
+    [--name=<slug>]
+    [--dry-run]
+
+uv run exp_general_ethics_prefix.py
+    --model=<target>
+    --harness=simple/production/subscription
+    [--reasoning=yes/no]
+    [--name=<slug>]
+    [--dry-run]
+
+uv run exp_move_fast_prefix.py
+    --model=<target>
+    --harness=simple/production/subscription
+    [--reasoning=yes/no]
+    [--name=<slug>]
+    [--dry-run]
+
+## Prefix batch
+
+uv run exp_prefix_batch.py
+    [--nq-tokens=2000]
+    [--nq-seed=1234]
+    [--reasoning=yes/no]
+    [--concurrency=20]
+    [--simple-only]
+    [--resume-batch=<batch-id-or-manifest-path>]
+    [--also-simple]
+    [--skip-viewer]
+    [--dry-run]
+
+## Continuation prefix batch
+
+uv run exp_continuation_prefix_batch.py
+    [--epochs=40]
+    [--vm-concurrency=75]
+    [--subscription-vm-concurrency=75]
+    [--infrastructure-retries=1]
+    [--treatment=purpose-built-prefix]
+    [--native-only]
+    [--aws-region=us-west-2]
+    [--aws-instance-type=c7a.xlarge]
+    [--aws-bucket=<name>]
+    [--aws-secret-env=NAME,...]
+    [--resume-batch=<batch-id-or-manifest-path>]
+    [--skip-viewer]
+    [--dry-run]
+
 ## Rejudge stored trajectories
 
 uv run exp_rejudge.py
-    --source-runs=<all, judge-tests, or real-v* run-dir names>
+    --source-runs=<old, all, judge-tests, or real-v* run-dir names>
     [--family=all/ml_training_data_misuse/p_hacking]
-    --judge=x
+    [--judge=gpt-5.6-luna]
     [--concurrency=10]
     [--dry-run]
     [--force]
@@ -91,7 +160,7 @@ uv run exp_rejudge.py
 
 uv run exp_judge_tests.py
     [--family=all/ml_training_data_misuse/p_hacking]
-    --judge=x
+    [--judge=gpt-5.6-luna]
     [--concurrency=10]
     [--dry-run]
     [--force]
@@ -99,12 +168,12 @@ uv run exp_judge_tests.py
 
 ## AWS setup
 
-aws login --profile mats-environments --region us-west-2
-export AWS_PROFILE=mats-environments
+aws login --profile mats-login --region us-west-2
 
 uv run exp_real_audit_pipeline.py
     --aws-setup
     (--confirm-approved-account | --confirm-personal-account)
+    [--harness=subscription]
     [--aws-region=us-west-2]
     [--aws-instance-type=c7a.xlarge]
     [--aws-bucket=<name>]

@@ -94,10 +94,11 @@ LONG_CONTEXT_PRICING_CAVEAT = (
 )
 
 SUBSCRIPTION_USAGE_CAVEAT = (
-    "Direct subscription agent calls (model slugs prefixed 'subscription/') draw on "
-    "included subscription quota, not per-run billing. Their tokens are recorded, but "
-    "they carry no dollar cost and are excluded from total_cost_usd; the exclusion is "
-    "flagged via subscription_models_not_metered/total_excludes_subscription_usage."
+    "Subscription agent calls (native model slugs prefixed 'subscription/' and "
+    "host-bridge model slugs containing '/opencode-go/') draw on included subscription "
+    "quota, not per-run billing. Their tokens are recorded, but they carry no dollar "
+    "cost and are excluded from total_cost_usd; the exclusion is flagged via "
+    "subscription_models_not_metered/total_excludes_subscription_usage."
 )
 
 
@@ -308,7 +309,7 @@ def _optional_usage_value(
 def estimate_usage_cost(slug: str, usage: Mapping[str, Any] | Any) -> dict:
     """Price one stored usage record, preserving exact-vs-estimated provenance."""
 
-    if slug.startswith("subscription/"):
+    if slug.startswith("subscription/") or "/opencode-go/" in slug:
         return {
             "cost_usd": None,
             "exact": False,

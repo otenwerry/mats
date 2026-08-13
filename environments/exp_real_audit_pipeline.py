@@ -10,10 +10,10 @@ reasoning_prompt_benchmark + checkout_redesign + retrieval_practice (p_hacking),
 
 Usage (from mats/environments/):
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=ml_training_data_misuse \
-      --seeds=fraud_detection --epochs=3 --harness=simple --judge=gpt-5.6-luna
+      --seeds=fraud_detection --epochs=3 --harness=simple
   uv run exp_real_audit_pipeline.py --targets=qwen3-32b --seed-dir=p_hacking \
       --seeds=reasoning_prompt_benchmark --epochs=3 --harness=production \
-      --judge=gpt-5.6-luna
+      --pressure=high
 
 Flags:
   --targets=<a,b,..>   REQUIRED. agent names from TARGET_CHOICES.
@@ -24,21 +24,23 @@ Flags:
   --harness=simple|production|subscription  REQUIRED. simple is the existing fixed
                        Inspect tool loop. production uses API-backed Claude Code,
                        Codex, or OpenCode. subscription uses Claude/Codex subscription
-                       login quota; OpenCode remains API-backed.
+                       login quota and OpenCode Go for mapped models; other OpenCode
+                       models remain API-backed.
   --reasoning=yes|no   optional (default yes). Same semantics as the simulated pipeline.
   --condition=<c>      defaults to allow; v1 supports allow only (correct is a designed
                        seam, rejected loudly).
-  --judge=<m>          REQUIRED. alignment judge; see lib/judge_selection.py.
+  --pressure=low|high  p_hacking only; defaults to low.
+  --judge=<m>          alignment judge; defaults to gpt-5.6-luna.
   --gate-model=<m>     first-submission judge; defaults to and must equal --judge.
   --concurrency=<N>    LLM parallelism (default 50).
   --sandbox-concurrency=<N>  max live Docker containers (default 8).
   --time-limit=<sec>   initial wall clock; default depends on the seed family
-                       (ml 7200 / p_hacking 1800, else 3600). There is no turn cap.
-                       ML's first pass is fixed at 7200; its follow-up resets to 3600.
+                       (ml 4200 / p_hacking 1800, else 3600). There is no turn cap.
+                       ML's first pass is fixed at 4200; its follow-up resets to 2700.
   --skip-viewer        don't rebuild the viewer at the end.
-  --compute=aws|local  ML defaults to aws; p-hacking defaults to local. AWS runs one
-                       trajectory on each VM.
-  --vm-concurrency=<N> max active trajectory VMs (default 50).
+  --compute=aws|local  defaults to aws for every seed family. AWS runs one trajectory
+                       on each VM; use local explicitly for laptop debugging.
+  --vm-concurrency=<N> max active trajectory VMs (default 75).
   --dry-run            free AWS preflight: cells, source SHA/size, AMI/quota, price,
                        and worst-case compute cost; no VM or model calls.
   --aws-setup (--confirm-approved-account|--confirm-personal-account)
@@ -53,8 +55,8 @@ Flags:
 Local compute requires a running Docker daemon (checked before any spend). AWS setup
 requires an explicit, truthfully recorded team-funded or personal/reimbursement account.
 Costs money (API-backed agent calls, stage-one/final judge calls, and EC2 for AWS
-runs). Direct subscription agents consume plan quota instead of incurring a measured
-per-run API charge. The viewer stage and AWS dry-run are free.
+runs). Included-usage subscription agents consume plan quota instead of incurring a
+measured per-run API charge. The viewer stage and AWS dry-run are free.
 """
 
 import asyncio
@@ -81,6 +83,7 @@ from model_catalog import (
 from protocol_sources import (
     reject_retired_fixed_system_prompt_flag,
     resolve_condition,
+    resolve_pressure,
     resolve_reasoning,
     resolve_seeds,
 )
@@ -93,7 +96,7 @@ from exp_real_audit import (
 )
 from exp_inspect_runner import dead_targets, run_eval
 from exp_target_harness import resolve_harness
-from judge_selection import require_judge_arg, resolve_judge
+from judge_selection import resolve_judge
 from pipeline_cli import positive_int_arg, validate_cli_args, value_arg
 from pipeline_integrity import (
     audit_integrity_failures,
@@ -123,18 +126,8 @@ def reasoning_tag(reasoning: bool) -> str:
     return " [reasoning:on]" if reasoning else " [reasoning:off]"
 
 
-def env_viewer():
-    """Load this project's free viewer by its explicit path."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "environments_viewer", _ENVIRONMENTS / "viewer.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
 _VALUE_FLAGS = {
-    "--targets", "--seed-dir", "--seeds", "--epochs", "--harness", "--reasoning", "--condition",
+    "--targets", "--seed-dir", "--seeds", "--epochs", "--harness", "--reasoning", "--condition", "--pressure",
     "--concurrency", "--sandbox-concurrency", "--time-limit",
     "--judge", "--gate-model", "--compute",
     "--vm-concurrency", "--aws-region", "--aws-instance-type", "--aws-bucket",
@@ -228,26 +221,23 @@ def _parse_args() -> dict:
         if (resolved_seed_path / "manifest.json").is_file()
         else resolved_seed_path.name
     )
-    compute = _arg("--compute") or (
-        "aws" if family == "ml_training_data_misuse" else "local"
-    )
+    pressure = resolve_pressure(_arg("--pressure"), family)
+    compute = _arg("--compute") or "aws"
     if compute not in {"aws", "local"}:
         raise SystemExit("--compute must be aws or local")
-    if compute == "aws" and family != "ml_training_data_misuse":
-        raise SystemExit("--compute=aws is currently scoped to ML real environments only")
     time_limit = resolve_time_limit(_arg("--time-limit"), family)
-    if compute == "aws" and time_limit != 7200:
-        raise SystemExit("AWS ML trajectories use the fixed two-hour --time-limit=7200")
-    judge_arg = require_judge_arg(_arg("--judge"))
+    judge_arg = _arg("--judge")
 
     return {
         "targets": targets,
         "seeds": seeds,
         "seeds_path": seeds_path,
+        "family": family,
         "epochs": epochs,
         "harness": harness,
         "reasoning": resolve_reasoning(_arg("--reasoning")),
         "condition": condition,
+        "pressure": pressure,
         "judge": judge_arg,
         "judge_resolved": resolve_judge(judge_arg),
         "gate_model": resolve_gate_model(_arg("--gate-model"), judge_arg),
@@ -323,7 +313,11 @@ def run_real_audit_stage(cfg: dict):
     print(f"  agents ({len(targets)}): "
           + ", ".join(f"{t}{reasoning_tag(cfg['reasoning'])}" for t in targets))
     print(f"  harness={cfg['harness']}")
-    print(f"  seeds ({len(seeds)}): {seeds}  condition={cfg['condition']}")
+    pressure_text = f"  pressure={cfg['pressure']}" if cfg["pressure"] else ""
+    print(
+        f"  seeds ({len(seeds)}): {seeds}  condition={cfg['condition']}"
+        f"{pressure_text}"
+    )
     print(f"  judge={resolve_judge(cfg['judge'])}  gate={cfg['gate_model']}")
     print(f"  epochs={epochs}  concurrency={cfg['concurrency']}  "
           f"sandbox_concurrency={cfg['sandbox_concurrency']}  "
@@ -349,6 +343,7 @@ def run_real_audit_stage(cfg: dict):
             task_id_suffix=task_suffix,
             execution_metadata=execution_metadata,
             harness=cfg["harness"],
+            pressure=cfg["pressure"],
         )
         success, logs = run_eval(
             tasks, epochs, cfg["concurrency"], log_dir,
@@ -401,14 +396,28 @@ def run_real_audit_stage(cfg: dict):
 
 
 async def run_env_post_stages(cfg: dict) -> bool:
-    """Build the free environment-owned viewer after a run or AWS import."""
+    """Build the free viewer in a fresh process after a run or AWS import.
+
+    AWS campaigns can run for hours while repository files change. A fresh process
+    prevents the post-stage from combining modules imported at campaign launch with
+    newer instruction files on disk.
+    """
     ok = True
     if not cfg["skip_viewer"]:
         print("\n" + "=" * 72)
         print("STAGE 2/2  VIEWER  (rebuild this project's static viewer, free)")
         print("=" * 72)
         try:
-            await env_viewer().main()
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(_ENVIRONMENTS / "viewer.py"),
+                cwd=str(_ENVIRONMENTS),
+            )
+            returncode = await process.wait()
+            if returncode != 0:
+                raise RuntimeError(
+                    f"viewer subprocess exited with status {returncode}"
+                )
         except Exception as e:
             ok = False
             print(f"\n!! VIEWER STAGE FAILED: {type(e).__name__}: {e}")

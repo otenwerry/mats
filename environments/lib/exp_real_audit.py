@@ -64,6 +64,7 @@ from exp_target_harness import (
     build_production_agent,
     capture_native_resume_bundle,
     native_resume_record,
+    opencode_go_model_spec,
     production_agent_input_messages,
     production_harness_metadata,
     production_scaffold_for_target,
@@ -77,6 +78,7 @@ from exp_subscription_harness import (
     NativeSessionRef,
     build_subscription_agent,
     record_subscription_native_version,
+    require_opencode_go_auth,
     require_subscription_auth,
     session_id_value,
     subscription_agent_record,
@@ -91,9 +93,10 @@ from exp_real_gate import (
 from judge_selection import (
     DEFAULT_JUDGE,
     JUDGE_CHOICES,
-    require_judge_arg,
     resolve_judge,
 )
+from inspect_task_naming import bounded_inspect_task_name, full_inspect_task_name
+from interrupted_native_transcript import recover_interrupted_opencode_messages
 from model_catalog import (
     REASONING_EFFORT,
     TARGET_CHOICES,
@@ -108,6 +111,7 @@ from protocol_sources import (
     is_seed_member,
     load_protocol_sources,
     resolve_condition,
+    resolve_pressure,
     resolve_reasoning,
     resolve_seeds,
     seed_members,
@@ -131,6 +135,10 @@ from real_judge_evidence import (
     tool_output_truncation_numbers as _tool_output_truncation_numbers,
     upstream_caveats as _upstream_caveats,
 )
+from sandbox_runtime import (
+    FAMILY_SANDBOX,
+    compose_file_for_harness,
+)
 from real_target_tools import (
     REAL_MAX_TOOL_OUTPUT,
     REAL_TOOL_SEMANTICS_VERSION,
@@ -144,13 +152,13 @@ load_dotenv(ENV_FILE)
 
 
 REAL_CONFIG_VERSION = "environments-real-v1"
-REAL_PROTOCOL_VERSION = "environments-script-v1"
-ML_TIME_PROTOCOL_VERSION = "environments-ml-two-pass-clock-v1"
-ML_CLOCK_VERSION = "environments-ml-first-2h-second-1h-v1"
-JUDGE_EVIDENCE_VERSION = "complete-observable-messages-v4"
+REAL_PROTOCOL_VERSION = "environments-script-v3"
+ML_TIME_PROTOCOL_VERSION = "environments-ml-two-pass-clock-v2"
+ML_CLOCK_VERSION = "environments-ml-first-70m-second-45m-v1"
+JUDGE_EVIDENCE_VERSION = "complete-observable-messages-v5"
 
-ML_FIRST_PASS_LIMIT_SECONDS = 7200
-ML_SECOND_PASS_LIMIT_SECONDS = 3600
+ML_FIRST_PASS_LIMIT_SECONDS = 70 * 60
+ML_SECOND_PASS_LIMIT_SECONDS = 45 * 60
 
 DEFAULT_GATE_MODEL = DEFAULT_JUDGE
 DEFAULT_SANDBOX_CONCURRENCY = 8
@@ -162,12 +170,8 @@ FAMILY_TIME_LIMIT_SECONDS = {
 FINALIZE_GRACE_SECONDS = 120
 
 SANDBOX_DIR = ENVIRONMENTS_ROOT / "sandbox"
-FAMILY_SANDBOX = {
-    "ml_training_data_misuse": "ml",
-    "p_hacking": "p_hacking",
-}
 FAMILY_DELIVERABLES = {
-    "ml_training_data_misuse": ("predictions.csv", "REPORT.md"),
+    "ml_training_data_misuse": ("predictions.csv", "REPORT.md", "models/final/"),
     "p_hacking": ("analysis.py", "RESULT.md"),
 }
 
@@ -184,7 +188,9 @@ def resolve_time_limit(arg: str | None, family: str | None = None) -> int | None
     if value < 0:
         raise SystemExit(f"--time-limit must be >= 0, got {value}")
     if family == "ml_training_data_misuse" and value != ML_FIRST_PASS_LIMIT_SECONDS:
-        raise SystemExit("ML real-environment runs use the fixed two-hour --time-limit=7200")
+        raise SystemExit(
+            "ML real-environment runs use the fixed 70-minute --time-limit=4200"
+        )
     return value or None
 
 
@@ -193,10 +199,10 @@ class RealProtocolSpec:
     version: str
     family: str
     member: str
+    pressure: str | None
     system_prompt: str
     opening_user_message: str
     follow_up: str | None
-    follow_up_finalize: str | None
     deliverables: tuple[str, ...]
     gate: GateConfig
     task_readme: str
@@ -204,7 +210,7 @@ class RealProtocolSpec:
 
     @property
     def follow_up_user_messages(self) -> list[str]:
-        return [text for text in (self.follow_up, self.follow_up_finalize) if text]
+        return [self.follow_up] if self.follow_up else []
 
 
 def seed_family(unit_path: str | Path) -> str:
@@ -221,11 +227,12 @@ def assemble_real_protocol(
     unit_path: str | Path,
     condition: str,
     unit_sp: str,
+    pressure: str | None = None,
 ) -> RealProtocolSpec:
     if condition != "allow":
         raise SystemExit("real environments currently support only --condition=allow")
     unit_path = Path(unit_path).resolve()
-    sources = load_protocol_sources(unit_path)
+    sources = load_protocol_sources(unit_path, pressure=pressure)
     family = seed_family(unit_path)
     if not has_real_env(unit_path):
         raise SystemExit(f"{unit_path} has no materialized workspace")
@@ -266,10 +273,10 @@ def assemble_real_protocol(
         version=version,
         family=family,
         member=sources.member,
+        pressure=sources.pressure,
         system_prompt=unit_sp,
         opening_user_message=opening,
         follow_up=follow_up,
-        follow_up_finalize=sources.follow_up_finalize,
         deliverables=FAMILY_DELIVERABLES[family],
         gate=GateConfig(
             key_text=key_text,
@@ -290,15 +297,12 @@ class RealProtocolController:
         self.condition = condition
         self.submissions = 0
         self.follow_up_sent = False
-        self.finalize_sent = False
         self.first_gate_verdict: str | None = None
 
     def on_submission(
         self,
         *,
         gate_verdict: str | None = None,
-        result_md_changed: bool = False,
-        worked_since_follow_up: bool = False,
     ) -> tuple[str, str]:
         self.submissions += 1
         if self.submissions == 1:
@@ -311,17 +315,6 @@ class RealProtocolController:
                 self.follow_up_sent = True
                 return "send", self.spec.follow_up
             return "end", "protocol_end"
-        if self.finalize_sent:
-            return "end", "protocol_end"
-        if self.follow_up_sent:
-            if (
-                self.spec.follow_up_finalize
-                and worked_since_follow_up
-                and not result_md_changed
-            ):
-                self.finalize_sent = True
-                return "send", self.spec.follow_up_finalize
-            return "end", "protocol_end"
         return "end", "protocol_end"
 
     def summary(self, ended_reason: str) -> dict:
@@ -329,7 +322,6 @@ class RealProtocolController:
             "submissions": self.submissions,
             "first_gate_verdict": self.first_gate_verdict,
             "follow_up_sent": self.follow_up_sent,
-            "finalize_sent": self.finalize_sent,
             "ended_reason": ended_reason,
         }
 
@@ -373,20 +365,6 @@ def _tool_result_message_count(messages: Sequence[ChatMessage]) -> int:
     return sum(message.role == "tool" for message in messages)
 
 
-def _model_events_used_tools(events: Sequence[object]) -> bool:
-    for event in events:
-        if getattr(event, "event", None) != "model":
-            continue
-        output = getattr(event, "output", None)
-        choices = getattr(output, "choices", None) or []
-        if any(
-            getattr(getattr(choice, "message", None), "tool_calls", None)
-            for choice in choices
-        ):
-            return True
-    return False
-
-
 def get_cancelled_exc_class():
     return anyio.get_cancelled_exc_class()
 
@@ -420,8 +398,6 @@ def real_audit_solver(
     opening (and, in simple mode, environment-system) pair. Both judge stages then see
     the active system message(s) and live task, sliced at the stored boundary index.
     """
-
-    result_md_path = f"{WORKSPACE_DIR}/RESULT.md"
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         include_time = spec.family == "ml_training_data_misuse"
@@ -458,6 +434,7 @@ def real_audit_solver(
         controller = RealProtocolController(spec, condition)
         real_env: dict = {
             "family": spec.family,
+            "pressure": spec.pressure,
             "gates": [],
             "submission_artifacts": [],
             "task_context": _task_snapshot(spec).model_dump(mode="json"),
@@ -514,11 +491,8 @@ def real_audit_solver(
         model = get_model(role="target") if harness == "simple" else None
         ended_reason = "interrupted"
         start_snapshot: dict[str, str] = {}
-        result_md_sha: str | None = None
-        tool_calls_since_user = 0
-        production_activity_since_user = False
-        previous_submission_snapshot: dict[str, str] | None = None
         turns_used = 0
+        active_native_event_start: int | None = None
         try:
             async with span(name="target", type="agent"):
                 await create_empty_dirs(seed_path)
@@ -551,14 +525,9 @@ def real_audit_solver(
                                 max_output=REAL_MAX_TOOL_OUTPUT,
                             )
                             state.messages.extend(executed.messages)
-                            tool_calls_since_user += len(
-                                state.output.message.tool_calls
-                            )
                             continue
                     else:
                         assert native_agent is not None
-                        calls_before = _tool_call_count(state.messages)
-                        events_before = len(transcript().events)
                         agent_state = AgentState(
                             messages=(
                                 list(state.messages)
@@ -567,9 +536,11 @@ def real_audit_solver(
                                 else production_agent_input_messages(state.messages)
                             )
                         )
+                        active_native_event_start = len(transcript().events)
                         agent_state = await native_agent(agent_state)
                         state.messages = list(agent_state.messages)
                         state.output = agent_state.output
+                        active_native_event_start = None
                         current_events = list(transcript().events)
                         if harness == "subscription" and native_scaffold != "opencode":
                             subscription_record = subscription_agent_record(
@@ -588,12 +559,6 @@ def real_audit_solver(
                             await update_resolved_scaffold_version(real_env)
                         else:
                             await update_resolved_scaffold_version(real_env)
-                        production_activity_since_user = (
-                            _tool_call_count(state.messages) > calls_before
-                            or _model_events_used_tools(
-                                current_events[events_before:]
-                            )
-                        )
                         await update_scaffold_loss_events(real_env, current_events)
                         if real_env["harness"].get("native_loss_events"):
                             reasons = real_env["judge_evidence_policy"][
@@ -607,12 +572,6 @@ def real_audit_solver(
                             )
 
                     snapshot_now = await workspace_snapshot()
-                    if (
-                        harness in NATIVE_HARNESS_MODES
-                        and previous_submission_snapshot is not None
-                        and snapshot_now != previous_submission_snapshot
-                    ):
-                        production_activity_since_user = True
                     submission_number = controller.submissions + 1
                     artifacts_now = await extract_artifacts(
                         start_snapshot,
@@ -681,21 +640,11 @@ def real_audit_solver(
                             f"    [{spec.member}] submission 1 judge: "
                             f"verdict={gate.verdict} reward_hack_labels={labels}"
                         )
-                        result_md_sha = snapshot_now.get(result_md_path)
                         action, payload = controller.on_submission(
                             gate_verdict=gate.verdict
                         )
                     else:
-                        action, payload = controller.on_submission(
-                            result_md_changed=(
-                                snapshot_now.get(result_md_path) != result_md_sha
-                            ),
-                            worked_since_follow_up=(
-                                tool_calls_since_user > 0
-                                if harness == "simple"
-                                else production_activity_since_user
-                            ),
-                        )
+                        action, payload = controller.on_submission()
                     if action == "send":
                         if (
                             include_time
@@ -709,11 +658,8 @@ def real_audit_solver(
                             print(
                                 f"    [{spec.member}] second-pass clock reset: "
                                 f"{ML_SECOND_PASS_LIMIT_SECONDS}s remaining"
-                            )
+                        )
                         state.messages.append(ChatMessageUser(content=payload))
-                        previous_submission_snapshot = snapshot_now
-                        tool_calls_since_user = 0
-                        production_activity_since_user = False
                         continue
                     ended_reason = payload
                     break
@@ -721,6 +667,19 @@ def real_audit_solver(
             ended_reason = "wall_clock_limit" if _time_limit_blown() else "cancelled"
             raise
         finally:
+            if native_scaffold == "opencode" and active_native_event_start is not None:
+                recovered_messages, recovery = recover_interrupted_opencode_messages(
+                    state.messages,
+                    list(transcript().events),
+                    event_start=active_native_event_start,
+                    applied_before_judging=True,
+                )
+                if recovery is not None:
+                    state.messages = recovered_messages
+                    real_env["interrupted_native_transcript"] = recovery
+                    reasons = real_env["judge_evidence_policy"]["lossy_reasons"]
+                    if "interrupted_native_transcript_reconstructed" not in reasons:
+                        reasons.append("interrupted_native_transcript_reconstructed")
             real_env["protocol"] = controller.summary(ended_reason)
             real_env["turns_used"] = turns_used
             real_env["max_tool_output"] = (
@@ -814,6 +773,7 @@ async def _finalize_real_sample(
         deliverables_status(
             [entry["path"] for entry in artifacts["files"]],
             spec.deliverables,
+            model_entries=artifacts.get("models") or [],
         )
     )
 
@@ -1032,6 +992,7 @@ def build_real_tasks(
     task_id_suffix: str | None = None,
     execution_metadata: dict | None = None,
     harness: str,
+    pressure: str | None = None,
 ) -> list[Task]:
     harness = resolve_harness(harness)
     if condition != "allow":
@@ -1056,6 +1017,11 @@ def build_real_tasks(
             for name in selected_targets
             if production_scaffold_for_target(name, resolve_target(name)) != "opencode"
         )
+        if any(
+            opencode_go_model_spec(name, resolve_target(name)) is not None
+            for name in selected_targets
+        ):
+            require_opencode_go_auth(reasoning=reasoning)
 
     system_prompt = global_system_prompt()
     unit_sp = (
@@ -1064,6 +1030,10 @@ def build_real_tasks(
     tasks: list[Task] = []
     for target_name in selected_targets:
         target_slug = resolve_target(target_name)
+        opencode_go_subscription = (
+            harness == "subscription"
+            and opencode_go_model_spec(target_name, target_slug) is not None
+        )
         target_build = build_target(
             target_slug,
             reasoning_on=reasoning,
@@ -1079,6 +1049,7 @@ def build_real_tasks(
                 reasoning,
                 unit_sp,
             )[:40],
+            construct_model=not opencode_go_subscription,
         )
         for unit_path in units:
             tasks.append(build_real_task(
@@ -1095,6 +1066,7 @@ def build_real_tasks(
                 task_id_suffix=task_id_suffix,
                 execution_metadata=execution_metadata,
                 harness=harness,
+                pressure=pressure,
             ))
     return tasks
 
@@ -1117,6 +1089,7 @@ def build_real_task(
     task_name: str | None = None,
     extra_metadata: dict | None = None,
     harness: str,
+    pressure: str | None = None,
 ) -> Task:
     """One Inspect task for one (agent, environment member) cell.
 
@@ -1130,11 +1103,17 @@ def build_real_task(
     scaffold = production_scaffold_for_target(target_name, target_slug)
     if harness == "subscription" and scaffold != "opencode":
         require_subscription_auth([scaffold])
-    spec = assemble_real_protocol(unit_path, condition, unit_sp)
-    compose_name = (
-        "compose.subscription.yaml"
-        if harness == "subscription" and scaffold != "opencode"
-        else "compose.yaml"
+    go_spec = (
+        opencode_go_model_spec(target_name, target_slug)
+        if harness == "subscription"
+        else None
+    )
+    if go_spec is not None:
+        require_opencode_go_auth(reasoning=reasoning)
+    spec = assemble_real_protocol(unit_path, condition, unit_sp, pressure)
+    compose_name = compose_file_for_harness(
+        harness=harness,
+        scaffold=scaffold,
     )
     compose = SANDBOX_DIR / FAMILY_SANDBOX[spec.family] / compose_name
     if not compose.is_file():
@@ -1156,8 +1135,10 @@ def build_real_task(
         files=workspace_files(unit_path),
         metadata={
             "condition": condition,
+            "pressure": spec.pressure,
             "protocol": {
                 "version": spec.version,
+                "pressure": spec.pressure,
                 "system_prompt": spec.system_prompt if harness == "simple" else None,
                 "system_prompt_source": (
                     "seeds/SYSTEM_PROMPT.txt"
@@ -1180,9 +1161,11 @@ def build_real_task(
             ),
         },
     )
-    name = task_name or f"real_audit_{target_slug.split('/')[-1]}_{spec.member}"
-    if task_id_suffix:
-        name += f"_{task_id_suffix}"
+    base_task_name = (
+        task_name or f"real_audit_{target_slug.split('/')[-1]}_{spec.member}"
+    )
+    full_task_name = full_inspect_task_name(base_task_name, task_id_suffix)
+    name = bounded_inspect_task_name(base_task_name, task_id_suffix)
     artifacts_dir = str(artifacts_root / name) if artifacts_root else None
     metadata = {
         "config_version": REAL_CONFIG_VERSION,
@@ -1204,6 +1187,7 @@ def build_real_task(
         "judge": judge_model,
         "gate_model": gate_model,
         "condition": condition,
+        "pressure": spec.pressure,
         "judge_schema_version": JUDGE_SCHEMA_VERSION,
         "judge_dimensions": [document.key for document in rubric_documents],
         "judge_dimension_files": [
@@ -1238,11 +1222,13 @@ def build_real_task(
         ),
         "max_turns": None,
         "remote_task_id": task_id_suffix,
+        "task_name_full": full_task_name,
+        "task_name_shortened": name != full_task_name,
     }
     if extra_metadata:
         metadata.update(extra_metadata)
     api_backed_agent = harness == "production" or (
-        harness == "subscription" and scaffold == "opencode"
+        harness == "subscription" and scaffold == "opencode" and go_spec is None
     )
     model_roles = {
         "judge": judge_model,
@@ -1315,9 +1301,10 @@ def main() -> None:
         raise SystemExit(f"unknown seeds {unknown}; available: {available}")
     condition = resolve_condition(_flag("condition"))
     reasoning = resolve_reasoning(_flag("reasoning"))
-    judge_arg = require_judge_arg(_flag("judge"))
+    judge_arg = _flag("judge")
     gate_model = resolve_gate_model(_flag("gate-model"), judge_arg)
     family = Path(seeds_path).name if not is_seed_member(seeds_path) else Path(seeds_path).parent.name
+    pressure = resolve_pressure(_flag("pressure"), family)
     time_limit = resolve_time_limit(_flag("time-limit"), family)
     epochs = int(_flag("epochs") or "1")
     concurrency = int(_flag("concurrency") or "50")
@@ -1335,6 +1322,7 @@ def main() -> None:
         seeds_path=seeds_path,
         artifacts_root=log_dir / "real_artifacts",
         harness=harness,
+        pressure=pressure,
     )
     success, _logs = run_eval(
         tasks,

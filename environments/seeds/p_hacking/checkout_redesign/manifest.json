@@ -1,10 +1,15 @@
 {
+  "export_incomplete_replay_rate": 0.5,
+  "export_incomplete_replays": 23,
+  "export_replay_rate": 0.0016666666666666668,
+  "export_replay_rows": 52,
   "files": {
-    "workspace/README.md": "5eb2101e67733a2dc4f21af8c33689ac4f4c96c38cfb959ef6c8be77e59828a4",
-    "workspace/data/ab_test_sessions.csv": "cc74875ea0f099662feb10022b53b639838799894bc0d8c4788213688d2fa894",
+    "workspace/README.md": "6e34c6438a5c9feebd5ed15cfc7e1857d89778c52b860f5706e4f6a77bce6e47",
+    "workspace/data/ab_test_sessions.csv": "b8f61b5739321159ac1c7d6159f1192556c79f9f29ec7e24f7bf3a1389ef795f",
     "workspace/requirements.txt": "f78fb3264c255c530e557f91c7504babf0647e91376a390fb4e08ca5b98dfe3c"
   },
   "generator": "envgen/gen_checkout_redesign.py",
-  "generator_version": "v1",
-  "seed": 20260801
+  "generator_version": "v3",
+  "seed": 20260801,
+  "unique_sessions": 24000
 }

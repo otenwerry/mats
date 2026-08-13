@@ -1,7 +1,8 @@
 """Small environment-owned HTML components for judgments and transcripts.
 
 The stored structured judgment keeps one evidence row per dimension inside Other stuff.
-The always-visible transcript uses Petri's floating judge-cited/user-turn navigator.
+The always-visible transcript uses Petri's floating judge-cited/user-turn navigator and
+continuation jump-to-new-task control.
 """
 
 from __future__ import annotations
@@ -845,13 +846,40 @@ def render_transcript(messages: list[dict]) -> str:
         role_label = (
             f"{display_role} · {injected_tag}" if injected_tag else display_role
         )
+        user_turn_attr = (
+            f' data-user-turn="{int(message["user_turn"])}"'
+            if message.get("user_turn") else ""
+        )
         rows.append(
             f'<div class="msg role-{role_class}" id="M{number}" '
-            f'data-message-number="{number}">'
+            f'data-message-number="{number}"{user_turn_attr}>'
             f'<div class="mhead">[M{number}]{index_html} {esc(role_label)}{time_html}</div>'
             f'{body}</div>'
         )
     return "\n".join(rows)
+
+
+def render_jump_to_new_task(message_number: int | None) -> str:
+    """Render Petri's existing floating continuation cut button verbatim."""
+
+    if (
+        not isinstance(message_number, int)
+        or isinstance(message_number, bool)
+        or message_number < 1
+    ):
+        return ""
+    return f"""
+<button class="tocut" id="tocut" title="jump to the marked cut">&#9986; jump to new task</button>
+<script>
+(function () {{
+  var b = document.getElementById("tocut"), el = document.getElementById("M{message_number}");
+  if (!el) {{ b.style.display = "none"; return; }}
+  b.onclick = function () {{
+    el.scrollIntoView({{ behavior: "smooth", block: "center" }});
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+  }};
+}})();
+</script>"""
 
 
 EVIDENCE_NAV_CSS = r"""
@@ -882,6 +910,8 @@ EVIDENCE_NAV_CSS = r"""
 .toolcall{margin:8px 0;border:1px solid rgba(0,0,0,.16);border-radius:6px;background:transparent;overflow:hidden}.toolcall .tchead{padding:3px 12px;font-size:11px;font-weight:700;letter-spacing:.3px;color:#155f3e;background:rgba(0,0,0,.045);font-family:ui-monospace,Menlo,monospace}.toolcall .tcname{font-size:12.5px}.toolcall pre.tcargs{margin:0;padding:7px 13px;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.45;color:#1f3d2b;background:transparent}
 .unknown-content{margin:8px 14px;padding:5px 9px;color:#696f7d;background:#f4f5f7;border:1px dashed #c4c8d0;border-radius:6px}.message-error{color:#9b311e}
 .msg.flash{animation:evidence-flash 1.1s ease-out}
+.tocut{position:fixed;left:18px;bottom:18px;border:none;border-radius:20px;padding:9px 16px;background:#1558d6;color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.28);z-index:50}
+.tocut:hover{background:#0f47b0}
 .judge-view{margin:14px 0;border:1px solid #cfd7e8;border-radius:10px;background:linear-gradient(135deg,#fbfcff,#f5f7fb);box-shadow:0 4px 14px rgba(49,61,90,.06)}
 .judge-view>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:10px 12px;list-style:none;font-size:14px;font-weight:700;color:#333b4f}
 .judge-view>summary::-webkit-details-marker,.judge-subsection>summary::-webkit-details-marker{display:none}.judge-view>summary:before,.judge-subsection>summary:before{content:"›";display:inline-block;color:#818ba0;transition:transform .15s}.judge-view>summary>span:first-of-type{margin-right:auto}.judge-view[open]>summary:before,.judge-subsection[open]>summary:before{transform:rotate(90deg)}
@@ -968,9 +998,10 @@ EVIDENCE_NAV_JS = r"""
       go(1);
     });
   });
-  // Copied from Petri: user turns are discovered from the rendered transcript so this
-  // works for every trajectory shape without a server-side list.
-  var users = Array.prototype.slice.call(document.querySelectorAll(".msg.role-user"));
+  // User turns are discovered from explicit experiment-turn markers. A native
+  // scaffold can emit a genuine wire-level user message (such as environment_context)
+  // which remains visible in the transcript but deliberately has no marker.
+  var users = Array.prototype.slice.call(document.querySelectorAll(".msg[data-user-turn]"));
   var userGroup = document.getElementById("grp-user");
   if (!users.length) {
     if (userGroup) userGroup.style.display = "none";

@@ -1,4 +1,4 @@
-"""Run the current judge on the viewer's fixed Judge Tests cohort."""
+"""Run the current judge on the saved fixed 20-source cohort."""
 
 import sys
 

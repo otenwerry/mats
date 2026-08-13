@@ -12,6 +12,8 @@ from inspect_ai.log import list_eval_logs, read_eval_log, resolve_sample_attachm
 from inspect_ai.model import ChatMessage
 
 from environment_judge import JUDGE_SCHEMA_VERSION, prepare_judge_call
+from interrupted_native_transcript import recover_interrupted_opencode_messages
+from old_runs import old_source_run_names
 from project_paths import ENVIRONMENTS_ROOT
 from real_integrity import (
     finalize_audit_integrity,
@@ -23,7 +25,7 @@ from real_judge_evidence import complete_real_trajectory_evidence
 
 
 FAMILIES = ("ml_training_data_misuse", "p_hacking")
-REJUDGE_METHOD_VERSION = "retrospective-current-judge-v1"
+REJUDGE_METHOD_VERSION = "retrospective-current-judge-v2"
 
 
 @dataclass(frozen=True)
@@ -90,9 +92,15 @@ def discover_run_dirs(logs_root: Path, selection: str) -> list[Path]:
         if not available:
             raise ValueError(f"no original real-v* runs found under {logs_root}")
         return available
-    requested = [item.strip() for item in selection.split(",") if item.strip()]
+    requested = (
+        sorted(old_source_run_names())
+        if selection == "old"
+        else [item.strip() for item in selection.split(",") if item.strip()]
+    )
     if not requested:
-        raise ValueError("--source-runs must be `all` or a comma-separated run list")
+        raise ValueError(
+            "--source-runs must be `all`, `old`, or a comma-separated run list"
+        )
     by_name = {path.name: path for path in available}
     unknown = sorted(set(requested) - set(by_name))
     if unknown:
@@ -129,6 +137,26 @@ def load_sources(
                     if family != "all" and source_family != family:
                         continue
                     target_model = _role_model(roles, "target")
+                    recovery = None
+                    if ((real_env.get("harness") or {}).get("scaffold")) == "opencode":
+                        recovered, recovery = recover_interrupted_opencode_messages(
+                            messages,
+                            list(getattr(sample, "events", None) or []),
+                            target_model=target_model,
+                            applied_before_judging=True,
+                            attachments=getattr(sample, "attachments", None) or {},
+                        )
+                        if recovery is not None:
+                            recovery["recovered_during_retrospective_loading"] = True
+                            messages = tuple(recovered)
+                            real_env["interrupted_native_transcript"] = recovery
+                            policy = real_env.setdefault("judge_evidence_policy", {})
+                            reasons = policy.setdefault("lossy_reasons", [])
+                            if "interrupted_native_transcript_reconstructed" not in reasons:
+                                reasons.append(
+                                    "interrupted_native_transcript_reconstructed"
+                                )
+                            policy["lossy"] = True
                     target_usage = (
                         getattr(sample, "role_usage", None) or {}
                     ).get("target")
@@ -163,6 +191,15 @@ def load_sources(
                         "target": target_model,
                         "original_judge": _role_model(roles, "judge"),
                         "condition": run_metadata.get("condition"),
+                        "pressure": (
+                            run_metadata.get("pressure")
+                            or real_env.get("pressure")
+                        ),
+                        "harness": (
+                            run_metadata.get("harness")
+                            or (real_env.get("harness") or {}).get("mode")
+                            or "simple"
+                        ),
                         "source_score_keys": sorted(
                             str(key) for key in (getattr(sample, "scores", None) or {})
                         ),
@@ -172,6 +209,7 @@ def load_sources(
                         "source_target_provider_events": source_audit[
                             "target_provider_events"
                         ],
+                        "interrupted_native_transcript": recovery,
                     }
                     record["source_key"] = source_key(record)
                     sources.append(SourceTrajectory(
@@ -194,6 +232,7 @@ def load_sources(
 def judging_method_sha256() -> str:
     paths = sorted((ENVIRONMENTS_ROOT / "lib" / "environment_judge").glob("*.py"))
     paths.extend([
+        ENVIRONMENTS_ROOT / "lib" / "interrupted_native_transcript.py",
         ENVIRONMENTS_ROOT / "lib" / "real_judge_evidence.py",
         *sorted((ENVIRONMENTS_ROOT / "judge_instructions").rglob("*.md")),
     ])
@@ -226,6 +265,7 @@ async def prepare_sources(
         source = {
             **item.source,
             "current_judge_input_sha256": prompt_sha,
+            "current_judge_method_sha256": prepared.method_sha256(),
             "upstream_caveat_codes": [entry.code for entry in prepared.evidence.caveats],
         }
         prepared_sources.append(replace(item, source=source))

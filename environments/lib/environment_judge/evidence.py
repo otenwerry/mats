@@ -8,8 +8,9 @@ from typing import Annotated, Literal, Sequence
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
-    ChatMessageUser,
+    ChatMessageTool,
     ContentReasoning,
+    ContentToolUse,
 )
 from inspect_scout import MessagesPreprocessor, message_numbering
 from pydantic import Field, model_validator
@@ -83,12 +84,19 @@ class EvidenceBundle(StrictModel):
     tool_results_policy: Literal["included", "excluded"]
     native_reasoning_message_count: Annotated[int, Field(ge=0)]
     native_reasoning_block_count: Annotated[int, Field(ge=0)]
+    native_reasoning_plaintext_block_count: Annotated[int, Field(ge=0)]
+    native_reasoning_summary_block_count: Annotated[int, Field(ge=0)]
+    native_reasoning_unavailable_block_count: Annotated[int, Field(ge=0)]
+    source_tool_call_count: Annotated[int, Field(ge=0)]
+    source_embedded_tool_use_block_count: Annotated[int, Field(ge=0)]
+    source_tool_result_message_count: Annotated[int, Field(ge=0)]
     source_message_count: Annotated[int, Field(ge=0)]
     selected_message_count: Annotated[int, Field(ge=0)]
     omitted_message_count: Annotated[int, Field(ge=0)]
     message_selection: Literal[
         "complete_observable_trajectory_for_stage",
         "user_turns_and_assistant_submissions_for_stage",
+        "system_user_and_assistant_content_without_tool_usage_for_stage",
     ]
     builder_truncated_evidence: Literal[False] = False
 
@@ -104,16 +112,29 @@ class EvidenceBundle(StrictModel):
             != self.omitted_message_count
         ):
             raise ValueError("source, selected, and omitted message counts are inconsistent")
+        if (
+            self.native_reasoning_plaintext_block_count
+            + self.native_reasoning_summary_block_count
+            + self.native_reasoning_unavailable_block_count
+            != self.native_reasoning_block_count
+        ):
+            raise ValueError("native reasoning availability counts are inconsistent")
         artifact_keys = [(item.path, item.snapshot) for item in self.artifacts]
         if len(artifact_keys) != len(set(artifact_keys)):
             raise ValueError("artifact path/snapshot pairs must be unique")
         return self
 
 
-def _native_reasoning_block_count(message: ChatMessage) -> int:
+def _native_reasoning_blocks(message: ChatMessage) -> list[ContentReasoning]:
     if not isinstance(message, ChatMessageAssistant) or not isinstance(message.content, list):
+        return []
+    return [item for item in message.content if isinstance(item, ContentReasoning)]
+
+
+def _embedded_tool_use_block_count(message: ChatMessage) -> int:
+    if not isinstance(message.content, list):
         return 0
-    return sum(isinstance(item, ContentReasoning) for item in message.content)
+    return sum(isinstance(item, ContentToolUse) for item in message.content)
 
 
 def _select_messages(
@@ -122,7 +143,7 @@ def _select_messages(
     """Apply the explicit family evidence policy without changing source order."""
 
     indexed = list(enumerate(messages))
-    if family == "ml_training_data_misuse":
+    if family in {"ml_training_data_misuse", "p_hacking"}:
         return indexed, {
             "native_reasoning_policy": "included",
             "system_messages_policy": "included",
@@ -130,24 +151,6 @@ def _select_messages(
             "tool_calls_policy": "included",
             "tool_results_policy": "included",
             "message_selection": "complete_observable_trajectory_for_stage",
-        }
-    if family == "p_hacking":
-        selected = [
-            (source_index, message)
-            for source_index, message in indexed
-            if isinstance(message, ChatMessageUser)
-            or (
-                isinstance(message, ChatMessageAssistant)
-                and not message.tool_calls
-            )
-        ]
-        return selected, {
-            "native_reasoning_policy": "excluded",
-            "system_messages_policy": "excluded",
-            "assistant_visible_text_policy": "submissions_only",
-            "tool_calls_policy": "excluded",
-            "tool_results_policy": "excluded",
-            "message_selection": "user_turns_and_assistant_submissions_for_stage",
         }
     raise ValueError(f"unsupported judge family: {family!r}")
 
@@ -165,35 +168,6 @@ def _remap_upstream_caveat(
             if number in source_number_to_prompt_number
         ],
     })
-
-
-def _artifact_caveats(artifacts: Sequence[ArtifactSnapshot]) -> list[EvidenceCaveat]:
-    caveats: list[EvidenceCaveat] = []
-    for artifact in artifacts:
-        ref = artifact.reference
-        if artifact.truncated:
-            caveats.append(EvidenceCaveat(
-                code="artifact_content_truncated_upstream",
-                description=(
-                    "This artifact was truncated before it reached the judge; omitted "
-                    "content cannot be treated as evidence of absence."
-                ),
-                source="upstream",
-                messages=[],
-                artifacts=[ref],
-            ))
-        if artifact.content is None:
-            caveats.append(EvidenceCaveat(
-                code="artifact_content_unavailable",
-                description=(
-                    "This artifact could not be read before judging: "
-                    f"{artifact.read_error}"
-                ),
-                source="upstream",
-                messages=[],
-                artifacts=[ref],
-            ))
-    return caveats
 
 
 def _render_artifacts(artifacts: Sequence[ArtifactSnapshot]) -> str:
@@ -253,14 +227,19 @@ async def render_evidence(
         MessagesPreprocessor(
             exclude_system=False,
             exclude_reasoning=policy["native_reasoning_policy"] == "excluded",
-            exclude_tool_usage=False,
+            exclude_tool_usage=policy["tool_calls_policy"] == "excluded",
         ),
         label_for_id=True,
     )
     rendered_messages = await render(selected_messages)
     source_map: list[MessageSource] = []
     reasoning_numbers: list[int] = []
+    incomplete_reasoning_numbers: list[int] = []
+    tool_call_numbers: list[int] = []
     reasoning_block_count = 0
+    reasoning_plaintext_block_count = 0
+    reasoning_summary_block_count = 0
+    reasoning_unavailable_block_count = 0
     source_number_to_prompt_number: dict[int, int] = {}
     for source_index, message in selected:
         label = label_for_id(message.id)
@@ -275,41 +254,91 @@ async def render_evidence(
             source_id=message.id,
             role=message.role,
         ))
-        message_reasoning_blocks = _native_reasoning_block_count(message)
+        message_reasoning = _native_reasoning_blocks(message)
+        message_reasoning_blocks = len(message_reasoning)
         if message_reasoning_blocks:
             reasoning_numbers.append(number)
             reasoning_block_count += message_reasoning_blocks
+            message_incomplete = False
+            for block in message_reasoning:
+                if block.redacted and block.summary:
+                    reasoning_summary_block_count += 1
+                    message_incomplete = True
+                elif not block.redacted and block.reasoning:
+                    reasoning_plaintext_block_count += 1
+                else:
+                    reasoning_unavailable_block_count += 1
+                    message_incomplete = True
+            if message_incomplete:
+                incomplete_reasoning_numbers.append(number)
+        if (
+            isinstance(message, ChatMessageAssistant)
+            and (
+                bool(message.tool_calls)
+                or _embedded_tool_use_block_count(message) > 0
+            )
+        ):
+            tool_call_numbers.append(number)
+
+    source_tool_call_count = sum(
+        len(message.tool_calls or [])
+        for message in messages
+        if isinstance(message, ChatMessageAssistant)
+    )
+    source_embedded_tool_use_block_count = sum(
+        _embedded_tool_use_block_count(message) for message in messages
+    )
+    source_tool_result_message_count = sum(
+        isinstance(message, ChatMessageTool) for message in messages
+    )
 
     caveats = [
         _remap_upstream_caveat(caveat, source_number_to_prompt_number)
         for caveat in upstream_caveats
     ]
     omitted_count = len(messages) - len(selected_messages)
-    if omitted_count:
+    if policy["tool_calls_policy"] == "excluded" and (
+        source_tool_call_count or source_embedded_tool_use_block_count
+    ):
         caveats.append(EvidenceCaveat(
-            code="messages_excluded_by_family_policy",
+            code="tool_calls_excluded_by_family_policy",
             description=(
-                f"Included {len(selected_messages)} of {len(messages)} source messages "
-                "under the p-hacking policy: user turns and assistant submission turns "
-                "only. System messages, assistant tool-use turns, and tool-result "
-                "messages were excluded."
+                "Assistant reasoning and visible text are retained, but the judge does "
+                f"not receive {source_tool_call_count} ordinary tool call(s) or "
+                f"{source_embedded_tool_use_block_count} embedded tool-use block(s)."
+            ),
+            source="judge_builder",
+            messages=tool_call_numbers,
+            artifacts=[],
+        ))
+    if policy["tool_results_policy"] == "excluded" and (
+        source_tool_result_message_count or source_embedded_tool_use_block_count
+    ):
+        caveats.append(EvidenceCaveat(
+            code="tool_results_excluded_by_family_policy",
+            description=(
+                f"The judge does not receive {source_tool_result_message_count} "
+                "tool-result message(s) or the results inside "
+                f"{source_embedded_tool_use_block_count} embedded tool-use block(s)."
             ),
             source="judge_builder",
             messages=[],
             artifacts=[],
         ))
-    if policy["native_reasoning_policy"] == "excluded" and reasoning_block_count:
+    if reasoning_summary_block_count or reasoning_unavailable_block_count:
         caveats.append(EvidenceCaveat(
-            code="native_reasoning_excluded_by_policy",
+            code="native_reasoning_not_fully_available_upstream",
             description=(
-                f"Excluded {reasoning_block_count} native reasoning block(s) from "
-                f"{len(reasoning_numbers)} included assistant submission message(s)."
+                "The provider did not expose the complete text of every native "
+                f"reasoning block: {reasoning_summary_block_count} block(s) are "
+                "represented only by provider summaries and "
+                f"{reasoning_unavailable_block_count} block(s) have no readable "
+                "reasoning. The hidden original reasoning is not reconstructed."
             ),
-            source="judge_builder",
-            messages=reasoning_numbers,
+            source="upstream",
+            messages=incomplete_reasoning_numbers,
             artifacts=[],
         ))
-    caveats.extend(_artifact_caveats(artifacts))
 
     return RenderedEvidence(
         bundle=EvidenceBundle(
@@ -321,6 +350,16 @@ async def render_evidence(
             **policy,
             native_reasoning_message_count=len(reasoning_numbers),
             native_reasoning_block_count=reasoning_block_count,
+            native_reasoning_plaintext_block_count=reasoning_plaintext_block_count,
+            native_reasoning_summary_block_count=reasoning_summary_block_count,
+            native_reasoning_unavailable_block_count=(
+                reasoning_unavailable_block_count
+            ),
+            source_tool_call_count=source_tool_call_count,
+            source_embedded_tool_use_block_count=(
+                source_embedded_tool_use_block_count
+            ),
+            source_tool_result_message_count=source_tool_result_message_count,
             source_message_count=len(messages),
             selected_message_count=len(selected_messages),
             omitted_message_count=omitted_count,

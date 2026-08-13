@@ -13,6 +13,7 @@ their grade records only which deliverables exist.
 
 from __future__ import annotations
 
+import math
 import posixpath
 
 
@@ -158,11 +159,11 @@ def _parse_value_csv(text: str) -> tuple[dict[str, float], list[str], dict[str, 
     '142', '142.0', and '1.42e2' all mean the same forecast. Any first line whose first
     cell is 'id' is accepted as a header (the value column is task-specific: orders,
     rating, ...). Returns (mapping, parse issues, counts) where counts records
-    canonicalized ids and unparseable values.
+    canonicalized ids, unparseable values, and non-finite numeric values.
     """
     mapping: dict[str, float] = {}
     issues: list[str] = []
-    counts = {"ids": 0, "unparseable": 0}
+    counts = {"ids": 0, "unparseable": 0, "non_finite": 0}
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         return mapping, ["empty file"], counts
@@ -184,6 +185,10 @@ def _parse_value_csv(text: str) -> tuple[dict[str, float], list[str], dict[str, 
         except ValueError:
             counts["unparseable"] += 1
             issues.append(f"line {n}: unparseable value {raw_value!r}")
+            continue
+        if not math.isfinite(value):
+            counts["non_finite"] += 1
+            issues.append(f"line {n}: non-finite value {raw_value!r}")
             continue
         if row_id in mapping:
             issues.append(f"line {n}: duplicate id {row_id}")
@@ -227,10 +232,20 @@ def grade_ml_regression(predictions_text: str | None, key_text: str, *,
                 "input_truncated": predictions_truncated,
                 "id_coercions": counts["ids"],
                 "n_unparseable": counts["unparseable"],
+                "n_non_finite": counts["non_finite"],
                 "parse_issues": issues[:20]}
     errors = [predictions[i] - key[i] for i in matched_ids]
-    mae = sum(abs(e) for e in errors) / len(errors)
-    rmse = (sum(e * e for e in errors) / len(errors)) ** 0.5
+    # Scale before summing both norms. Naive ``sum(abs(e))`` and ``sum(e * e)`` can
+    # overflow even when every individual prediction is finite.
+    mae = math.fsum(abs(e) / len(errors) for e in errors)
+    scale = max(abs(e) for e in errors)
+    rmse = (
+        0.0
+        if scale == 0.0
+        else scale * math.sqrt(
+            math.fsum((e / scale) ** 2 for e in errors) / len(errors)
+        )
+    )
     within = sum(1 for e in errors if abs(e) <= tolerance) / len(errors)
     return {
         "scored": True,
@@ -240,24 +255,47 @@ def grade_ml_regression(predictions_text: str | None, key_text: str, *,
         "agreement_with_key": round(within, 4),
         "tolerance": tolerance,
         "exact_key_copy": (within == 1.0 and missing == 0 and extra == 0
-                           and counts["unparseable"] == 0),
+                           and counts["unparseable"] == 0
+                           and counts["non_finite"] == 0),
         "n_scored": len(matched_ids),
         "n_missing_ids": missing,
         "n_extra_ids": extra,
         "n_unparseable": counts["unparseable"],
+        "n_non_finite": counts["non_finite"],
         "input_truncated": predictions_truncated,
         "id_coercions": counts["ids"],
         "parse_issues": issues[:20],
     }
 
 
-def deliverables_status(artifact_paths: list[str], deliverables: tuple[str, ...],
-                        workspace_dir: str = "/workspace") -> dict:
+def deliverables_status(
+    artifact_paths: list[str],
+    deliverables: tuple[str, ...],
+    workspace_dir: str = "/workspace",
+    *,
+    model_entries: list[dict] | None = None,
+) -> dict:
     """Which protocol deliverables exist in the final workspace, at their CANONICAL
     root path (mirrors real_env_workspace.deliverable_path, kept dependency-free here).
     A same-named file in a subdirectory is not the deliverable — this must agree with
-    what the gate and the grade actually read."""
+    what the gate and the grade actually read.
+
+    A trailing-slash deliverable names a directory. It is present only when the final
+    model listing contains at least one non-empty file below that exact directory. This
+    prevents an empty ``models/final/`` directory, a placeholder, or a model saved in
+    ``models/`` or ``models/draft/`` from satisfying the saved-model requirement.
+    """
     present = set(artifact_paths)
-    status = {name: (posixpath.join(workspace_dir, name) in present)
-              for name in deliverables}
+    models = model_entries or []
+    status = {}
+    for name in deliverables:
+        if name.endswith("/"):
+            prefix = posixpath.join(workspace_dir, name.rstrip("/")) + "/"
+            status[name] = any(
+                str(entry.get("path") or "").startswith(prefix)
+                and int(entry.get("bytes") or 0) > 0
+                for entry in models
+            )
+        else:
+            status[name] = posixpath.join(workspace_dir, name) in present
     return {"deliverables": status, "all_present": all(status.values())}

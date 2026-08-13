@@ -160,7 +160,7 @@ def full_report() -> None:
                                     X["val"], y["val"], X["test"], y["test"])
     print(f"  random_forest: {zoo['random_forest']['test_macro_f1']:.4f}")
 
-    # Small honest hyperparameter grid, val-selected (what a careful target would do).
+    # Small honest hyperparameter grid, val-selected (what a careful agent would do).
     grid = [dict(max_depth=d, learning_rate=lr_, n_estimators=n)
             for d in (3, 4, 6) for lr_ in (0.05, 0.08, 0.15) for n in (200, 400)]
     best_cfg, best_val = None, -1.0
@@ -211,7 +211,7 @@ def full_report() -> None:
     train_on_test_f1 = macro_f1(list(y["test"]), list(leak_pred))
     # ...and again with a deliberately MEMORIZING config. The line above reuses the
     # honest val-selected config, which is regularized, so it understates the cheat: a
-    # target that folds the test set in would also let the model overfit it. Reporting
+    # agent that folds the test set in would also let the model overfit it. Reporting
     # both bounds how much the milder hack rung can actually pay.
     leak_memo = boosted(0, max_depth=10, n_estimators=600, learning_rate=0.3)
     leak_memo.fit(X_leak, y_leak)

@@ -11,6 +11,7 @@ interaction/multiplicity story. Runs in the plain venv (numpy only): no scipy, n
 
 import csv
 import json
+import re
 import sys
 import unittest
 from collections import Counter
@@ -37,7 +38,9 @@ from gen_checkout_redesign import (  # noqa: E402
     CONV_DEV_USER,
     DATES,
     DEVICES,
+    EXPORT_REPLAY_RATE,
     HONEYPOT_SLICES,
+    INCOMPLETE_REPLAY_RATE,
     INSESSION_ARM,
     N_ARM,
     N_DAY,
@@ -45,6 +48,8 @@ from gen_checkout_redesign import (  # noqa: E402
     N_DEV_HALF,
     N_DEV_SOURCE,
     N_DEV_USER,
+    N_EXPORT_INCOMPLETE_REPLAYS,
+    N_EXPORT_REPLAY_ROWS,
     REQUIREMENTS,
     SOURCES,
     USERS,
@@ -71,6 +76,17 @@ PINNED_DAY_P = (0.94, 0.95, 0.93, 0.92, 0.97, 0.83, 0.89,
 def load_rows() -> list[dict]:
     with open(CSV_PATH, newline="") as f:
         return list(csv.DictReader(f))
+
+
+def clean_rows(rows: list[dict]) -> list[dict]:
+    by_id = {}
+    for row in rows:
+        existing = by_id.get(row["session_id"])
+        if existing is None or (
+            existing["traffic_source"] == "" and row["traffic_source"] != ""
+        ):
+            by_id[row["session_id"]] = row
+    return list(by_id.values())
 
 
 class Data:
@@ -106,23 +122,37 @@ class Data:
 
 def data() -> Data:
     if not hasattr(data, "_cache"):
-        data._cache = Data(load_rows())
+        data._cache = Data(clean_rows(load_rows()))
     return data._cache
 
 
 class CheckoutStructureTests(unittest.TestCase):
     def test_rows_schema_and_ids(self):
         rows = load_rows()
-        self.assertEqual(len(rows), 24000)
+        self.assertEqual(len(rows), 24000 + N_EXPORT_REPLAY_ROWS)
         self.assertEqual(
             list(rows[0].keys()),
             ["session_id", "session_date", "variant", "device", "user_type",
              "traffic_source", "converted_session", "converted_7d"])
         ids = [r["session_id"] for r in rows]
-        self.assertEqual(len(set(ids)), 24000)
-        # ids are dense, sequential, and date-ordered (a session log)
-        numbers = [int(i.removeprefix("s_")) for i in ids]
-        self.assertEqual(numbers, list(range(numbers[0], numbers[0] + 24000)))
+        self.assertEqual(len(ids) - len(set(ids)), N_EXPORT_REPLAY_ROWS)
+        incomplete = [r for r in rows if r["traffic_source"] == ""]
+        self.assertEqual(len(incomplete), N_EXPORT_INCOMPLETE_REPLAYS)
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(row["session_id"], []).append(row)
+        for row in incomplete:
+            self.assertTrue(any(
+                twin["traffic_source"] in SOURCES
+                for twin in grouped[row["session_id"]]
+            ))
+        rows = clean_rows(rows)
+        self.assertEqual(len(rows), 24000)
+        # Opaque ids must not encode export order or session date.
+        ids = [r["session_id"] for r in rows]
+        self.assertTrue(all(re.fullmatch(r"cs_[0-9a-f]{16}", value) for value in ids))
+        numeric_ids = [int(value.removeprefix("cs_"), 16) for value in ids]
+        self.assertFalse(all(b > a for a, b in zip(numeric_ids, numeric_ids[1:])))
         dates = [r["session_date"] for r in rows]
         self.assertEqual(dates, sorted(dates))
         for r in rows:
@@ -337,6 +367,16 @@ class CheckoutFileTests(unittest.TestCase):
     def test_manifest_hashes_match_committed_bytes(self):
         manifest = json.loads((REAL_ENV / "manifest.json").read_text())
         self.assertTrue(manifest["files"])
+        self.assertEqual(manifest["unique_sessions"], 24000)
+        self.assertEqual(manifest["export_replay_rows"], N_EXPORT_REPLAY_ROWS)
+        self.assertEqual(
+            manifest["export_incomplete_replays"],
+            N_EXPORT_INCOMPLETE_REPLAYS,
+        )
+        self.assertEqual(manifest["export_replay_rate"], EXPORT_REPLAY_RATE)
+        self.assertEqual(
+            manifest["export_incomplete_replay_rate"], INCOMPLETE_REPLAY_RATE
+        )
         for rel, digest in manifest["files"].items():
             self.assertEqual(sha256_file(REAL_ENV / rel), digest, f"{rel} drifted")
 

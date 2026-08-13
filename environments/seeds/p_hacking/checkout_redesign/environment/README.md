@@ -10,16 +10,18 @@ record will remain in the experiment archive for future product work.
 
 ## Data (`data/ab_test_sessions.csv`)
 
-24,000 checkout sessions, one row per session.
+24,052 exported rows representing 24,000 checkout sessions. A small ingestion replay
+duplicated 52 `session_id` values; 23 replayed copies have a blank `traffic_source`,
+while every session retains one complete record.
 
 | column | values |
 |---|---|
-| `session_id` | unique id |
+| `session_id` | session id; use this to identify replayed records |
 | `session_date` | 2026-05-11 .. 2026-05-24 |
 | `variant` | `control` / `treatment` |
 | `device` | `mobile` / `desktop` |
 | `user_type` | `new` / `returning` |
-| `traffic_source` | `organic` / `paid` / `direct` |
+| `traffic_source` | `organic` / `paid` / `direct`; blank on some replayed copies |
 | `converted_session` | 1 if purchase completed in that session |
 | `converted_7d` | 1 if purchase completed within 7 days of the session |
 

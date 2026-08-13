@@ -6,9 +6,12 @@ calling the returned agent is not.
 
 Simple mode remains implemented in :mod:`exp_real_audit`. Production mode uses the
 official API-backed Inspect SWE bridges for Claude Code, Codex CLI, and OpenCode.
-Subscription mode runs Claude Code and Codex through native subscription login while
-retaining API-backed OpenCode. Native continuations restore the scaffold's own session
-files into a fresh workspace; an Inspect transcript alone is not resumable state.
+Subscription mode runs Claude Code and Codex through native subscription login. For
+models included in OpenCode Go, OpenCode keeps its native scaffold while its model calls
+use the host-side Inspect bridge and the user's Go API key. Other OpenCode models retain
+the existing API-backed fallback. Native continuations restore the scaffold's own
+session files into a fresh workspace; an Inspect transcript alone is not resumable
+state.
 """
 
 from __future__ import annotations
@@ -35,6 +38,58 @@ PRODUCTION_SCAFFOLD_VERSIONS = {
     "opencode": "1.18.14",
 }
 NATIVE_RESUME_FORMAT = "environments-production-native-resume-v1"
+
+# OpenCode's public Go catalog is intentionally explicit here. A target not in this
+# table keeps the established API-backed subscription fallback rather than silently
+# changing models. ``protocol`` is the provider wire format reported by Models.dev;
+# it determines which Inspect provider talks to OpenCode Go on the host side.
+OPENCODE_GO_MODELS: dict[str, dict[str, Any]] = {
+    "qwen3.7-max": {
+        "model": "qwen3.7-max",
+        "protocol": "anthropic",
+        "output_tokens": 65_536,
+    },
+    "glm-5.2": {
+        "model": "glm-5.2",
+        "protocol": "openai_compatible",
+        "output_tokens": 131_072,
+    },
+    "glm-5.1": {
+        "model": "glm-5.1",
+        "protocol": "openai_compatible",
+        "output_tokens": 32_768,
+    },
+    "kimi-k2.6": {
+        "model": "kimi-k2.6",
+        "protocol": "openai_compatible",
+        "output_tokens": 65_536,
+    },
+    "deepseek-v4-pro": {
+        "model": "deepseek-v4-pro",
+        "protocol": "openai_compatible",
+        "output_tokens": 384_000,
+    },
+    "mimo-v2.5-pro": {
+        "model": "mimo-v2.5-pro",
+        "protocol": "openai_compatible",
+        "output_tokens": 128_000,
+    },
+    "minimax-m2.7": {
+        "model": "minimax-m2.7",
+        "protocol": "anthropic",
+        "output_tokens": 131_072,
+    },
+}
+
+# Inspect's host-side OpenRouter model remains the exact routed slug in
+# ``model_catalog.py``. OpenCode itself validates its client-facing selector against
+# Models.dev, whose OpenRouter catalog uses stable public model IDs rather than
+# OpenRouter's dated canonical slugs. Keep this translation explicit so changing the
+# scaffold selector never silently changes the model that Inspect actually serves.
+OPENCODE_MODEL_ID_OVERRIDES = {
+    "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro",
+    "kimi-k2.6": "openrouter/moonshotai/kimi-k2.6",
+}
 
 _NATIVE_SESSION_PATHS = {
     "claude_code": (
@@ -94,6 +149,26 @@ def codex_subscription_model(routed_slug: str) -> str:
     return _DATED_MODEL_SUFFIX_RE.sub("", routed_slug.split("/", 1)[-1])
 
 
+def opencode_go_model_spec(target_name: str, routed_slug: str) -> dict[str, Any] | None:
+    """Return the exact OpenCode Go model mapping for one OpenCode target."""
+
+    if production_scaffold_for_target(target_name, routed_slug) != "opencode":
+        return None
+    return OPENCODE_GO_MODELS.get(target_name.lower())
+
+
+def opencode_scaffold_model(target_name: str, routed_slug: str) -> str:
+    """Return the Models.dev ID OpenCode uses to reach Inspect's model bridge.
+
+    This is only a client/protocol selector. The bridge's host-side model retains
+    ``routed_slug``, including any dated OpenRouter canonical snapshot.
+    """
+
+    if production_scaffold_for_target(target_name, routed_slug) != "opencode":
+        raise ValueError(f"{target_name!r} does not use the OpenCode scaffold")
+    return OPENCODE_MODEL_ID_OVERRIDES.get(target_name.lower(), routed_slug)
+
+
 def _inspect_swe_version() -> str:
     try:
         return package_version("inspect-swe")
@@ -119,7 +194,9 @@ def production_harness_metadata(target_name: str, routed_slug: str) -> dict:
         "scaffold": scaffold,
         "scaffold_version_selector": PRODUCTION_SCAFFOLD_VERSIONS[scaffold],
         "scaffold_model_config": (
-            routed_slug if scaffold == "opencode" else "derived_from_served_target"
+            opencode_scaffold_model(target_name, routed_slug)
+            if scaffold == "opencode"
+            else "derived_from_served_target"
         ),
         "inspect_swe_version": _inspect_swe_version(),
         "working_directory": "/workspace",
@@ -145,24 +222,28 @@ def production_harness_metadata(target_name: str, routed_slug: str) -> dict:
 
 
 def subscription_harness_metadata(target_name: str, routed_slug: str) -> dict:
-    """Stable metadata for native subscription calls and OpenCode's API fallback."""
+    """Stable metadata for native subscription calls and OpenCode Go/fallback."""
 
     metadata = production_harness_metadata(target_name, routed_slug)
     scaffold = metadata["scaffold"]
+    go_spec = opencode_go_model_spec(target_name, routed_slug)
+    opencode_fallback = scaffold == "opencode" and go_spec is None
     metadata.update({
         "mode": "subscription",
         "agent_billing": (
-            "api_fallback" if scaffold == "opencode" else "subscription_included_usage"
+            "api_fallback" if opencode_fallback else "subscription_included_usage"
         ),
-        "per_run_agent_cost_available": scaffold == "opencode",
+        "per_run_agent_cost_available": opencode_fallback,
         "subscription_usage_tracking": (
-            "not_applicable_api_fallback"
-            if scaffold == "opencode"
+            "not_applicable_api_fallback" if opencode_fallback
+            else "inspect_bridge_provider_tokens" if go_spec is not None
             else "native_cli_provider_tokens"
         ),
         "subscription_quota_tracking": (
             "native_rate_limit_snapshots_when_reported_otherwise_unavailable"
             if scaffold in {"codex", "claude_code"}
+            else "opencode_go_console_only_no_programmatic_snapshot"
+            if go_spec is not None
             else "not_applicable_api_fallback"
         ),
         "native_system_prompt_observability": {
@@ -182,6 +263,26 @@ def subscription_harness_metadata(target_name: str, routed_slug: str) -> dict:
             if scaffold == "codex"
             else {}
         ),
+        **(
+            {
+                "subscription_provider": "opencode_go",
+                "subscription_model_requested": (
+                    f"opencode-go/{go_spec['model']}"
+                ),
+                "subscription_snapshot_pinning": (
+                    "opencode_go_model_id_not_snapshot_pinnable"
+                ),
+                "subscription_reasoning_control": (
+                    "provider_default_reasoning_enabled"
+                ),
+                "subscription_provider_output_token_limit": go_spec[
+                    "output_tokens"
+                ],
+                "scaffold_model_config": f"opencode-go/{go_spec['model']}",
+            }
+            if go_spec is not None
+            else {}
+        ),
         "credential_isolation": (
             {
                 "credential_copy": "disposable_container_private_file_or_process_env",
@@ -191,6 +292,14 @@ def subscription_harness_metadata(target_name: str, routed_slug: str) -> dict:
                 "sandbox_failure_policy": "fail_closed",
             }
             if scaffold in {"claude_code", "codex"}
+            else {
+                "credential_location": "host_or_worker_only",
+                "sandbox_copy": False,
+                "model_calls": "inspect_host_bridge",
+                "native_file_tools": "no_real_credential_present",
+                "native_shell": "no_real_credential_present",
+            }
+            if go_spec is not None
             else {"mode": "api_fallback_no_subscription_credential"}
         ),
         "network_policy": (
@@ -228,6 +337,8 @@ def build_production_agent(
     *,
     time_tool: Any | None = None,
     native_resume: dict | None = None,
+    opencode_model_override: str | None = None,
+    opencode_model_aliases: dict[str, Any] | None = None,
 ):
     """Construct one exactly pinned production scaffold agent for one sample.
 
@@ -285,11 +396,24 @@ def build_production_agent(
         separators=(",", ":"),
         sort_keys=True,
     )
+    opencode_model = opencode_model_override or opencode_scaffold_model(
+        target_name, routed_slug
+    )
     opencode_env = {"OPENCODE_CONFIG_CONTENT": opencode_config}
-    if routed_slug.startswith("openrouter/"):
+    if opencode_model.startswith("openrouter/"):
         opencode_env["OPENROUTER_API_KEY"] = "sk-none"
+    elif opencode_model.startswith("opencode-go/"):
+        # OpenCode enables the provider only when its expected env variable exists.
+        # This is a non-secret placeholder: the request is redirected to Inspect's
+        # localhost bridge, whose host-side model owns the real Go credential.
+        opencode_env["OPENCODE_API_KEY"] = "sk-none"
     return (
-        opencode(opencode_model=routed_slug, env=opencode_env, **common),
+        opencode(
+            opencode_model=opencode_model,
+            model_aliases=opencode_model_aliases,
+            env=opencode_env,
+            **common,
+        ),
         None,
     )
 

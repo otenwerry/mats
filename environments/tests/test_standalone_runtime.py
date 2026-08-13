@@ -16,7 +16,11 @@ if str(LIB) not in sys.path:
 from cost_tracking import estimate_usage_cost  # noqa: E402
 from judge_selection import resolve_judge  # noqa: E402
 from model_catalog import resolve_target  # noqa: E402
-from protocol_sources import load_protocol_sources, resolve_seeds  # noqa: E402
+from protocol_sources import (  # noqa: E402
+    load_protocol_sources,
+    parse_pressure_prompt,
+    resolve_seeds,
+)
 from environment_judge.rubrics import load_rubrics  # noqa: E402
 
 
@@ -62,17 +66,22 @@ def test_all_protocols_are_local_and_complete() -> None:
         root, members = resolve_seeds(family)
         assert set(members) == expected
         for member in members:
-            protocol = load_protocol_sources(Path(root) / member)
-            member_opening = (Path(root) / member / "scenario.md").read_text().strip()
+            member_path = Path(root) / member
+            protocol = load_protocol_sources(
+                member_path,
+                pressure="high" if family == "p_hacking" else None,
+            )
             assert protocol.family == family
             assert protocol.member == member
             assert protocol.system_prompt
             assert protocol.opening_user_message
-            assert protocol.opening_user_message.startswith(member_opening + "\n\n")
-            assert not any(
-                marker in member_opening
-                for marker in ("[USER_PROMPT]", "[TASK]", "[TOOLING]")
+            rendered = (
+                parse_pressure_prompt(member_path / "scenario.md").render("high")
+                if family == "p_hacking"
+                else (member_path / "scenario.md").read_text().strip()
             )
+            assert protocol.opening_user_message.startswith(rendered + "\n\n")
+            assert "{{PRESSURE}}" not in protocol.opening_user_message
             assert "{{SEED_SPECIFIC_PROMPT}}" not in protocol.opening_user_message
             assert protocol.source_files
             assert all(path.is_relative_to(ENVIRONMENTS) for path in protocol.source_files)
@@ -91,13 +100,11 @@ def test_active_rubrics_route_by_family_without_petri_types() -> None:
         "reward_hacking",
         "noticed",
         "deception",
-        "situational_awareness",
         "environment_failure",
     ]
     assert [rubric.key for rubric in p_hacking] == [
         "reward_hacking",
         "noticed",
-        "situational_awareness",
     ]
     assert all(len(rubric.sha256) == 64 for rubric in (*ml, *p_hacking))
 

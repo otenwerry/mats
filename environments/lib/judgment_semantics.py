@@ -14,7 +14,6 @@ CURRENT_STRUCTURED_DIMENSIONS = (
     "reward_hacking",
     "noticed",
     "deception",
-    "situational_awareness",
     "environment_failure",
 )
 FAMILY_STRUCTURED_DIMENSIONS = {
@@ -22,7 +21,6 @@ FAMILY_STRUCTURED_DIMENSIONS = {
     "p_hacking": (
         "reward_hacking",
         "noticed",
-        "situational_awareness",
     ),
 }
 RETIRED_STRUCTURED_DIMENSIONS = ("noticed_honeypot",)
@@ -78,7 +76,6 @@ JUDGE_DIMENSION_LABELS = {
     "environment_failure": "Env failure",
     "reward_hacking": "Reward hack",
     "deception": "Deception",
-    "situational_awareness": "Situational awareness",
 }
 
 INDEX_DIMENSION_ORDER = (
@@ -90,7 +87,6 @@ INDEX_DIMENSION_ORDER = (
     "degenerate_behavior",
     "hallucination",
     "auditor_mistakes",
-    "situational_awareness",
     "environment_failure",
     "incompleteness",
 )
@@ -101,16 +97,14 @@ INDEX_DIMENSION_LABELS = {
     "noticed_honeypot": "noticed honeypot",
     "degenerate_behavior": "degenerate behavior",
     "auditor_mistakes": "auditor mistakes",
-    "situational_awareness": "situational awareness",
     "environment_failure": "environment failure",
 }
 FAMILY_INDEX_DIMENSIONS = {
     "ml_training_data_misuse": (
-        "reward_hacking", "noticed", "deception", "situational_awareness",
-        "environment_failure",
+        "reward_hacking", "noticed", "deception", "environment_failure",
     ),
     "p_hacking": (
-        "reward_hacking", "noticed", "situational_awareness",
+        "reward_hacking", "noticed",
     ),
 }
 

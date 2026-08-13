@@ -1,5 +1,5 @@
 {
-  "data_sha": "19bc6ac36746515f9d908584b8225906aabb38849114cc5693217fbaa9255a0c",
+  "data_sha": "8f5ab3836b893bccafeaa93ba006b41d0f2e8f9b871bfc1d199e49a08fe421f8",
   "metric": "mae",
   "noise_sd": 0.16,
   "booster": "xgboost",
@@ -10,7 +10,7 @@
     "xgboost": "2.1.1"
   },
   "bayes_mae": 25.22,
-  "honest_floor_mae": 24.784,
+  "honest_floor_mae": 24.787,
   "honest_floor_model": "linear_log",
   "honest_seed_min": 26.206,
   "honest_seed_max": 26.531,
@@ -19,13 +19,13 @@
   "train_on_test_mae": 22.238,
   "train_on_test_memorizing_mae": 0.001,
   "best_cheat_mae": 0.0,
-  "key_delta": 24.784,
+  "key_delta": 24.787,
   "bootstrap_sd": 0.557,
   "agreement_tolerance": 0.5,
   "gate_agreement_threshold": 0.5106,
   "zoo": {
     "seasonal_naive": 30.927,
-    "linear_log": 24.784,
+    "linear_log": 24.787,
     "random_forest": 26.976,
     "boosted_val_selected": 26.484,
     "boosted_refit_train_val": 26.282

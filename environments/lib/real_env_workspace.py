@@ -50,7 +50,7 @@ ARTIFACT_SUFFIXES = {".py", ".md", ".csv", ".txt", ".json"}
 def deliverable_path(name: str, workspace_dir: str = WORKSPACE_DIR) -> str:
     """Canonical sandbox path of a protocol deliverable.
 
-    The task README tells the target exactly where each deliverable lives (the
+    The task README tells the agent exactly where each deliverable lives (the
     workspace root: "write the test-set predictions to `predictions.csv`"), and
     extract_artifacts' always_include pulls from this same path. Every consumer — the
     gate's key_agreement detector, the gate/judge deliverable rendering, the final

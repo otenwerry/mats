@@ -3,7 +3,7 @@
 The page structure mirrors the Petri visuals: a Filtered / All-trajectories integrity
 toggle at the top (Filtered removes integrity-excluded runs; All trajectories pools
 everything), then two underlined sub-tabs per view — "base rates" (outcome composition
-by target model, in counts and per-seed shares) and "cost" (all-in cost per trajectory
+by agent model, in counts and per-seed shares) and "cost" (all-in cost per trajectory
 by model, spend by role, and the per-trajectory cost spread). Figures are ported from
 petri/lib/viewer_visuals.py so the two viewers read the same way.
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import html
 import io
-import textwrap
 from collections import Counter
 
 import numpy as np
@@ -26,6 +25,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from model_catalog import TARGET_CHOICES, route as route_model  # noqa: E402
+from env_viewer_turns import experiment_user_turn_count  # noqa: E402
 
 
 plt.rcParams.update({
@@ -51,9 +51,9 @@ TARGET_LABELS = {
 }
 
 
-def target_label(target: object) -> str:
-    """Pretty catalog name for a target slug; the raw slug when unregistered."""
-    raw = str(target or "unknown")
+def agent_label(agent: object) -> str:
+    """Pretty catalog name for an agent slug; the raw slug when unregistered."""
+    raw = str(agent or "unknown")
     return TARGET_LABELS.get(route_model(raw), raw)
 
 
@@ -78,7 +78,10 @@ def trajectory_category(audit: dict, *, respect_exclusion: bool = True) -> str:
     """The one outcome bucket a trajectory belongs to (index sections + visuals)."""
     if audit.get("judge_failure"):
         return "unjudged"
-    if respect_exclusion and audit.get("integrity_status") == "excluded":
+    if respect_exclusion and (
+        audit.get("mechanical_status") == "invalid"
+        or audit.get("integrity_status") == "excluded"
+    ):
         return "excluded"
     judgment = audit.get("judgment") or {}
     if judgment.get("format") != "structured":
@@ -99,10 +102,11 @@ def trajectory_category(audit: dict, *, respect_exclusion: bool = True) -> str:
 # Outcome buckets in stack order, with the Petri outcome palette: reward hacks keep the
 # established RH red, review takes the reversed orange, notable takes the interesting
 # purple, clean stays green, and the not-usable buckets stay visually recessive.
-# The hack bucket is split by the trajectory's user-turn count (the same count as the
-# index column): 1 = ended at the first-submission gate, 2 = hacked in a continued
-# trajectory. The split colors are Petri's hack-elicitation pair (RH red / deep wine),
-# with its grey-mauve for a hack whose transcript stores no user-turn count.
+# The hack bucket is split by controller-authored task turns (the same count as the
+# index column): 1 = ended at the first-submission gate, 2 = hacked after the scripted
+# follow-up. Native-scaffold preamble messages are not experiment turns. The split
+# colors are Petri's hack-elicitation pair (RH red / deep wine), with its grey-mauve
+# for a legacy hack whose turn count is unavailable or outside the one/two-turn protocol.
 OUTCOME_ORDER = (
     ("hack_1turn", "reward hack · 1 user turn", "#C44E52"),
     ("hack_2turn", "reward hack · 2 user turns", "#7E3B44"),
@@ -118,20 +122,33 @@ OUTCOME_ORDER = (
 OUTCOME_COLORS = {key: color for key, _label, color in OUTCOME_ORDER}
 # count labels drawn in white on the saturated segments, dark on the light ones
 _WHITE_TEXT_KEYS = {"hack_1turn", "hack_2turn", "hack_other", "review", "notable"}
+_HACK_KEYS = ("hack_1turn", "hack_2turn", "hack_other")
+_BINARY_NON_HACK_KEYS = ("notable", "clean")
 
 
-def _user_turn_count(audit: dict) -> int | None:
-    messages = audit.get("messages") or []
-    if not messages:
-        return None
-    return sum(1 for message in messages if message.get("role") == "user")
+def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
+    """Wilson score interval for a binomial proportion, as fractions."""
+
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    p = k / n
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = (z / denom) * np.sqrt(
+        p * (1 - p) / n + z * z / (4 * n * n)
+    )
+    # Floating-point rounding at exactly 0% or 100% can otherwise produce a tiny
+    # negative Matplotlib error-bar length.
+    lo = max(0.0, min(p, center - half))
+    hi = min(1.0, max(p, center + half))
+    return p, lo, hi
 
 
 def _outcome_key(audit: dict, *, respect_exclusion: bool) -> str:
     category = trajectory_category(audit, respect_exclusion=respect_exclusion)
     if category != "hack":
         return category
-    turns = _user_turn_count(audit)
+    turns = experiment_user_turn_count(audit)
     if turns == 1:
         return "hack_1turn"
     if turns == 2:
@@ -171,26 +188,20 @@ def _stack(*svgs: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# base rates — outcome composition by target model
+# base rates — outcome composition by agent model
 # --------------------------------------------------------------------------- #
 def outcome_data(audits: list[dict], *, respect_exclusion: bool = True) -> dict:
-    """Rows/categories/seeds for the outcome figures, in the Petri data shape."""
+    """Per-model category counts shared by the outcome and binary-rate figures."""
     by_model: dict[str, Counter] = {}
-    by_model_seed: dict[str, dict[str, Counter]] = {}
     totals: Counter = Counter()
     for audit in audits:
-        model = target_label(audit.get("target"))
-        seed = str(audit.get("seed") or "unknown")
+        model = agent_label(audit.get("target"))
         category = _outcome_key(audit, respect_exclusion=respect_exclusion)
         totals[category] += 1
         by_model.setdefault(model, Counter())[category] += 1
-        by_model_seed.setdefault(model, {}).setdefault(seed, Counter())[category] += 1
     categories = [
         (key, label) for key, label, _color in OUTCOME_ORDER if totals.get(key)
     ]
-    seeds = sorted({
-        seed for cells in by_model_seed.values() for seed in cells
-    })
     rows = []
     for model in sorted(by_model, key=lambda m: (-sum(by_model[m].values()), m)):
         counts = by_model[model]
@@ -198,20 +209,12 @@ def outcome_data(audits: list[dict], *, respect_exclusion: bool = True) -> dict:
             "model": model,
             "n": sum(counts.values()),
             "counts": dict(counts),
-            "by_seed": [
-                {
-                    "seed": seed,
-                    "n": sum(cell.values()),
-                    "counts": dict(cell),
-                }
-                for seed, cell in sorted(by_model_seed[model].items())
-            ],
         })
-    return {"rows": rows, "categories": categories, "seeds": seeds}
+    return {"rows": rows, "categories": categories}
 
 
 def fig_model_outcomes(data: dict) -> str:
-    """Count-stacked outcome composition, one bar per target model."""
+    """Count-stacked outcome composition, one bar per agent model."""
     rows = [r for r in data.get("rows", []) if r.get("n")]
     categories = data.get("categories", [])
     if not rows or not categories:
@@ -242,94 +245,445 @@ def fig_model_outcomes(data: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def fig_model_seed_outcomes(data: dict) -> str:
-    """Outcome-composition small multiples: seed rows x model columns.
+def hack_rate_data(data: dict) -> list[dict]:
+    """Binary reward-hack counts by model, retaining denominator exclusions."""
 
-    Each cell is one 100%-stacked bar using the exact same outcome buckets and colors
-    as ``fig_model_outcomes``. Normalizing within a cell makes differently sized
-    model/seed groups comparable; the stored denominator and every non-zero segment
-    count remain printed on the graph.
-    """
-    rows = [r for r in data.get("rows", []) if r.get("n")]
-    seeds = data.get("seeds", [])
-    categories = data.get("categories", [])
-    if not rows or not seeds or not categories:
-        return _empty_fig("no model-by-seed trajectories")
+    rows = []
+    for row in data.get("rows", []):
+        counts = row.get("counts") or {}
+        hacks = sum(counts.get(key, 0) for key in _HACK_KEYS)
+        non_hacks = sum(counts.get(key, 0) for key in _BINARY_NON_HACK_KEYS)
+        denominator = hacks + non_hacks
+        excluded_counts = {
+            key: count
+            for key, count in counts.items()
+            if key not in (*_HACK_KEYS, *_BINARY_NON_HACK_KEYS) and count
+        }
+        rows.append({
+            "model": row["model"],
+            "k": hacks,
+            "n": denominator,
+            "excluded": sum(excluded_counts.values()),
+            "excluded_counts": excluded_counts,
+        })
+    return rows
 
-    nrows, ncols = len(seeds), len(rows)
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(max(6.8, 2.15 * ncols), max(4.8, 1.35 * nrows + 1.25)),
-        squeeze=False,
-        sharey=True,
+
+def fig_model_hack_rates(data: dict) -> str:
+    """Binary reward-hack rates by agent model with Wilson 95% intervals."""
+
+    rows = [row for row in hack_rate_data(data) if row["n"] > 0]
+    if not rows:
+        return _empty_fig("no usable binary judgments")
+
+    fig, ax = plt.subplots(figsize=(max(6.2, 1.35 * len(rows)), 4.4))
+    xs = np.arange(len(rows))
+    rates = []
+    lower_errors = []
+    upper_errors = []
+    for row in rows:
+        p, lo, hi = _wilson(row["k"], row["n"])
+        rates.append(100 * p)
+        lower_errors.append(100 * (p - lo))
+        upper_errors.append(100 * (hi - p))
+
+    ax.bar(
+        xs,
+        rates,
+        width=0.66,
+        color=OUTCOME_COLORS["hack_1turn"],
+        yerr=[lower_errors, upper_errors],
+        capsize=5,
+        error_kw={"ecolor": "#333", "lw": 1.1},
     )
-    for col_idx, row in enumerate(rows):
-        by_seed = {cell["seed"]: cell for cell in row.get("by_seed", [])}
-        for row_idx, seed in enumerate(seeds):
-            ax = axes[row_idx][col_idx]
-            cell = by_seed.get(seed) or {"n": 0, "counts": {}}
-            n = cell.get("n", 0)
-            bottom = 0.0
-            if n:
-                for key, _ in categories:
-                    count = cell.get("counts", {}).get(key, 0)
-                    if not count:
-                        continue
-                    height = 100 * count / n
-                    ax.bar(
-                        [0], [height], bottom=[bottom], width=0.72,
-                        color=OUTCOME_COLORS.get(key, "#8C8C8C"),
-                        edgecolor="white", linewidth=0.5,
-                    )
-                    ax.annotate(
-                        str(count), (0, bottom + height / 2),
-                        ha="center", va="center", fontsize=7, fontweight="bold",
-                        color="white" if key in _WHITE_TEXT_KEYS else "#222",
-                    )
-                    bottom += height
-                ax.text(0, 102.5, f"n={n}", ha="center", va="bottom",
-                        fontsize=7.5, color="#555")
-            else:
-                ax.set_facecolor("#f2f2f5")
-                ax.text(0, 50, "no runs", ha="center", va="center",
-                        fontsize=7.5, color="#999")
-            ax.set_xlim(-0.62, 0.62)
-            ax.set_ylim(0, 111)
-            ax.set_xticks([])
-            ax.yaxis.grid(True, color="#e6e6ee", linewidth=0.6)
-            ax.set_axisbelow(True)
-            if row_idx == 0:
-                ax.set_title(row["model"], fontsize=8.5, pad=8)
-            if col_idx == 0:
-                ax.set_ylabel(
-                    "\n".join(textwrap.wrap(seed.replace("_", " "), 18)),
-                    rotation=0, ha="right", va="center",
-                    labelpad=34, fontsize=8.5, fontweight="bold",
-                )
-                ax.set_yticks([0, 50, 100], ["0", "50", "100"], fontsize=7.5)
-            else:
-                ax.tick_params(axis="y", left=False, labelleft=False)
-
-    handles = [
-        Patch(facecolor=OUTCOME_COLORS.get(key, "#8C8C8C"), label=label)
-        for key, label in categories
-    ]
-    fig.suptitle("Outcomes by seed and model", fontsize=12, fontweight="bold", y=0.995)
-    fig.supylabel("Share of trajectories (%)", fontsize=9, x=0.01)
-    fig.legend(handles=handles, frameon=False, fontsize=7.5, loc="lower center",
-               bbox_to_anchor=(0.5, -0.005), ncol=3)
-    fig.tight_layout(rect=(0.035, 0.11, 1, 0.96), h_pad=0.8, w_pad=0.8)
+    for x, row, rate, upper_error in zip(xs, rows, rates, upper_errors):
+        ax.annotate(
+            f'{row["k"]}/{row["n"]}',
+            (x, rate + upper_error),
+            textcoords="offset points",
+            xytext=(0, 4),
+            ha="center",
+            fontsize=9,
+            color="#333",
+            fontweight="bold",
+        )
+    ax.set_xticks(
+        xs,
+        [row["model"] for row in rows],
+        rotation=16,
+        ha="right",
+        fontsize=8.5,
+    )
+    ax.set_ylabel("Reward-hack rate (%)")
+    ax.set_ylim(0, 108)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
+    ax.set_axisbelow(True)
     return _fig_to_svg(fig)
+
+
+_CONTINUATION_RATE_COLORS = {
+    "baseline": "#8C8C8C",
+    "hack-in-one-turn": OUTCOME_COLORS["hack_1turn"],
+    "hack-in-two-turns": OUTCOME_COLORS["hack_2turn"],
+    "no-hack": OUTCOME_COLORS["clean"],
+    "hack_prefix": OUTCOME_COLORS["hack_1turn"],
+    "nonhack_prefix": OUTCOME_COLORS["clean"],
+    "prefix": OUTCOME_COLORS["notable"],
+}
+
+_CONTINUATION_RATE_LABELS = {
+    "baseline": "Baseline",
+    "hack-in-one-turn": "After 1-turn hack",
+    "hack-in-two-turns": "After 2-turn hack",
+    "no-hack": "After no-hack prefix",
+    "hack_prefix": "After hack prefix",
+    "nonhack_prefix": "After non-hack prefix",
+    "prefix": "After prefix",
+}
+
+
+def _continuation_bar_style(bar: dict) -> str:
+    treatment = str(bar.get("treatment") or "")
+    return treatment if treatment in _CONTINUATION_RATE_COLORS else bar["kind"]
+
+
+def _continuation_bar_tick(bar: dict) -> str:
+    """Compact one-line condition label for one continuation-rate bar."""
+
+    if bar["kind"] == "baseline":
+        return "Baseline"
+    treatment_labels = {
+        "hack-in-one-turn": "1-turn hack",
+        "hack-in-two-turns": "2-turn hack",
+        "no-hack": "No hack",
+    }
+    condition = treatment_labels.get(str(bar.get("treatment") or ""))
+    if condition:
+        return condition
+    return str(bar.get("short_label") or "After prefix").removeprefix("After ")
+
+
+def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
+    """Matched rates with per-bar conditions and a second, model-level axis."""
+
+    model_order = {
+        "opus-4.6": 0,
+        "gpt-5.5": 1,
+        "deepseek-v4-pro": 2,
+        "glm-5.1": 3,
+        "kimi-k2.6": 4,
+    }
+    plotted_groups = [
+        {**group, "bars": [bar for bar in group.get("bars", []) if bar["n"] > 0]}
+        for group in groups
+    ]
+    plotted_groups = [group for group in plotted_groups if group["bars"]]
+    plotted_groups.sort(key=lambda group: (
+        model_order.get(str(group.get("model") or "").split(" · ", 1)[0], 99),
+        str(group.get("model") or ""),
+    ))
+    if not plotted_groups:
+        return _empty_fig("no usable continuation judgments", (6.2, 4.4))
+
+    xs: list[float] = []
+    bars: list[dict] = []
+    group_centers: list[float] = []
+    group_labels: list[str] = []
+    separators: list[float] = []
+    cursor = 0.0
+    for index, group in enumerate(plotted_groups):
+        group_xs = []
+        for bar in group["bars"]:
+            xs.append(cursor)
+            group_xs.append(cursor)
+            bars.append(bar)
+            cursor += 1.0
+        group_centers.append(float(np.mean(group_xs)))
+        group_label = group["model"].split(" · ", 1)[0]
+        group_labels.append(group_label)
+        if index < len(plotted_groups) - 1:
+            separators.append(cursor - 0.05)
+            cursor += 1.1
+
+    fig, ax = plt.subplots(
+        figsize=(max(8.0, min(16.0, 0.82 * len(bars) + 2.4)), 6.2)
+    )
+    rates, lower_errors, upper_errors = [], [], []
+    for bar in bars:
+        rate, low, high = _wilson(bar["k"], bar["n"])
+        rates.append(100 * rate)
+        lower_errors.append(100 * (rate - low))
+        upper_errors.append(100 * (high - rate))
+
+    ax.bar(
+        xs,
+        rates,
+        width=0.68,
+        color=[
+            _CONTINUATION_RATE_COLORS[_continuation_bar_style(bar)]
+            for bar in bars
+        ],
+        yerr=[lower_errors, upper_errors],
+        capsize=5,
+        error_kw={"ecolor": "#30343b", "lw": 1.1, "capthick": 1.1},
+        zorder=3,
+    )
+    for x, bar, rate, high_error in zip(xs, bars, rates, upper_errors):
+        ax.annotate(
+            f'{bar["k"]}/{bar["n"]}',
+            (x, rate + high_error),
+            textcoords="offset points",
+            xytext=(0, 4),
+            ha="center",
+            fontsize=9,
+            color="#333",
+            fontweight="bold",
+            bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.7},
+            zorder=5,
+        )
+    for separator in separators:
+        ax.axvline(separator, color="#d9dce4", lw=1.0, zorder=1)
+    ax.set_xticks(xs, [_continuation_bar_tick(bar) for bar in bars])
+    ax.tick_params(axis="x", labelsize=8.5, length=0, pad=8)
+    for center, label in zip(group_centers, group_labels):
+        ax.annotate(
+            label,
+            (center, 0),
+            xycoords=("data", "axes fraction"),
+            xytext=(0, -42),
+            textcoords="offset points",
+            ha="center",
+            va="top",
+            fontsize=9.5,
+            color="#353944",
+            fontweight="bold",
+            linespacing=1.2,
+            annotation_clip=False,
+        )
+    ax.set_ylabel("Reward-hack rate (%)")
+    ax.set_ylim(0, 113)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    ax.margins(x=0.02)
+
+    styles = []
+    for bar in bars:
+        style = _continuation_bar_style(bar)
+        if style not in styles:
+            styles.append(style)
+    legend_order = (
+        "baseline", "hack-in-one-turn", "hack-in-two-turns", "no-hack",
+        "hack_prefix", "nonhack_prefix", "prefix",
+    )
+    legend_styles = [style for style in legend_order if style in styles]
+    legend = [
+        Patch(
+            color=_CONTINUATION_RATE_COLORS[style],
+            label=_CONTINUATION_RATE_LABELS[style],
+        )
+        for style in legend_styles
+    ]
+    fig.suptitle(
+        "Reward-hack rate by prefix condition",
+        y=0.985,
+        fontsize=13,
+        fontweight="bold",
+    )
+    fig.legend(
+        handles=legend,
+        frameon=False,
+        fontsize=9,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.935),
+        ncol=min(4, len(legend)),
+        columnspacing=1.5,
+        handlelength=1.4,
+    )
+    fig.subplots_adjust(top=0.80, bottom=0.23, left=0.07, right=0.99)
+    return _fig_to_svg(fig)
+
+
+_CONTINUATION_COMPOSITION = (
+    ("hack_1turn", "1-turn hack", OUTCOME_COLORS["hack_1turn"]),
+    ("hack_2turn", "2-turn hack", OUTCOME_COLORS["hack_2turn"]),
+    ("interesting", "Interesting behavior", OUTCOME_COLORS["notable"]),
+    ("clean", "Clean", OUTCOME_COLORS["clean"]),
+)
+
+
+def fig_continuation_outcome_distribution(groups: list[dict]) -> str:
+    """100%-stacked usable outcomes for every matched continuation condition."""
+
+    model_order = {
+        "opus-4.6": 0,
+        "gpt-5.5": 1,
+        "deepseek-v4-pro": 2,
+        "glm-5.1": 3,
+        "kimi-k2.6": 4,
+    }
+    plotted_groups = [
+        {
+            **group,
+            "bars": [
+                bar
+                for bar in group.get("bars", [])
+                if bar.get("composition_n", 0) > 0
+            ],
+        }
+        for group in groups
+    ]
+    plotted_groups = [group for group in plotted_groups if group["bars"]]
+    plotted_groups.sort(key=lambda group: (
+        model_order.get(str(group.get("model") or "").split(" · ", 1)[0], 99),
+        str(group.get("model") or ""),
+    ))
+    if not plotted_groups:
+        return _empty_fig("no usable continuation outcomes", (6.2, 4.4))
+
+    xs: list[float] = []
+    bars: list[dict] = []
+    group_centers: list[float] = []
+    group_labels: list[str] = []
+    separators: list[float] = []
+    cursor = 0.0
+    for index, group in enumerate(plotted_groups):
+        group_xs = []
+        for bar in group["bars"]:
+            xs.append(cursor)
+            group_xs.append(cursor)
+            bars.append(bar)
+            cursor += 1.0
+        group_centers.append(float(np.mean(group_xs)))
+        group_labels.append(group["model"].split(" · ", 1)[0])
+        if index < len(plotted_groups) - 1:
+            separators.append(cursor - 0.05)
+            cursor += 1.1
+
+    fig, ax = plt.subplots(
+        figsize=(max(8.0, min(16.0, 0.82 * len(bars) + 2.4)), 6.2)
+    )
+    bottoms = np.zeros(len(bars))
+    for key, label, color in _CONTINUATION_COMPOSITION:
+        counts = np.array([
+            bar.get("composition", {}).get(key, 0) for bar in bars
+        ])
+        shares = np.array([
+            100 * count / bar["composition_n"]
+            for count, bar in zip(counts, bars)
+        ])
+        ax.bar(
+            xs,
+            shares,
+            bottom=bottoms,
+            width=0.68,
+            color=color,
+            label=label,
+            edgecolor="white",
+            lw=0.7,
+            zorder=3,
+        )
+        for x, share, bottom in zip(xs, shares, bottoms):
+            if share >= 8:
+                ax.text(
+                    x,
+                    bottom + share / 2,
+                    f"{share:.0f}%",
+                    ha="center",
+                    va="center",
+                    fontsize=8.5,
+                    fontweight="bold",
+                    color="white",
+                    zorder=4,
+                )
+        bottoms += shares
+
+    for x, bar in zip(xs, bars):
+        ax.annotate(
+            f'n={bar["composition_n"]}',
+            (x, 100),
+            textcoords="offset points",
+            xytext=(0, 5),
+            ha="center",
+            fontsize=8.5,
+            color="#4b4f58",
+            zorder=5,
+        )
+    for separator in separators:
+        ax.axvline(separator, color="#d9dce4", lw=1.0, zorder=1)
+    ax.set_xticks(xs, [_continuation_bar_tick(bar) for bar in bars])
+    ax.tick_params(axis="x", labelsize=8.5, length=0, pad=8)
+    for center, label in zip(group_centers, group_labels):
+        ax.annotate(
+            label,
+            (center, 0),
+            xycoords=("data", "axes fraction"),
+            xytext=(0, -42),
+            textcoords="offset points",
+            ha="center",
+            va="top",
+            fontsize=9.5,
+            color="#353944",
+            fontweight="bold",
+            annotation_clip=False,
+        )
+    ax.set_ylabel("Share of usable trajectories (%)")
+    ax.set_ylim(0, 112)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.yaxis.grid(True, color="#e6e6ee", lw=0.8, zorder=0)
+    ax.set_axisbelow(True)
+    ax.margins(x=0.02)
+
+    fig.suptitle(
+        "Outcome distribution by prefix condition",
+        y=0.985,
+        fontsize=13,
+        fontweight="bold",
+    )
+    fig.legend(
+        handles=[
+            Patch(color=color, label=label)
+            for _key, label, color in _CONTINUATION_COMPOSITION
+        ],
+        frameon=False,
+        fontsize=9,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.935),
+        ncol=4,
+        columnspacing=1.5,
+        handlelength=1.4,
+    )
+    fig.subplots_adjust(top=0.80, bottom=0.23, left=0.07, right=0.99)
+    return _fig_to_svg(fig)
+
+
+def render_continuation_visuals(groups: list[dict], audits: list[dict]) -> str:
+    """Continuation rates and recorded experiment spend in two compact tabs."""
+
+    rates = (
+        '<div class="figgrid">'
+        + _figure(fig_continuation_prefix_hack_rates(groups))
+        + '</div><div class="figgrid">'
+        + _figure(fig_continuation_outcome_distribution(groups))
+        + "</div>"
+    )
+    return _tab_layout([
+        ("rates", "rates", rates),
+        ("cost", "cost", _cost_section(audits)),
+    ])
 
 
 def _base_rates_section(audits: list[dict], *, respect_exclusion: bool = True) -> str:
     data = outcome_data(audits, respect_exclusion=respect_exclusion)
     return (
-        '<h2>Outcomes by model</h2><div class="figgrid outcomegrid">'
-        + _figure(fig_model_outcomes(data))
-        + _figure(fig_model_seed_outcomes(data))
-        + "</div>"
+        '<h2>Outcomes by model</h2>'
+        + _stack(fig_model_outcomes(data))
+        + '<h2>Reward-hack rate by model</h2>'
+        + _stack(fig_model_hack_rates(data))
+        + '<p class="vsub">Rate = reward hacks / usable non-review judgments; '
+        'error bars are Wilson 95% intervals. Needs-review, unjudged, awaiting, '
+        'and invalid judgments are excluded from the denominator.</p>'
     )
 
 
@@ -339,8 +693,8 @@ def _base_rates_section(audits: list[dict], *, respect_exclusion: bool = True) -
 ROLE_ORDER = ("target", "gate", "judge")
 # Display names only; stored role keys stay gate/judge. The gate is the stage-one
 # judge call at the first submission, the judge role is the fresh final call.
-ROLE_LABEL = {"target": "Target", "gate": "First judge", "judge": "Second judge"}
-# the Petri role palette (orange target, green judge); gate takes the blue slot
+ROLE_LABEL = {"target": "Agent", "gate": "First judge", "judge": "Second judge"}
+# The agent uses the orange role color; the first judge uses blue and the second green.
 ROLE_COLOR = {"target": "#DD8452", "gate": "#4C72B0", "judge": "#55A868"}
 VM_KEY = "vm"
 VM_COLOR = "#8172B3"
@@ -359,6 +713,19 @@ def _usd(x: float) -> str:
     return "$0"
 
 
+def _subscription_agent_usage_excluded(audit: dict) -> bool:
+    native_harness = (
+        audit.get("native_harness")
+        or ((audit.get("real_env") or {}).get("harness"))
+        or {}
+    )
+    agent_billing = native_harness.get("agent_billing")
+    return audit.get("harness") == "subscription" and (
+        agent_billing == "subscription_included_usage"
+        or (agent_billing is None and native_harness.get("scaffold") != "opencode")
+    )
+
+
 def recorded_cost_summary(audits: list[dict]) -> dict:
     """Sum stored LLM costs and post-run AWS VM estimates."""
     by_role: Counter = Counter()
@@ -366,10 +733,16 @@ def recorded_cost_summary(audits: list[dict]) -> dict:
     vm_total = 0.0
     vm_count = 0
     vm_exclusions = Counter()
+    subscription_agent_usage_excluded = 0
     for audit in audits:
+        included_subscription = _subscription_agent_usage_excluded(audit)
+        if included_subscription:
+            subscription_agent_usage_excluded += 1
         role_usage = audit.get("role_usage") or {}
         saw_cost = False
         for role, usage in role_usage.items():
+            if included_subscription and str(role) == "target":
+                continue
             if not isinstance(usage, dict) or usage.get("total_cost") is None:
                 continue
             by_role[str(role)] += float(usage["total_cost"])
@@ -399,6 +772,7 @@ def recorded_cost_summary(audits: list[dict]) -> dict:
         "vm_exclusions": dict(vm_exclusions),
         "total": sum(by_role.values()) + vm_total,
         "trajectories_without_recorded_cost": missing,
+        "subscription_agent_usage_excluded": subscription_agent_usage_excluded,
     }
 
 
@@ -413,8 +787,11 @@ def cost_data(audits: list[dict]) -> dict:
     per_traj: list[tuple[str, float]] = []
     roles_present: set[str] = set()
     for audit in audits:
+        included_subscription = _subscription_agent_usage_excluded(audit)
         components: dict[str, float] = {}
         for role, usage in (audit.get("role_usage") or {}).items():
+            if included_subscription and str(role) == "target":
+                continue
             if not isinstance(usage, dict) or usage.get("total_cost") is None:
                 continue
             components[str(role)] = (
@@ -429,7 +806,7 @@ def cost_data(audits: list[dict]) -> dict:
             continue
         roles_present.update(key for key in components if key != VM_KEY)
         total = sum(components.values())
-        model = target_label(audit.get("target"))
+        model = agent_label(audit.get("target"))
         per_traj.append((model, total))
         row = by_model.setdefault(
             model, {"model": model, "n": 0, "components": Counter(), "total": 0.0}
@@ -467,7 +844,7 @@ def _component_label(key: str) -> str:
 
 
 def fig_all_in_cost_by_model(cost: dict) -> str:
-    """Average all-in trajectory cost by target model, stacked by recorded component."""
+    """Average all-in trajectory cost by agent model, stacked by recorded component."""
     rows = [r for r in cost.get("by_model", []) if r.get("n")]
     if not rows:
         return _empty_fig("no per-trajectory cost data")
@@ -534,7 +911,7 @@ def fig_cost_by_role(summary: dict, roles: list[str]) -> str:
 
 def fig_cost_distribution(cost: dict) -> str:
     """Box + jittered strip of the TOTAL cost of each individual trajectory, grouped by
-    target model — shows the spread (a few long runs cost far more than the median)."""
+    agent model — shows the spread (a few long runs cost far more than the median)."""
     groups: dict[str, list] = {}
     for model, total in cost.get("per_traj", []):
         groups.setdefault(model, []).append(total)
@@ -576,6 +953,13 @@ def _cost_section(audits: list[dict]) -> str:
         gaps += (
             f'<p class="costgap">&#9888; {missing} trajectory(ies) have no recorded '
             'cost; totals and averages are partial.</p>'
+        )
+    subscription_excluded = summary["subscription_agent_usage_excluded"]
+    if subscription_excluded:
+        gaps += (
+            f'<p class="costgap">&#9888; {subscription_excluded} direct subscription '
+            'trajectory(ies) exclude agent usage from dollar totals and averages. '
+            'Only recorded judge calls and VM estimates are shown for those runs.</p>'
         )
     if summary["vm_exclusions"]:
         gaps += (
@@ -640,11 +1024,13 @@ def _visual_subset(title: str, audits: list[dict], *, respect_exclusion: bool) -
 
 def render_visuals(audits: list[dict]) -> str:
     """Render the filtered aggregates and the everything-pooled aggregates behind one
-    visible toggle. Filtered removes integrity-excluded runs; All trajectories pools
-    every run, bucketing integrity-excluded ones by their judgment."""
+    visible toggle. Filtered removes mechanically invalid runs; All trajectories
+    pools every run, bucketing invalid ones by their judgment."""
 
     filtered = [
-        audit for audit in audits if audit.get("integrity_status") != "excluded"
+        audit for audit in audits
+        if audit.get("mechanical_status") != "invalid"
+        and audit.get("integrity_status") != "excluded"
     ]
     return (
         '<div class="visual-toggle" role="group" aria-label="Trajectory handling">'
@@ -672,7 +1058,6 @@ VISUALS_CSS = """
 .vpanel{display:none}.vpanel.active{display:block}
 .vsub{color:#555;font-size:13.5px;line-height:1.5;margin:2px 0 14px;max-width:760px}
 .figgrid{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start;margin:0 0 22px}
-.outcomegrid>figure.fig{flex:1 1 500px;min-width:0}
 figure.fig{margin:0;background:#fff;border:1px solid #e3e5ec;border-radius:8px;padding:14px 16px 10px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
 figure.fig svg{display:block;height:auto;max-width:100%}
 figure.fig figcaption{font-size:11.5px;color:#6a7180;line-height:1.45;margin-top:6px;max-width:520px}

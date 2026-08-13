@@ -1,9 +1,10 @@
-"""Direct subscription-backed Claude Code and Codex agent adapters.
+"""Subscription-backed Claude Code, Codex, and OpenCode Go adapters.
 
 This module can launch paid/included-quota agent calls, hence the ``exp_`` prefix.
-It deliberately does not alter Inspect SWE's API-backed production bridges.  Instead,
-it runs the pinned native CLI in the task sandbox with the user's saved subscription
-login, records the CLI's native transcript/usage, and exposes Inspect bridged tools.
+Claude Code and Codex run their pinned native CLI in the task sandbox with the user's
+saved subscription login. OpenCode Go keeps the existing native OpenCode/Inspect bridge,
+but the host side of that bridge calls Go with ``OPENCODE_API_KEY``. Unsupported Go
+models retain the API-backed production fallback.
 
 The evaluated workspace never receives the host credential by reference.  A private
 copy is written into the disposable container.  Subscription compose files restrict
@@ -31,6 +32,8 @@ CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CLAUDE_AUTH_B64_ENV = "CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64"
 CODEX_AUTH_B64_ENV = "CODEX_SUBSCRIPTION_AUTH_JSON_B64"
 CODEX_AUTH_GZIP_B64_ENV = "CODEX_SUBSCRIPTION_AUTH_JSON_GZIP_B64"
+OPENCODE_GO_API_KEY_ENV = "OPENCODE_API_KEY"
+OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 MAX_CODEX_AUTH_JSON_BYTES = 1024 * 1024
 SUBSCRIPTION_EVENT_MODEL_PREFIX = "subscription/"
 CLAUDE_HIDDEN_SYSTEM_MARKER = (
@@ -126,6 +129,33 @@ def _codex_filesystem_deny_toml() -> str:
         '"/root/.codex/auth.json" = "deny"\n'
         '"/proc" = "deny"\n'
     )
+
+
+def _codex_mcp_server_config(mcp: Any) -> dict[str, Any]:
+    """Translate Inspect's HTTP MCP descriptor into Codex config.toml fields."""
+
+    transport = getattr(mcp, "type", None)
+    if transport != "http":
+        raise RuntimeError(
+            f"Codex subscription bridge requires streamable HTTP MCP, got {transport!r}"
+        )
+    url = getattr(mcp, "url", None)
+    if not isinstance(url, str) or not url:
+        raise RuntimeError("Codex subscription bridge MCP config is missing its URL")
+
+    # Codex chooses streamable HTTP from the presence of `url`; Inspect's generic
+    # `type = "http"` discriminator is not part of Codex's config schema.
+    config: dict[str, Any] = {"url": url}
+    headers = getattr(mcp, "headers", None)
+    if headers:
+        # The pinned inspect-swe TOML encoder cannot represent a nested header
+        # table. The local check_time bridge does not use headers, so fail rather
+        # than silently writing a config that drops them.
+        raise RuntimeError("Codex subscription bridge does not support MCP headers")
+    tools = getattr(mcp, "tools", "all")
+    if tools != "all":
+        config["enabled_tools"] = list(tools)
+    return config
 
 
 @dataclass
@@ -237,6 +267,12 @@ def subscription_auth_source(scaffold: str) -> str | None:
         if (_host_home() / ".codex" / "auth.json").is_file():
             return "host_codex_auth_file"
         return None
+    if scaffold == "opencode_go":
+        return (
+            OPENCODE_GO_API_KEY_ENV
+            if os.environ.get(OPENCODE_GO_API_KEY_ENV)
+            else None
+        )
     return "api_fallback"
 
 
@@ -264,6 +300,12 @@ def require_subscription_auth(scaffolds: Iterable[str]) -> dict[str, str]:
                 f"{CODEX_AUTH_GZIP_B64_ENV} / {CODEX_AUTH_B64_ENV} "
                 "(required on remote/AWS workers)"
             )
+        if "opencode_go" in missing:
+            help_text.append(
+                "OpenCode Go: create a Go API key in the OpenCode console and set "
+                f"{OPENCODE_GO_API_KEY_ENV} in .env (also required on remote/AWS "
+                "workers)"
+            )
         raise SystemExit(
             "--harness=subscription has no subscription login for "
             + ", ".join(missing)
@@ -271,6 +313,58 @@ def require_subscription_auth(scaffolds: Iterable[str]) -> dict[str, str]:
             + "; ".join(help_text)
         )
     return sources
+
+
+def require_opencode_go_auth(*, reasoning: bool) -> str:
+    """Validate the currently supported Go execution contract before spend."""
+
+    if not reasoning:
+        raise SystemExit(
+            "OpenCode Go subscription runs currently require --reasoning=yes. The "
+            "Go gateway exposes these models as reasoning models but does not expose "
+            "a reliable cross-model off switch through the Inspect bridge; refusing "
+            "to silently run a different setting."
+        )
+    return require_subscription_auth(["opencode_go"])["opencode_go"]
+
+
+def build_opencode_go_model(
+    target_name: str,
+    routed_slug: str,
+    *,
+    reasoning: bool,
+):
+    """Build the host-side model used by OpenCode's local Inspect bridge."""
+
+    from inspect_ai.model import GenerateConfig, get_model
+
+    from exp_target_harness import opencode_go_model_spec
+
+    spec = opencode_go_model_spec(target_name, routed_slug)
+    if spec is None:
+        raise ValueError(f"{target_name!r} is not mapped to OpenCode Go")
+    require_opencode_go_auth(reasoning=reasoning)
+    api_key = os.environ[OPENCODE_GO_API_KEY_ENV]
+    model_id = spec["model"]
+    config = GenerateConfig(max_tokens=int(spec["output_tokens"]))
+    if spec["protocol"] == "anthropic":
+        model_name = f"anthropic/opencode-go/{model_id}"
+        return get_model(
+            model_name,
+            role="target",
+            config=config,
+            base_url=OPENCODE_GO_BASE_URL,
+            api_key=api_key,
+        )
+    return get_model(
+        f"openai-api/opencode-go/{model_id}",
+        role="target",
+        config=config,
+        base_url=OPENCODE_GO_BASE_URL,
+        api_key=api_key,
+        responses_api=False,
+        strict_tools=False,
+    )
 
 
 async def _write_private_file(sbox: Any, path: str, data: bytes) -> None:
@@ -993,10 +1087,13 @@ async def _find_codex_rollout(sbox: Any, session_id: str) -> str:
 def _subscription_env_base() -> dict[str, str]:
     # Compose supplies the allow-listed HTTPS proxy. These flags disable optional
     # analytics/update traffic and leave only model/auth requests.
+    # Do not set CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. In pinned Claude Code 2.1.220,
+    # that hardening mode overrides enableWeakerNestedSandbox and makes bubblewrap
+    # attempt a fresh /proc mount that unprivileged Docker rejects. Claude's
+    # sandbox.credentials rules above remove its actual OAuth token instead.
     return {
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-        "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
         "DISABLE_AUTOUPDATER": "1",
         "IS_SANDBOX": "1",
         "NO_BROWSER": "1",
@@ -1027,7 +1124,7 @@ def build_subscription_agent(
     time_tool: Any | None = None,
     native_resume: dict | None = None,
 ):
-    """Build a direct subscription agent, or API-backed OpenCode fallback."""
+    """Build a subscription agent, with API fallback for unsupported OpenCode models."""
 
     from inspect_ai.agent import AgentState, BridgedToolsSpec, agent, agent_with
     from inspect_ai.model import ChatMessageSystem
@@ -1044,12 +1141,35 @@ def build_subscription_agent(
         assert_inspect_swe_pin,
         build_production_agent,
         codex_subscription_model,
+        opencode_go_model_spec,
         production_scaffold_for_target,
     )
 
     assert_inspect_swe_pin()
     scaffold = production_scaffold_for_target(target_name, routed_slug)
     if scaffold == "opencode":
+        go_spec = opencode_go_model_spec(target_name, routed_slug)
+        if go_spec is not None:
+            go_model = build_opencode_go_model(
+                target_name,
+                routed_slug,
+                reasoning=reasoning,
+            )
+            requested_model = f"opencode-go/{go_spec['model']}"
+            return build_production_agent(
+                target_name,
+                routed_slug,
+                time_tool=time_tool,
+                native_resume=native_resume,
+                opencode_model_override=requested_model,
+                # OpenCode's provider sends the bare model id on both its
+                # Anthropic and OpenAI-compatible request paths. Keep the full
+                # spelling too so a provider-side change remains deterministic.
+                opencode_model_aliases={
+                    go_spec["model"]: go_model,
+                    requested_model: go_model,
+                },
+            )
         return build_production_agent(
             target_name,
             routed_slug,
@@ -1228,8 +1348,8 @@ def build_subscription_agent(
                     )
                     config.update(codex_config_options("disabled", True))
                     for mcp in tool_bridge.mcp_server_configs:
-                        config[f"mcp_servers.{mcp.name}"] = mcp.model_dump(
-                            exclude={"name", "tools"}, exclude_none=True
+                        config[f"mcp_servers.{mcp.name}"] = (
+                            _codex_mcp_server_config(mcp)
                         )
                     await sbox.exec(["mkdir", "-p", "/root/.codex"])
                     config_text = to_toml(config) + _codex_filesystem_deny_toml()

@@ -21,34 +21,22 @@ from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageSystem,
-    ChatMessageTool,
     ChatMessageUser,
 )
 
 
-CONTINUATION_RECORD_VERSION = "environments-continuation-v1"
+CONTINUATION_RECORD_VERSION = "environments-continuation-v3"
 CONTINUATION_PIVOT_PATH = (
     Path(__file__).resolve().parents[1] / "seeds" / "CONTINUATION_PIVOT.txt"
 )
-CONTINUATION_MISSING_TOOL_RESULT_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "seeds"
-    / "CONTINUATION_MISSING_TOOL_RESULT.txt"
-)
 CONTINUATION_TASK_DESCRIPTION_PLACEHOLDER = "{{TASK_DESCRIPTION_CLAUSE}}"
-
-# Closer appended when a prefix ends on an assistant turn with unresolved tool calls
-# (its original run stopped before results came back). Without it the spliced message
-# list is invalid for every provider. Always surfaced as a stored flag, never silent.
-SYNTH_TOOL_RESULT = CONTINUATION_MISSING_TOOL_RESULT_PATH.read_text().strip()
 
 
 def pivot_preamble(task_description: str | None = None) -> str:
     """The fixed pivot sentence injected ahead of the new task's opening message.
 
-    Identical to the Petri continuation preamble so results read the same way. The
-    optional descriptor names the new kind of work when the prefix is not from the
-    new task's seed family (including every external prefix).
+    The optional descriptor names the new kind of work when the prefix is not from
+    the new task's seed family (including every external prefix).
     """
 
     template = CONTINUATION_PIVOT_PATH.read_text().strip()
@@ -81,26 +69,20 @@ def seed_family_task_description(family: str) -> str:
     return description
 
 
-def close_dangling_tool_calls(
-    messages: Sequence[ChatMessage],
-) -> tuple[list[ChatMessage], bool]:
-    """Append neutral synthetic results for unresolved trailing tool calls.
+def reject_dangling_tool_calls(messages: Sequence[ChatMessage]) -> None:
+    """Refuse a prefix that would require invented trailing tool results."""
 
-    Returns ``(messages, synthesized)``; ``synthesized`` is True iff a closer was
-    added. The input sequence is not mutated.
-    """
-
-    closed = list(messages)
-    final = closed[-1] if closed else None
+    final = messages[-1] if messages else None
     if not isinstance(final, ChatMessageAssistant) or not final.tool_calls:
-        return closed, False
-    for call in final.tool_calls:
-        closed.append(ChatMessageTool(
-            content=SYNTH_TOOL_RESULT,
-            tool_call_id=call.id,
-            function=call.function,
-        ))
-    return closed, True
+        return
+    calls = ", ".join(
+        f"{call.function} [id={call.id}]" for call in final.tool_calls
+    )
+    raise ValueError(
+        "continuation prefix ends with unresolved tool call(s): "
+        f"{calls}. No tool results will be invented; use a prefix that includes "
+        "the real tool-result messages."
+    )
 
 
 def prefix_boundary_index(prefix_messages: Sequence[ChatMessage]) -> int:
@@ -147,7 +129,7 @@ def inject_pivot(
 class ContinuationRun:
     """Everything the solver needs to run one continuation cell.
 
-    ``prefix_messages`` are already closed (synthetic closer applied when needed).
+    ``prefix_messages`` have already passed the unresolved-tool-call check.
     ``record`` is the exact dict stored under ``real_env["continuation"]``.
     """
 
@@ -183,7 +165,7 @@ def continuation_record(
 ) -> dict:
     """The stored, queryable ``real_env["continuation"]`` block for one cell.
 
-    ``prefix_length`` is the closed prefix's message count; ``boundary_index`` is the
+    ``prefix_length`` is the validated prefix's message count; ``boundary_index`` is the
     index the pivot user turn occupies after splicing (== prefix_length, or one less
     when the pivot folds into a trailing user message).
     """
@@ -207,6 +189,15 @@ def _native_resume_entry(record: dict) -> tuple[str | None, dict]:
         if isinstance(value, dict) and value:
             return mode, value
     return None, {}
+
+
+def _native_user_text(message: ChatMessage) -> tuple[str, str]:
+    """Return native user text after removing OpenCode's literal quote wrapper."""
+
+    text = message.text or ""
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        return text[1:-1], "outer_double_quotes"
+    return text, "none"
 
 
 def judge_view_messages(
@@ -277,11 +268,13 @@ def update_production_boundary(messages: Sequence[ChatMessage], record: dict) ->
     """
 
     body = _pivot_body(record["pivot_preamble"], record["opening_user_message"])
-    matches = [
-        index
-        for index, message in enumerate(messages)
-        if message.role == "user" and (message.text or "").endswith(body)
-    ]
+    matches: list[tuple[int, str]] = []
+    for index, message in enumerate(messages):
+        if message.role != "user":
+            continue
+        text, wrapper = _native_user_text(message)
+        if text.endswith(body):
+            matches.append((index, wrapper))
     native_mode, native = _native_resume_entry(record)
     if native_mode is None:
         source_mode = str((record.get("prefix") or {}).get("source_harness") or "")
@@ -292,9 +285,9 @@ def update_production_boundary(messages: Sequence[ChatMessage], record: dict) ->
         native["boundary_match_count"] = len(matches)
         raise RuntimeError(
             f"{native_mode} native continuation hand-off boundary could not be "
-            f"identified exactly (matches={matches})"
+            f"identified exactly (matches={[index for index, _ in matches]})"
         )
-    boundary = matches[0]
+    boundary, wrapper = matches[0]
     systems = sum(message.role == "system" for message in messages[:boundary])
     if systems < 1:
         native["boundary_lost"] = True
@@ -305,7 +298,9 @@ def update_production_boundary(messages: Sequence[ChatMessage], record: dict) ->
     record["boundary_index"] = boundary
     native.update({
         "boundary_lost": False,
+        "boundary_match_count": 1,
         "boundary_resolution": "exact_live_handoff_user_message",
+        "boundary_user_text_wrapper": wrapper,
         "scaffold_system_message_count": systems,
     })
     return boundary

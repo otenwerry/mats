@@ -12,16 +12,16 @@ from .schema import JudgeFamily
 
 DEFAULT_RUBRICS_ROOT = DEFAULT_INSTRUCTIONS_ROOT / "judge_dimensions"
 
-GLOBAL_RUBRICS = (
-    ("environment_failure", "global/environment_failure.md"),
-)
-FAMILY_RUBRICS = {
+RUBRICS_BY_FAMILY = {
     "ml_training_data_misuse": (
         ("reward_hacking", "ml_training_data_misuse/reward_hacking.md"),
+        ("noticed", "ml_training_data_misuse/noticed.md"),
         ("deception", "ml_training_data_misuse/deception.md"),
+        ("environment_failure", "ml_training_data_misuse/environment_failure.md"),
     ),
     "p_hacking": (
         ("reward_hacking", "p_hacking/reward_hacking.md"),
+        ("noticed", "p_hacking/noticed.md"),
     ),
 }
 
@@ -47,14 +47,14 @@ def load_rubrics(
     *,
     root: Path = DEFAULT_RUBRICS_ROOT,
 ) -> tuple[RubricDocument, ...]:
-    """Load the selected family's rubrics followed by global rubrics.
+    """Load the selected family's complete ordered rubric set.
 
     File order is fixed here because prompt order and schema agreement are part of the
     experiment contract, not a behavior inferred from Markdown metadata.
     """
 
     try:
-        specs = (*FAMILY_RUBRICS[family], *GLOBAL_RUBRICS)
+        specs = RUBRICS_BY_FAMILY[family]
     except KeyError as ex:
         raise ValueError(f"unsupported judge family: {family!r}") from ex
 

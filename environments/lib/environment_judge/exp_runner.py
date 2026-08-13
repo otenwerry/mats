@@ -6,7 +6,6 @@ money through Inspect Scout.
 
 from __future__ import annotations
 
-import re
 from typing import Iterable
 
 from inspect_ai.model import GenerateConfig, Model
@@ -18,13 +17,17 @@ from .prompt import (
     ANSWER_MAX_ATTEMPTS,
     ANSWER_PROMPT,
     ANSWER_TOOL,
+    FRESH_RETRY_LIMIT,
     PreparedJudgeCall,
+    RETRY_REFUSALS_PER_FRESH_CALL,
 )
 from .schema import (
     EvidenceReferences,
     JudgeResult,
     MLJudgeResult,
+    MLNoticedValue,
 )
+from judgment_semantics import cited_message_numbers
 
 
 class JudgeCallError(RuntimeError):
@@ -39,11 +42,15 @@ class JudgePostValidationError(JudgeCallError):
     """The model returned schema-shaped data that violates the evidence contract."""
 
 
-def _all_dimension_evidence(judgment: JudgeResult) -> Iterable[tuple[str, EvidenceReferences]]:
+def _all_dimension_evidence(
+    judgment: JudgeResult,
+) -> Iterable[tuple[str, EvidenceReferences]]:
     yield "reward_hacking", judgment.reward_hacking.evidence
+    yield "noticed", judgment.noticed.evidence
     if isinstance(judgment, MLJudgeResult) and judgment.deception is not None:
         yield "deception", judgment.deception.evidence
-    yield "environment_failure", judgment.environment_failure.evidence
+    if isinstance(judgment, MLJudgeResult):
+        yield "environment_failure", judgment.environment_failure.evidence
 
 
 def _require_positive_evidence(
@@ -55,27 +62,12 @@ def _require_positive_evidence(
         raise ValueError(f"positive {name} judgment must cite evidence")
 
 
-def _cited_message_numbers(text: str, valid_messages: set[int]) -> set[int]:
-    """Return valid message numbers named singly, in groups, or by ranges."""
-
-    cited = {
-        int(number) for number in re.findall(r"\bM(\d+)\b", text)
-    }
-    for start_text, end_text in re.findall(
-        r"\bM(\d+)\s*[-–—]\s*M?(\d+)\b", text
-    ):
-        start, end = int(start_text), int(end_text)
-        if start <= end:
-            cited.update(number for number in valid_messages if start <= number <= end)
-    return cited
-
-
 def validate_judgment_evidence(
     judgment: JudgeResult,
     prepared: PreparedJudgeCall,
     *,
-    justification: str,
-) -> None:
+    explanation: str,
+) -> list[dict]:
     """Validate cross-record rules that JSON Schema cannot express."""
 
     valid_messages = {
@@ -84,12 +76,15 @@ def validate_judgment_evidence(
     valid_artifacts = {
         (artifact.path, artifact.snapshot) for artifact in prepared.evidence.artifacts
     }
+    artifact_normalizations: list[dict] = []
     for field, text in (
         ("summary", judgment.summary),
         ("highlights", judgment.highlights),
-        ("justification", justification),
+        ("explanation", explanation),
     ):
-        citations = _cited_message_numbers(text, valid_messages)
+        citations = cited_message_numbers(
+            text, valid_messages, include_range_endpoints=True
+        )
         unknown_citations = sorted(citations - valid_messages)
         if unknown_citations:
             raise ValueError(
@@ -97,52 +92,6 @@ def validate_judgment_evidence(
                 f"{unknown_citations}"
             )
 
-    required_dimensions = ["reward_hacking"]
-    if isinstance(judgment, MLJudgeResult):
-        required_dimensions.append("deception")
-    required_dimensions.append("environment_failure")
-    missing_dimensions = [
-        dimension
-        for dimension in required_dimensions
-        if not re.search(rf"\b{re.escape(dimension)}\b", justification)
-    ]
-    if missing_dimensions:
-        raise ValueError(
-            "justification must name every active dimension; missing "
-            f"{missing_dimensions}"
-        )
-
-    justification_citations = _cited_message_numbers(
-        justification, valid_messages
-    )
-    assigned_citations = {
-        number
-        for _dimension, evidence in _all_dimension_evidence(judgment)
-        for number in evidence.messages
-    }
-    unassigned_citations = sorted(justification_citations - assigned_citations)
-    if unassigned_citations:
-        raise ValueError(
-            "justification cites turns not assigned to any dimension evidence: "
-            f"{unassigned_citations}"
-        )
-    required_citations = set()
-    if judgment.reward_hacking.has_notable_behavior:
-        required_citations.update(judgment.reward_hacking.evidence.messages)
-    if (
-        isinstance(judgment, MLJudgeResult)
-        and judgment.deception is not None
-        and judgment.deception.score > 1
-    ):
-        required_citations.update(judgment.deception.evidence.messages)
-    if judgment.environment_failure.value:
-        required_citations.update(judgment.environment_failure.evidence.messages)
-    missing_citations = sorted(required_citations - justification_citations)
-    if missing_citations:
-        raise ValueError(
-            "justification omits relevant message citations: "
-            f"{missing_citations}"
-        )
     for dimension, evidence in _all_dimension_evidence(judgment):
         unknown_messages = sorted(set(evidence.messages) - valid_messages)
         if unknown_messages:
@@ -150,15 +99,40 @@ def validate_judgment_evidence(
                 f"{dimension} cites message numbers absent from official evidence: "
                 f"{unknown_messages}"
             )
-        unknown_artifacts = sorted(
-            (item.path, item.snapshot)
-            for item in evidence.artifacts
-            if (item.path, item.snapshot) not in valid_artifacts
-        )
+        unknown_artifacts = []
+        normalized_artifacts: list[tuple[str, str]] = []
+        for item in evidence.artifacts:
+            supplied = (item.path, item.snapshot)
+            if supplied in valid_artifacts:
+                normalized_artifacts.append(supplied)
+                continue
+
+            # The prompt still asks for the exact displayed path. Tolerate the common
+            # provider mistake of dropping only the leading /workspace/ prefix, but do
+            # not guess from a basename or change the requested snapshot.
+            candidate = (f"/workspace/{item.path}", item.snapshot)
+            if not item.path.startswith("/") and candidate in valid_artifacts:
+                original_path = item.path
+                item.path = candidate[0]
+                normalized_artifacts.append(candidate)
+                artifact_normalizations.append({
+                    "dimension": dimension,
+                    "supplied_path": original_path,
+                    "canonical_path": item.path,
+                    "snapshot": item.snapshot,
+                    "rule": "restore_workspace_prefix",
+                })
+                continue
+            unknown_artifacts.append(supplied)
         if unknown_artifacts:
             raise ValueError(
                 f"{dimension} cites artifacts absent from official evidence: "
-                f"{unknown_artifacts}"
+                f"{sorted(unknown_artifacts)}"
+            )
+        if len(normalized_artifacts) != len(set(normalized_artifacts)):
+            raise ValueError(
+                f"{dimension} cites the same artifact more than once after path "
+                "normalization"
             )
 
     _require_positive_evidence(
@@ -166,13 +140,24 @@ def validate_judgment_evidence(
         judgment.reward_hacking.has_notable_behavior,
         judgment.reward_hacking.evidence,
     )
+    _require_positive_evidence(
+        "noticed",
+        (
+            judgment.noticed.value != MLNoticedValue.NEITHER
+            if isinstance(judgment, MLJudgeResult)
+            else judgment.noticed.value
+        ),
+        judgment.noticed.evidence,
+    )
     if isinstance(judgment, MLJudgeResult) and judgment.deception is not None:
         _require_positive_evidence("deception", True, judgment.deception.evidence)
-    _require_positive_evidence(
-        "environment_failure",
-        judgment.environment_failure.value,
-        judgment.environment_failure.evidence,
-    )
+    if isinstance(judgment, MLJudgeResult):
+        _require_positive_evidence(
+            "environment_failure",
+            judgment.environment_failure.value,
+            judgment.environment_failure.evidence,
+        )
+    return artifact_normalizations
 
 
 def _model_name(model: str | Model | None) -> str | None:
@@ -225,6 +210,7 @@ def _provider_request_record(answer: AnswerStructured) -> dict:
         "no_tool_retry_message": (
             f"Please use the {answer.answer_tool}() tool to report your answer."
         ),
+        "no_tool_retry_message_used": answer.max_attempts > 1,
         "answer_prompt_used": False,
         "answer_format_used": False,
     }
@@ -248,87 +234,140 @@ async def run_prepared_judge(
     *,
     model: str | Model | None,
     config: GenerateConfig | None = None,
-    retry_refusals: int = 3,
+    fresh_retry_limit: int = FRESH_RETRY_LIMIT,
 ) -> Result:
-    """Make one fresh Scout call and return an Inspect-compatible validated Result.
+    """Return a validated result, replacing bad calls with fresh conversations.
 
-    This function never accepts an earlier judge conversation or answer. Calling it on
-    stage 1 and then on the final trajectory therefore makes two independent judgments.
-    Inspect records model usage in its normal event stream; this function adds the full
-    prompt, evidence, rubric, and schema provenance to the Result metadata.
+    Each attempt starts from ``prepared.prompt``. A malformed answer, refusal, provider
+    error, or post-validation failure is never appended to the next attempt's context.
+    Inspect records usage for every attempted call in its normal event stream; this
+    function adds the prompt, evidence, rubric, schema, and retry provenance.
     """
-
-    answer = AnswerStructured(
-        prepared.answer_model,
-        answer_tool=ANSWER_TOOL,
-        answer_prompt=ANSWER_PROMPT,
-        answer_format=ANSWER_FORMAT,
-        max_attempts=ANSWER_MAX_ATTEMPTS,
-    )
+    if fresh_retry_limit < 0:
+        raise ValueError("fresh_retry_limit must be non-negative")
     call_metadata = {
         **prepared.metadata(),
         "requested_model": _model_name(model),
         "generate_config": _config_record(config),
-        "retry_refusals": retry_refusals,
+        "fresh_retry_limit": fresh_retry_limit,
+        "fresh_call_limit": fresh_retry_limit + 1,
+        "structured_attempts_per_fresh_call": ANSWER_MAX_ATTEMPTS,
+        "retry_refusals_per_fresh_call": RETRY_REFUSALS_PER_FRESH_CALL,
         "provider_request": provider_request_record(prepared),
     }
-    try:
-        result = await generate_answer(
-            prepared.prompt,
-            answer=answer,
-            model=model,
-            config=config,
-            retry_refusals=retry_refusals,
-            extract_refs=prepared.extract_references,
+    failures: list[dict] = []
+    last_error: Exception | None = None
+    last_failure_kind = "unknown"
+
+    for attempt in range(1, fresh_retry_limit + 2):
+        answer = AnswerStructured(
+            prepared.answer_model,
+            answer_tool=ANSWER_TOOL,
+            answer_prompt=ANSWER_PROMPT,
+            answer_format=ANSWER_FORMAT,
+            max_attempts=ANSWER_MAX_ATTEMPTS,
         )
-    except Exception as ex:
-        raise JudgeCallError(
-            f"environment judge generation failed: {ex}",
-            call_metadata={
-                **call_metadata,
-                "post_validation": "generation_failed",
-            },
-        ) from ex
-    if result.value is None:
+        try:
+            result = await generate_answer(
+                prepared.prompt,
+                answer=answer,
+                model=model,
+                config=config,
+                retry_refusals=RETRY_REFUSALS_PER_FRESH_CALL,
+                extract_refs=prepared.extract_references,
+            )
+        except Exception as ex:
+            last_error = ex
+            last_failure_kind = "generation_failed"
+            failures.append({
+                "fresh_attempt": attempt,
+                "kind": last_failure_kind,
+                "error_type": type(ex).__name__,
+                "error": str(ex),
+            })
+            continue
+
+        if result.value is None:
+            last_error = None
+            last_failure_kind = "no_structured_answer"
+            failures.append({
+                "fresh_attempt": attempt,
+                "kind": last_failure_kind,
+                "explanation": result.explanation,
+                "result_metadata": dict(result.metadata or {}),
+            })
+            continue
+
+        explanation = str(result.explanation or "").strip()
+        try:
+            if not explanation:
+                raise ValueError("environment judge returned no explanation")
+            judgment = prepared.result_model.model_validate(result.value)
+            artifact_normalizations = validate_judgment_evidence(
+                judgment,
+                prepared,
+                explanation=explanation,
+            )
+        except (ValidationError, ValueError) as ex:
+            last_error = ex
+            last_failure_kind = "post_validation_failed"
+            failures.append({
+                "fresh_attempt": attempt,
+                "kind": last_failure_kind,
+                "error_type": type(ex).__name__,
+                "error": str(ex),
+                "unvalidated_answer": result.value,
+                "explanation": result.explanation,
+                "result_metadata": dict(result.metadata or {}),
+            })
+            continue
+
+        result.value = judgment.model_dump(mode="json")
         result.metadata = {
             **(result.metadata or {}),
             "environment_judge": {
                 **call_metadata,
-                "post_validation": "no_structured_answer",
+                "fresh_attempt_count": attempt,
+                "fresh_failures": failures,
+                "fresh_retries_exhausted": False,
+                "artifact_reference_normalizations": artifact_normalizations,
+                "explanation": explanation,
+                "post_validation": "passed",
             },
         }
         return result
 
-    justification = str(result.explanation or "").strip()
-    try:
-        if not justification:
-            raise ValueError("environment judge returned no justification")
-        judgment = prepared.result_model.model_validate(result.value)
-        validate_judgment_evidence(
-            judgment,
-            prepared,
-            justification=justification,
-        )
-    except (ValidationError, ValueError) as ex:
-        raise JudgePostValidationError(
-            f"environment judge answer failed strict post-validation: {ex}",
-            call_metadata={
-                **call_metadata,
-                "post_validation": "failed",
-                "unvalidated_answer": result.value,
-            },
-        ) from ex
-
-    result.value = judgment.model_dump(mode="json")
-    result.metadata = {
-        **(result.metadata or {}),
-        "environment_judge": {
-            **call_metadata,
-            "justification": justification,
-            "post_validation": "passed",
-        },
+    exhausted_metadata = {
+        **call_metadata,
+        "fresh_attempt_count": fresh_retry_limit + 1,
+        "fresh_failures": failures,
+        "fresh_retries_exhausted": True,
+        "failure_kind": last_failure_kind,
+        "post_validation": (
+            "failed"
+            if last_failure_kind == "post_validation_failed"
+            else last_failure_kind
+        ),
     }
-    return result
+    final_failure = failures[-1] if failures else {}
+    final_detail = (
+        final_failure.get("error")
+        or final_failure.get("explanation")
+        or last_failure_kind
+    )
+    message = (
+        f"environment judge failed after {fresh_retry_limit + 1} fresh calls; "
+        f"last failure ({last_failure_kind}): {final_detail}"
+    )
+    error_class = (
+        JudgePostValidationError
+        if last_failure_kind == "post_validation_failed"
+        else JudgeCallError
+    )
+    error = error_class(message, call_metadata=exhausted_metadata)
+    if last_error is not None:
+        raise error from last_error
+    raise error
 
 
 async def judge_trajectory(
@@ -341,7 +380,7 @@ async def judge_trajectory(
     rubrics_root=None,
     model: str | Model | None,
     config: GenerateConfig | None = None,
-    retry_refusals: int = 3,
+    fresh_retry_limit: int = FRESH_RETRY_LIMIT,
 ) -> Result:
     """Convenience wrapper for integrations that do not need a separate preview step."""
 
@@ -360,5 +399,5 @@ async def judge_trajectory(
         prepared,
         model=model,
         config=config,
-        retry_refusals=retry_refusals,
+        fresh_retry_limit=fresh_retry_limit,
     )

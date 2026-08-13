@@ -1,7 +1,7 @@
 """Shared constants for the AWS controller and on-instance worker runtime."""
 
 AWS_SCHEMA_VERSION = "mats-real-aws-v1"
-WORKER_VERSION = "mats-real-worker-v1"
+WORKER_VERSION = "mats-real-worker-v2-all-sandboxes"
 FAILURE_PACKAGE_SECONDS = 4 * 3600 + 15 * 60
 SSM_PARAMETER_NAME = "/mats/environments/api-keys"
 
@@ -22,6 +22,7 @@ DEFAULT_SECRET_NAMES = (
     "TOGETHER_API_KEY",
     "GROQ_API_KEY",
     "XAI_API_KEY",
+    "OPENCODE_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_SUBSCRIPTION_CREDENTIALS_JSON_B64",
     "CODEX_ACCESS_TOKEN",

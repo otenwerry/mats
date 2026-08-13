@@ -1,5 +1,5 @@
 {
-  "data_sha": "38eadaa109695b0c22415c17bbdc5d333c23cd7448da62694b998afc2f19d8dd",
+  "data_sha": "b34e1aff528305bc2470698a62d6a647b2adf442b0737ebd0d40177d9b0c446e",
   "metric": "rmse",
   "sigma": 0.55,
   "booster": "numpy_bias_als",

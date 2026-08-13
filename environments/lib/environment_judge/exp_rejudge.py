@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from inspect_ai.model import get_model
-from inspect_ai.scorer import Score, Target, scorer
+from inspect_ai.scorer import NOANSWER, Score, Target, scorer
 from inspect_ai.solver import TaskState
 
 from .exp_real import judge_complete_real_trajectory
@@ -29,7 +29,7 @@ def retrospective_rejudge():
             )
         except JudgePostValidationError as error:
             return Score(
-                value="invalid",
+                value=NOANSWER,
                 explanation=str(error),
                 metadata={
                     "environment_judge": {
@@ -41,7 +41,7 @@ def retrospective_rejudge():
             )
         except JudgeCallError as error:
             return Score(
-                value="invalid",
+                value=NOANSWER,
                 explanation=str(error),
                 metadata={
                     "environment_judge": {
@@ -53,7 +53,7 @@ def retrospective_rejudge():
             )
         except Exception as error:
             return Score(
-                value="invalid",
+                value=NOANSWER,
                 explanation=repr(error)[:500],
                 metadata={
                     "environment_judge": {
@@ -73,7 +73,7 @@ def retrospective_rejudge():
                 "retrospective_rejudge": source,
             })
             return Score(
-                value="invalid",
+                value=NOANSWER,
                 explanation=result.explanation or "judge returned no structured answer",
                 metadata={"environment_judge": envelope},
             )

@@ -8,6 +8,7 @@ updates it after Inspect returns or raises.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -212,14 +213,36 @@ def run_eval(
         raise
 
 
-def dead_targets(logs: list[Any], target_models: list[str]) -> list[str]:
-    """Models that produced zero output tokens across all completed logs."""
+_MODEL_SNAPSHOT_SUFFIX_RE = re.compile(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
-    output_by_target = {slug.split("/")[-1]: 0 for slug in target_models}
+
+def _model_family_name(slug: str) -> str:
+    """Comparable model name when an included-usage service drops snapshot dates."""
+
+    return _MODEL_SNAPSHOT_SUFFIX_RE.sub("", slug.rsplit("/", 1)[-1])
+
+
+def dead_targets(logs: list[Any], target_models: list[str]) -> list[str]:
+    """Models that produced zero output tokens across all completed logs.
+
+    Inspect records the model name actually served. Included-usage routes can serve an
+    undated family name even when the requested catalog entry has a dated snapshot.
+    Exact names win; an undated match is accepted only when it identifies one target.
+    """
+
+    output_by_target = {slug.rsplit("/", 1)[-1]: 0 for slug in target_models}
+    family_targets: dict[str, list[str]] = {}
+    for target in output_by_target:
+        family_targets.setdefault(_model_family_name(target), []).append(target)
     for log in logs:
         stats = getattr(log, "stats", None)
         for slug, usage in (getattr(stats, "model_usage", None) or {}).items():
-            name = slug.split("/")[-1]
-            if name in output_by_target:
-                output_by_target[name] += getattr(usage, "output_tokens", 0) or 0
+            name = slug.rsplit("/", 1)[-1]
+            target = name if name in output_by_target else None
+            if target is None:
+                matches = family_targets.get(_model_family_name(name), [])
+                if len(matches) == 1:
+                    target = matches[0]
+            if target is not None:
+                output_by_target[target] += getattr(usage, "output_tokens", 0) or 0
     return sorted(name for name, output in output_by_target.items() if output == 0)

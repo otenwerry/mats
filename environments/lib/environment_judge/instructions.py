@@ -16,11 +16,9 @@ DEFAULT_INSTRUCTIONS_ROOT = (
 FAMILY_INSTRUCTIONS = {
     "ml_training_data_misuse": (
         ("overall", "overall_instructions/ml_training_data_misuse.md"),
-        ("family_output", "output_instructions/ml_training_data_misuse.md"),
     ),
     "p_hacking": (
         ("overall", "overall_instructions/p_hacking.md"),
-        ("family_output", "output_instructions/p_hacking.md"),
     ),
 }
 
@@ -67,7 +65,7 @@ def load_instructions(
     *,
     root: Path = DEFAULT_INSTRUCTIONS_ROOT,
 ) -> tuple[InstructionDocument, ...]:
-    """Load the selected family's overall and output instructions."""
+    """Load the selected family's overall instructions."""
 
     try:
         specs = FAMILY_INSTRUCTIONS[family]
@@ -78,7 +76,7 @@ def load_instructions(
         for key, relative_path in specs
     )
     keys = {document.key for document in documents}
-    required = {"overall", "family_output"}
+    required = {"overall"}
     if keys != required:
         raise ValueError(
             f"judge instructions must contain exactly {sorted(required)}; got {sorted(keys)}"

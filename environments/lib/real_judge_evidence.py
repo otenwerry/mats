@@ -114,6 +114,21 @@ def upstream_caveats(
             messages=[],
             artifacts=[],
         ))
+    recovery = (real_env or {}).get("interrupted_native_transcript") or {}
+    if recovery.get("reconstructed"):
+        caveats.append(EvidenceCaveat(
+            code="interrupted_native_transcript_reconstructed",
+            description=(
+                "The native OpenCode call was interrupted before returning its final "
+                "AgentState. The observable transcript was reconstructed from stored "
+                "target model events through the newest matching recorded event; "
+                "activity after that event and an interrupted tool result may be "
+                "unavailable."
+            ),
+            source="upstream",
+            messages=[],
+            artifacts=[],
+        ))
     return caveats
 
 

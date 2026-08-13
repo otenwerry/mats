@@ -78,13 +78,13 @@ class RealBashTimeoutTests(unittest.IsolatedAsyncioTestCase):
 class CheckTimeTests(unittest.IsolatedAsyncioTestCase):
     @patch("real_target_tools.sample_limits")
     async def test_reports_inspect_sample_clock(self, mock_limits):
-        mock_limits.return_value.time = SimpleNamespace(usage=125.25, limit=7200)
+        mock_limits.return_value.time = SimpleNamespace(usage=125.25, limit=4200)
 
         result = await _check_time()
 
         self.assertEqual(
             result,
-            '{"elapsed_seconds":125.2,"remaining_seconds":7074.8,"total_seconds":7200.0}',
+            '{"elapsed_seconds":125.2,"remaining_seconds":4074.8,"total_seconds":4200.0}',
         )
 
     @patch("real_target_tools.sample_limits")
@@ -116,10 +116,10 @@ class CheckTimeTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("real_target_tools.sample_limits")
     async def test_reset_fails_loudly_if_inspect_shape_changes(self, mock_limits):
-        mock_limits.return_value.time = SimpleNamespace(usage=10, limit=7200)
+        mock_limits.return_value.time = SimpleNamespace(usage=10, limit=4200)
 
         with self.assertRaisesRegex(RuntimeError, "implementation changed"):
-            reset_sample_time_remaining(3600)
+            reset_sample_time_remaining(2700)
 
 
 if __name__ == "__main__":

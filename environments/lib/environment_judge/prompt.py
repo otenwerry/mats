@@ -32,32 +32,19 @@ from .schema import (
 )
 
 
-JUDGE_SCHEMA_VERSION = "environment-judge-v7"
+JUDGE_SCHEMA_VERSION = "environment-judge-v15"
 ANSWER_TOOL = "submit_judgment"
 ANSWER_PROMPT = "Use the {{ answer_tool }}() tool to return the judgment requested below:"
 ANSWER_FORMAT = "Return the final judgment only by calling {{ answer_tool }}()."
-ANSWER_MAX_ATTEMPTS = 3
-
-
-def _render_caveats(bundle: EvidenceBundle) -> str:
-    lines = []
-    for caveat in bundle.caveats:
-        locations: list[str] = []
-        if caveat.messages:
-            locations.append("messages=" + ",".join(f"M{n}" for n in caveat.messages))
-        if caveat.artifacts:
-            locations.append("artifacts=" + ",".join(
-                f"{item.path}@{item.snapshot}" for item in caveat.artifacts
-            ))
-        suffix = f" ({'; '.join(locations)})" if locations else ""
-        lines.append(f"- [{caveat.code}] {caveat.description}{suffix}")
-    return "\n".join(lines) if lines else "- (none)"
+# One structured-output attempt per provider conversation. If it is malformed, the
+# runner discards that conversation and starts again from the original prompt.
+ANSWER_MAX_ATTEMPTS = 1
+FRESH_RETRY_LIMIT = 3
+RETRY_REFUSALS_PER_FRESH_CALL = 0
 
 
 def _build_prompt(
     *,
-    family: JudgeFamily,
-    stage: JudgeStage,
     instructions: Sequence[InstructionDocument],
     rubrics: Sequence[RubricDocument],
     evidence: EvidenceBundle,
@@ -69,15 +56,8 @@ def _build_prompt(
             f"## Dimension: {rubric.key}\n\n{rubric.content.rstrip()}"
         )
     return "\n\n".join([
-        (
-            "# Overall judge instructions\n\n"
-            + instruction_text["overall"]
-            + "\n\n"
-            + instruction_text["family_output"]
-            + f"\n\nCall identity: family=`{family}`; stage=`{stage}`."
-        ),
+        "# Overall judge instructions\n\n" + instruction_text["overall"],
         "# Dimension rubrics\n\n" + "\n\n".join(rubric_sections),
-        "# Evidence caveats\n\n" + _render_caveats(evidence),
         "# Numbered observable trajectory\n\n" + (
             evidence.rendered_messages or "(no messages were supplied for this stage)"
         ),
@@ -118,6 +98,8 @@ class PreparedJudgeCall:
                 "answer_prompt": ANSWER_PROMPT,
                 "answer_format": ANSWER_FORMAT,
                 "max_attempts": ANSWER_MAX_ATTEMPTS,
+                "fresh_retry_limit": FRESH_RETRY_LIMIT,
+                "retry_refusals_per_fresh_call": RETRY_REFUSALS_PER_FRESH_CALL,
             },
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -145,6 +127,8 @@ class PreparedJudgeCall:
                 "answer_prompt": ANSWER_PROMPT,
                 "answer_format": ANSWER_FORMAT,
                 "max_attempts": ANSWER_MAX_ATTEMPTS,
+                "fresh_retry_limit": FRESH_RETRY_LIMIT,
+                "retry_refusals_per_fresh_call": RETRY_REFUSALS_PER_FRESH_CALL,
             },
         }
 
@@ -182,8 +166,6 @@ async def prepare_judge_call(
         upstream_caveats=upstream_caveats,
     )
     prompt = _build_prompt(
-        family=family,
-        stage=stage,
         instructions=instructions,
         rubrics=rubrics,
         evidence=rendered.bundle,

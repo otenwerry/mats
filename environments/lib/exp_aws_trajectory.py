@@ -1,4 +1,4 @@
-"""AWS VM execution for real ML trajectories.
+"""AWS VM execution for real-environment trajectories.
 
 This module can launch paid EC2 instances, so its name is exp_-prefixed. The public
 pipeline imports its controller functions; EC2 user data invokes the worker entrypoint
@@ -40,30 +40,53 @@ from aws_runtime_contract import (
     WORKER_PREFIX_PAYLOAD_PATH,
     WORKER_VERSION,
 )
-from exp_subscription_harness import CLAUDE_AUTH_B64_ENV, claude_credentials_b64
-from exp_target_harness import production_scaffold_for_target
+from exp_subscription_harness import (
+    CLAUDE_AUTH_B64_ENV,
+    OPENCODE_GO_API_KEY_ENV,
+    claude_credentials_b64,
+)
+from exp_target_harness import opencode_go_model_spec, production_scaffold_for_target
+from inspect_task_naming import bounded_inspect_task_name
+from project_paths import ENV_FILE
+from sandbox_runtime import (
+    compose_file_for_harness,
+    discover_sandbox_compose_files,
+    sandbox_compose_relative,
+    seed_family_from_path,
+)
 
 
 STACK_NAME = "mats-environments"
 DEFAULT_REGION = "us-west-2"
 DEFAULT_INSTANCE_TYPE = "c7a.xlarge"
-DEFAULT_VM_CONCURRENCY = 50
-ROOT_VOLUME_GB = 16
+DEFAULT_VM_CONCURRENCY = 75
+LEGACY_ROOT_VOLUME_GB = 16
+ROOT_VOLUME_GB = 32
 S3_RETENTION_DAYS = 7
-AGENT_TIME_LIMIT_SECONDS = 7200
-# A clean first pass can reset the agent deadline to one hour from its follow-up,
-# making the maximum agent trajectory three hours. Leave another hour for boot,
-# stage-1/final judging, artifact packaging, and result upload before the watchdog.
+AGENT_TIME_LIMIT_SECONDS = 70 * 60
+# A clean first pass can reset the agent deadline to 45 minutes from its follow-up,
+# making the maximum ML agent trajectory 115 minutes. The broader worker watchdog
+# remains a conservative allowance for boot, judging, artifact packaging, and upload.
 UNCONDITIONAL_TERMINATION_SECONDS = 4 * 3600 + 30 * 60
 AMI_BUILDER_WATCHDOG_MINUTES = 90
 STANDARD_VCPU_QUOTA_CODE = "L-1216C47A"
 AWS_CLI_VERSION = "2.36.2"
-RUNTIME_VERSION = f"ubuntu24-docker-uv-environments-v4-awscli-{AWS_CLI_VERSION}"
+# The builder script itself is not part of ``runtime_dependency_files``. Bump this
+# whenever its installed host runtime changes so setup cannot reuse a stale AMI.
+RUNTIME_VERSION = (
+    f"ubuntu24-docker-uv-environments-v7-bwrap-apparmor-node-npm-awscli-"
+    f"{AWS_CLI_VERSION}"
+)
 MATS_APPROVED_FUNDING = "MATS-approved"
 PERSONAL_REIMBURSEMENT_FUNDING = "personal-reimbursement"
 SUPPORTED_FUNDING = frozenset({
     MATS_APPROVED_FUNDING,
     PERSONAL_REIMBURSEMENT_FUNDING,
+})
+AWS_AUTH_EXPIRY_CODES = frozenset({
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "RequestExpired",
 })
 
 class AwsTrajectoryError(RuntimeError):
@@ -103,6 +126,29 @@ def _client_error_code(ex: Exception) -> str:
     return str((response.get("Error") or {}).get("Code") or "")
 
 
+def _authentication_recovery_message(state: dict, error: Exception) -> str | None:
+    code = _client_error_code(error)
+    if code not in AWS_AUTH_EXPIRY_CODES:
+        return None
+    campaign_id = str(state["campaign_id"])
+    region = str(state.get("region") or DEFAULT_REGION)
+    run_profile = os.environ.get("AWS_PROFILE") or "mats-run"
+    # This repository's documented profile split uses mats-login for interactive
+    # authentication and mats-run for SDK/CLI execution.
+    login_profile = "mats-login" if run_profile == "mats-run" else run_profile
+    pipeline_script = DEFAULT_WORKER_PIPELINE_SCRIPT
+    cells = state.get("cells") or []
+    if cells and cells[0].get("pipeline_script") in WORKER_PIPELINE_SCRIPTS:
+        pipeline_script = cells[0]["pipeline_script"]
+    return (
+        f"AWS authentication expired while monitoring campaign {campaign_id} "
+        f"({code}). The workers continue independently and no trajectory will be "
+        f"relaunched. Run `aws login --profile {login_profile} --region {region}`, "
+        f"verify `aws sts get-caller-identity --profile {run_profile}`, then run "
+        f"`uv run {pipeline_script} --resume-campaign={campaign_id}`."
+    )
+
+
 def build_source_bundle(environments_root: Path, output_dir: Path) -> dict:
     try:
         return _build_source_bundle(environments_root, output_dir)
@@ -114,6 +160,33 @@ def runtime_hash(environments_root: Path) -> str:
     try:
         return _runtime_hash(environments_root, RUNTIME_VERSION)
     except SourceBundleError as error:
+        raise AwsTrajectoryError(str(error)) from None
+
+
+def _seed_family(cfg: dict) -> str:
+    configured = cfg.get("family")
+    try:
+        derived = seed_family_from_path(cfg["seeds_path"])
+    except (KeyError, ValueError) as error:
+        raise AwsTrajectoryError(str(error)) from None
+    if configured is not None and configured != derived:
+        raise AwsTrajectoryError(
+            f"configured seed family {configured!r} does not match "
+            f"--seed-dir path family {derived!r}"
+        )
+    return derived
+
+
+def _sandbox_compose_for_target(
+    cfg: dict, *, target: str, target_model: str
+) -> str:
+    scaffold = production_scaffold_for_target(target, target_model)
+    compose_file = compose_file_for_harness(
+        harness=cfg["harness"], scaffold=scaffold
+    )
+    try:
+        return sandbox_compose_relative(_seed_family(cfg), compose_file)
+    except ValueError as error:
         raise AwsTrajectoryError(str(error)) from None
 
 
@@ -142,8 +215,24 @@ def required_secret_names(model_slugs: list[str]) -> set[str]:
 
 def aws_clients(region: str) -> dict:
     import boto3
+    from dotenv import load_dotenv
 
-    session = boto3.Session(region_name=region)
+    # AWS controller entrypoints share the same project-level environment file as
+    # agent and judge credentials. ``override=False`` preserves the normal rule that
+    # a one-off shell setting wins over the saved project default.
+    load_dotenv(ENV_FILE, override=False)
+    profile = os.environ.get("AWS_PROFILE") or None
+    session = boto3.Session(profile_name=profile, region_name=region)
+    credentials = session.get_credentials()
+    if profile and credentials is None:
+        session = _aws_cli_export_session(boto3, profile=profile, region=region)
+    elif credentials is None:
+        raise AwsTrajectoryError(
+            f"AWS_PROFILE is unset after loading {ENV_FILE}, and Boto3 found no "
+            "default credentials; add AWS_PROFILE=<profile> to that exact file"
+        )
+    elif profile:
+        print(f"AWS credentials: profile={profile} via Boto3 credential chain")
     return {
         "sts": session.client("sts"),
         "s3": session.client("s3"),
@@ -153,6 +242,62 @@ def aws_clients(region: str) -> dict:
         "quotas": session.client("service-quotas"),
         "pricing": session.client("pricing", region_name="us-east-1"),
     }
+
+
+def _aws_cli_export_session(boto3_module, *, profile: str, region: str):
+    """Bridge an AWS CLI login profile into Botocore's refreshable provider chain."""
+
+    from botocore.credentials import ProcessProvider
+    from botocore.session import Session as BotocoreSession
+
+    aws = shutil.which("aws")
+    if aws is None:
+        raise AwsTrajectoryError(
+            f"AWS profile {profile!r} has no SDK-readable credentials and the AWS "
+            "CLI is not on PATH; install AWS CLI v2 or use an SDK-readable profile"
+        )
+    bridge_profile = "mats-aws-cli-export"
+    command = shlex.join([
+        aws,
+        "configure",
+        "export-credentials",
+        "--profile",
+        profile,
+        "--format",
+        "process",
+        "--no-cli-pager",
+    ])
+    provider = ProcessProvider(
+        bridge_profile,
+        load_config=lambda: {
+            "profiles": {
+                bridge_profile: {"credential_process": command},
+            }
+        },
+    )
+    botocore_session = BotocoreSession()
+    botocore_session.get_component("credential_provider").insert_before(
+        "env", provider
+    )
+    session = boto3_module.Session(
+        botocore_session=botocore_session, region_name=region
+    )
+    try:
+        credentials = session.get_credentials()
+    except Exception as error:
+        raise AwsTrajectoryError(
+            f"AWS CLI could not export credentials for profile {profile!r}; run "
+            f"`aws login --profile {profile}` and retry"
+        ) from error
+    if credentials is None:
+        raise AwsTrajectoryError(
+            f"AWS CLI exported no credentials for profile {profile!r}; run "
+            f"`aws login --profile {profile}` and retry"
+        )
+    print(
+        f"AWS credentials: profile={profile} via AWS CLI refreshable credential bridge"
+    )
+    return session
 
 
 def account_id(clients: dict) -> str:
@@ -526,7 +671,24 @@ systemctl daemon-reload
 systemctl enable --now mats-ami-builder-watchdog.timer
 stage=installing-system-packages
 apt-get update
-apt-get install -y ca-certificates curl unzip docker.io docker-compose-v2
+apt-get install -y apparmor ca-certificates curl unzip docker.io docker-compose-v2 nodejs npm
+node --version
+npm --version
+
+# Ubuntu 24.04 blocks unprivileged user namespaces unless the program has a narrow
+# AppArmor rule. Claude Code's documented bwrap rule applies to bwrap itself, not to
+# the commands that bwrap launches.
+stage=configuring-bubblewrap-apparmor
+cat >/etc/apparmor.d/bwrap <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {{
+  userns,
+  include if exists <local/bwrap>
+}}
+EOF
+systemctl reload apparmor
 
 # Ubuntu 24.04 removed its awscli package. Install a pinned official AWS CLI v2
 # release instead; workers need it for their S3 handoff.
@@ -549,9 +711,27 @@ tar -xzf /tmp/mats-source.tar.gz -C /opt/supermats
 write_status syncing-python-runtime
 export UV_PROJECT_ENVIRONMENT=/opt/environments-venv
 uv sync --project /opt/supermats/mats/environments --frozen
-write_status building-docker-image
-docker compose -f /opt/supermats/mats/environments/sandbox/ml/compose.yaml build
-docker compose -f /opt/supermats/mats/environments/sandbox/ml/compose.subscription.yaml build
+write_status building-docker-images
+mapfile -t compose_files < <(
+  find /opt/supermats/mats/environments/sandbox -mindepth 2 -maxdepth 2 \
+    -type f \\( -name compose.yaml -o -name compose.subscription.yaml \\) -print | sort
+)
+if [ "{dollar}{{#compose_files[@]}}" -eq 0 ]; then
+  echo "No real-environment sandbox compose files found"
+  exit 1
+fi
+for compose_file in "{dollar}{{compose_files[@]}}"; do
+  echo "Building sandbox declared by {dollar}compose_file"
+  docker compose -f "{dollar}compose_file" build
+  if [[ "{dollar}compose_file" == *.subscription.yaml ]]; then
+    echo "Checking nested Bubblewrap in {dollar}compose_file"
+    docker compose -f "{dollar}compose_file" run --rm --no-deps default \
+      bwrap --die-with-parent --unshare-user --uid 0 --gid 0 --unshare-pid \
+      --unshare-uts --unshare-ipc --unshare-cgroup-try --ro-bind / / \
+      --dev-bind /dev /dev --ro-bind /proc /proc /usr/bin/true
+    docker compose -f "{dollar}compose_file" down
+  fi
+done
 mkdir -p /opt/mats-runtime
 echo '{runtime}' > /opt/mats-runtime/runtime-hash
 upload_log
@@ -785,6 +965,18 @@ def _validate_worker_shape(clients: dict, instance_type: str) -> tuple[int, int]
     return vcpus, memory_mib
 
 
+def _launch_template_root_volume_gb(template_data: dict) -> int | None:
+    for mapping in template_data.get("BlockDeviceMappings") or []:
+        if mapping.get("DeviceName") != "/dev/sda1":
+            continue
+        size = (mapping.get("Ebs") or {}).get("VolumeSize")
+        try:
+            return int(size)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def setup_aws(cfg: dict, environments_root: Path) -> dict:
     approved = bool(cfg.get("confirm_approved_account"))
     personal = bool(cfg.get("confirm_personal_account"))
@@ -843,6 +1035,7 @@ def setup_aws(cfg: dict, environments_root: Path) -> dict:
         "ami": ami,
         "runtime_hash": wanted_hash,
         "launch_template": template,
+        "root_volume_gb": ROOT_VOLUME_GB,
     }
     print("AWS setup complete: " + json.dumps(result, sort_keys=True))
     return result
@@ -938,8 +1131,20 @@ def preflight_aws(
         LaunchTemplateId=template["LaunchTemplateId"],
         Versions=[str(template["DefaultVersionNumber"])],
     )["LaunchTemplateVersions"][0]["LaunchTemplateData"]
-    if version.get("ImageId") != ami or version.get("InstanceType") != cfg["aws_instance_type"]:
-        raise AwsTrajectoryError("trajectory launch template is stale; run --aws-setup")
+    template_volume_gb = _launch_template_root_volume_gb(version)
+    if (
+        version.get("ImageId") != ami
+        or version.get("InstanceType") != cfg["aws_instance_type"]
+        or template_volume_gb != ROOT_VOLUME_GB
+    ):
+        detail = (
+            f"expected image={ami}, instance={cfg['aws_instance_type']}, "
+            f"root={ROOT_VOLUME_GB} GB; found image={version.get('ImageId')}, "
+            f"instance={version.get('InstanceType')}, root={template_volume_gb} GB"
+        )
+        raise AwsTrajectoryError(
+            f"trajectory launch template is stale ({detail}); run --aws-setup"
+        )
     quota = float(clients["quotas"].get_service_quota(
         ServiceCode="ec2", QuotaCode=STANDARD_VCPU_QUOTA_CODE
     )["Quota"]["Value"])
@@ -960,6 +1165,7 @@ def preflight_aws(
         "ami": ami,
         "runtime_hash": wanted_hash,
         "launch_template_id": template["LaunchTemplateId"],
+        "root_volume_gb": ROOT_VOLUME_GB,
         "hourly_price_usd": price,
         "vcpus": vcpus,
         "memory_mib": memory_mib,
@@ -989,8 +1195,9 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
         task_suffix = cell_id
         worker_run_dir = f"{campaign_id}-{cell_id}"
         cell_prefix = f"campaigns/{campaign_id}/cells/{cell_id}"
-        task_name = (
-            f"real_audit_{target_models[target].split('/')[-1]}_{seed}_{task_suffix}"
+        task_name = bounded_inspect_task_name(
+            f"real_audit_{target_models[target].split('/')[-1]}_{seed}",
+            task_suffix,
         )
         args = [
             f"--targets={target}",
@@ -1008,6 +1215,11 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
             "--compute=local",
             "--skip-viewer",
         ]
+        if cfg.get("pressure"):
+            args.append(f"--pressure={cfg['pressure']}")
+        sandbox_compose = _sandbox_compose_for_target(
+            cfg, target=target, target_model=target_models[target]
+        )
         cells.append({
             "schema_version": AWS_SCHEMA_VERSION,
             "kind": "trajectory",
@@ -1016,6 +1228,8 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
             "target": target,
             "target_model": target_models[target],
             "harness": cfg["harness"],
+            "family": _seed_family(cfg),
+            "sandbox_compose": sandbox_compose,
             "seed": seed,
             "original_epoch": original_epoch,
             "task_suffix": task_suffix,
@@ -1026,6 +1240,7 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
             "instance_type": cfg["aws_instance_type"],
             "funding": cfg.get("aws_funding"),
             "hourly_price_usd": hourly_price,
+            "root_volume_gb": ROOT_VOLUME_GB,
             "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
@@ -1045,7 +1260,8 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
     """Cells for a continuation campaign: one VM per (prefix, seed, epoch).
 
     ``cfg["continuation"]`` carries the treatment plus one payload descriptor per
-    prefix ({name, sha256, file_sha256, local_path, target, target_model});
+    prefix ({name, sha256, file_sha256, local_path, target, target_model,
+    reasoning});
     ``file_sha256`` is the exact stored file's byte hash used for transport
     verification, while ``sha256`` is the payload's canonical identity. The payload
     file is uploaded once per campaign and downloaded by each worker to
@@ -1075,9 +1291,9 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
         worker_run_dir = f"{campaign_id}-{cell_id}"
         cell_prefix = f"campaigns/{campaign_id}/cells/{cell_id}"
         model_last = payload["target_model"].split("/")[-1]
-        task_name = (
-            f"continuation_{treatment}_{model_last}_{seed}_p{prefix_name}"
-            f"_{task_suffix}"
+        task_name = bounded_inspect_task_name(
+            f"continuation_{treatment}_{model_last}_{seed}_p{prefix_name}",
+            task_suffix,
         )
         args = [
             f"--treatment={treatment}",
@@ -1095,6 +1311,11 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
             "--compute=local",
             "--skip-viewer",
         ]
+        if cfg.get("pressure"):
+            args.append(f"--pressure={cfg['pressure']}")
+        sandbox_compose = _sandbox_compose_for_target(
+            cfg, target=payload["target"], target_model=payload["target_model"]
+        )
         cells.append({
             "schema_version": AWS_SCHEMA_VERSION,
             "kind": "trajectory",
@@ -1103,6 +1324,8 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
             "target": payload["target"],
             "target_model": payload["target_model"],
             "harness": cfg["harness"],
+            "family": _seed_family(cfg),
+            "sandbox_compose": sandbox_compose,
             "seed": seed,
             "original_epoch": original_epoch,
             "treatment": treatment,
@@ -1123,6 +1346,7 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
             "instance_type": cfg["aws_instance_type"],
             "funding": cfg.get("aws_funding"),
             "hourly_price_usd": hourly_price,
+            "root_volume_gb": ROOT_VOLUME_GB,
             "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
@@ -1405,6 +1629,20 @@ def _instance_records(ec2, instance_ids: list[str]) -> dict[str, dict]:
     return output
 
 
+def _nonterminal_campaign_instance_ids(ec2, campaign_id: str) -> set[str]:
+    response = ec2.describe_instances(Filters=[
+        {"Name": "tag:Campaign", "Values": [campaign_id]},
+        {"Name": "instance-state-name", "Values": [
+            "pending", "running", "stopping", "stopped", "shutting-down",
+        ]},
+    ])
+    return {
+        instance["InstanceId"]
+        for reservation in response["Reservations"]
+        for instance in reservation["Instances"]
+    }
+
+
 def _terminal_marker(clients: dict, cell: dict) -> tuple[str, dict] | None:
     complete = _s3_json_or_none(
         clients["s3"], cell["bucket"], cell["complete_key"]
@@ -1451,6 +1689,22 @@ def _recover_campaign_instances(state: dict, clients: dict) -> bool:
 
 def _monitor_campaign(state: dict, data_root: Path, clients: dict,
                       *, allow_launch: bool) -> dict:
+    try:
+        return _monitor_campaign_unchecked(
+            state, data_root, clients, allow_launch=allow_launch
+        )
+    except Exception as error:
+        recovery_message = _authentication_recovery_message(state, error)
+        if recovery_message is None:
+            raise
+        # The normal save path writes locally before attempting S3. Repeat the local
+        # write without AWS so even an expiry during remote save is safely resumable.
+        _save_campaign(state, data_root)
+        raise AwsTrajectoryError(recovery_message) from None
+
+
+def _monitor_campaign_unchecked(state: dict, data_root: Path, clients: dict,
+                                *, allow_launch: bool) -> dict:
     cells = state["cells"]
     concurrency = state["vm_concurrency"]
     print(f"campaign {state['campaign_id']}: {len(cells)} cells, max {concurrency} VMs")
@@ -1463,6 +1717,20 @@ def _monitor_campaign(state: dict, data_root: Path, clients: dict,
         ]
         records = _instance_records(
             clients["ec2"], [cell["instance_id"] for cell in active]
+        )
+        missing_finishing_ids = {
+            cell["instance_id"]
+            for cell in active
+            if cell["status"] == "finishing"
+            and cell.get("terminal")
+            and cell["instance_id"] not in records
+        }
+        nonterminal_ids = (
+            _nonterminal_campaign_instance_ids(
+                clients["ec2"], state["campaign_id"]
+            )
+            if missing_finishing_ids
+            else set()
         )
         changed = False
         for cell in active:
@@ -1482,16 +1750,41 @@ def _monitor_campaign(state: dict, data_root: Path, clients: dict,
                 cell["terminal_status"] = status
                 cell["status"] = status if instance_state == "terminated" else "finishing"
                 if instance_state == "terminated":
+                    cell["instance_state"] = instance_state
                     cell["terminated_at"] = _utc_now()
                 changed = True
-                print(f"  {cell['cell_id']}: result uploaded; waiting for VM termination")
+                if instance_state == "terminated":
+                    print(f"  {cell['cell_id']}: {status}; VM already terminated")
+                else:
+                    print(f"  {cell['cell_id']}: result uploaded; waiting for VM termination")
             elif cell["status"] == "finishing" and instance_state == "terminated":
                 cell["status"] = cell.pop("terminal_status")
+                cell["instance_state"] = instance_state
                 cell["terminated_at"] = _utc_now()
                 changed = True
                 print(f"  {cell['cell_id']}: {cell['status']}; VM terminated")
+            elif (
+                cell["status"] == "finishing"
+                and cell.get("terminal")
+                and cell["instance_id"] in missing_finishing_ids
+                and cell["instance_id"] not in nonterminal_ids
+            ):
+                observed_at = _utc_now()
+                cell["status"] = cell.pop("terminal_status")
+                cell["instance_state"] = "terminated"
+                cell["terminated_at"] = observed_at
+                cell["terminated_at_is_upper_bound"] = True
+                cell["termination_resolution"] = (
+                    "absent_from_all_nonterminal_campaign_instances"
+                )
+                changed = True
+                print(
+                    f"  {cell['cell_id']}: {cell['status']}; "
+                    "VM no longer present in any non-terminal state"
+                )
             elif instance_state == "terminated":
                 cell["status"] = "infrastructure_failure"
+                cell["instance_state"] = instance_state
                 cell["completed_at"] = _utc_now()
                 cell["terminated_at"] = _utc_now()
                 cell["terminal"] = {
@@ -1660,7 +1953,9 @@ def _vm_cost(cell: dict) -> dict:
         "public_ipv4_cost_excluded": True,
         "internet_data_transfer_cost_excluded": True,
         "shared_runtime_cost_excluded": True,
-        "root_volume_gb": ROOT_VOLUME_GB,
+        "root_volume_gb": int(
+            cell.get("root_volume_gb") or LEGACY_ROOT_VOLUME_GB
+        ),
     }
 
 
@@ -1779,7 +2074,7 @@ def import_campaign_results(state: dict, data_root: Path, clients: dict) -> Path
         if integrity_records:
             (staging / "pipeline_integrity.json").write_text(
                 json.dumps({
-                    "schema_version": "environment-pipeline-integrity-v1",
+                    "schema_version": "environment-pipeline-integrity-v2",
                     "records": integrity_records,
                 }, indent=2, sort_keys=True) + "\n"
             )
@@ -1793,9 +2088,21 @@ def import_campaign_results(state: dict, data_root: Path, clients: dict) -> Path
 
 def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                  *, dry_run: bool = False) -> dict:
-    if cfg["time_limit"] != AGENT_TIME_LIMIT_SECONDS:
+    cfg = {
+        **cfg,
+        "family": _seed_family(cfg),
+        "pressure": cfg.get("pressure"),
+    }
+    time_limit = cfg.get("time_limit")
+    if not isinstance(time_limit, int) or time_limit <= 0:
         raise AwsTrajectoryError(
-            f"AWS ML campaigns require the pinned {AGENT_TIME_LIMIT_SECONDS}s agent limit"
+            "AWS campaigns require a finite, positive --time-limit so the worker "
+            "watchdogs cannot silently truncate a trajectory"
+        )
+    if time_limit > AGENT_TIME_LIMIT_SECONDS:
+        raise AwsTrajectoryError(
+            f"AWS campaigns currently support --time-limit up to "
+            f"{AGENT_TIME_LIMIT_SECONDS}s; use --compute=local for a longer run"
         )
     continuation = cfg.get("continuation")
     selected_cells = cfg.get("_cell_selections")
@@ -1810,22 +2117,54 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
     if planned_cells < 1:
         raise AwsTrajectoryError("AWS campaign has no trajectory cells to run")
     # Quota and scheduling should reflect the work that can actually run. In
-    # particular, an n=1 test must not require the default 50-worker quota.
+    # particular, an n=1 test must not require the default 75-worker quota.
     cfg = {
         **cfg,
         "vm_concurrency": min(int(cfg["vm_concurrency"]), planned_cells),
     }
-    api_target_models = list(cfg["target_models"])
+    if continuation:
+        target_specs = [
+            (payload["target"], payload["target_model"], payload.get("reasoning"))
+            for payload in continuation["payloads"]
+        ]
+    else:
+        target_specs = [
+            (target, model, cfg.get("reasoning"))
+            for target, model in zip(
+                cfg["targets"], cfg["target_models"], strict=True
+            )
+        ]
+    # A target can occur in multiple continuation prefixes. Preserve one copy while
+    # rejecting inconsistent payload metadata before any preflight or spend.
+    unique_target_specs: dict[str, tuple[str, bool | None]] = {}
+    for target, model, reasoning in target_specs:
+        prior = unique_target_specs.get(target)
+        current = (model, reasoning)
+        if prior is not None and prior != current:
+            raise AwsTrajectoryError(
+                f"target {target!r} has inconsistent model/reasoning metadata across "
+                "continuation prefixes"
+            )
+        unique_target_specs[target] = current
+
+    api_target_models = [model for model, _reasoning in unique_target_specs.values()]
     subscription_required: set[str] = set()
     subscription_alternatives: list[tuple[str, ...]] = []
     if cfg.get("harness") == "subscription":
         api_target_models = []
-        for target, slug in zip(
-            cfg["targets"], cfg["target_models"], strict=True
-        ):
+        for target, (slug, target_reasoning) in unique_target_specs.items():
             scaffold = production_scaffold_for_target(target, slug)
             if scaffold == "opencode":
-                api_target_models.append(slug)
+                if opencode_go_model_spec(target, slug) is not None:
+                    if not target_reasoning:
+                        raise AwsTrajectoryError(
+                            "OpenCode Go subscription runs currently require "
+                            "--reasoning=yes; refusing to silently change reasoning "
+                            "behavior"
+                        )
+                    subscription_required.add(OPENCODE_GO_API_KEY_ENV)
+                else:
+                    api_target_models.append(slug)
             elif scaffold == "claude_code":
                 alternatives = (
                     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -1870,6 +2209,10 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
         summary = {
             "campaign_id": campaign_id,
             "cells": len(cells),
+            "family": _seed_family(cfg),
+            "sandbox_compose_files": sorted({
+                cell["sandbox_compose"] for cell in cells
+            }),
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
             "source_files": source["files"],
@@ -1879,6 +2222,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             "funding": preflight["funding"],
             "instance_type": cfg["aws_instance_type"],
             "hourly_price_usd": preflight["hourly_price_usd"],
+            "root_volume_gb": preflight["root_volume_gb"],
             "vm_concurrency": cfg["vm_concurrency"],
             "quota_vcpus": preflight["quota_vcpus"],
             "required_vcpus": preflight["required_vcpus"],
@@ -1910,6 +2254,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             "region": cfg["aws_region"],
             "instance_type": cfg["aws_instance_type"],
             "hourly_price_usd": preflight["hourly_price_usd"],
+            "root_volume_gb": preflight["root_volume_gb"],
             "vm_concurrency": cfg["vm_concurrency"],
             "launch_template_id": preflight["launch_template_id"],
             "source": {key: source[key] for key in ("sha256", "bytes", "files")},
@@ -1917,9 +2262,9 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             "pipeline_config": {
                 key: cfg[key]
                 for key in (
-                    "targets", "seeds", "seeds_path", "epochs", "reasoning",
+                    "targets", "seeds", "seeds_path", "family", "epochs", "reasoning",
                     "harness", "condition", "judge_resolved", "gate_model", "time_limit",
-                    "target_models", "aws_secret_env",
+                    "target_models", "pressure", "aws_secret_env",
                 )
             } | ({"continuation": continuation, "seed_dir": cfg.get("seed_dir")}
                  if continuation else {}),
@@ -2009,8 +2354,24 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
         if not cfg.get(f"{config_key}_explicit") and old.get(state_key) is not None:
             retry_cfg[config_key] = old[state_key]
     continuation_retry = bool(original_cfg.get("continuation"))
+    retry_targets = list(dict.fromkeys(cell["target"] for cell in failed))
+    if not continuation_retry:
+        try:
+            original_target_models = dict(zip(
+                original_cfg["targets"],
+                original_cfg["target_models"],
+                strict=True,
+            ))
+            retry_target_models = [
+                original_target_models[target] for target in retry_targets
+            ]
+        except (KeyError, TypeError, ValueError) as ex:
+            raise AwsTrajectoryError(
+                "campaign has an invalid stored target/model mapping; retry cannot "
+                "safely guess"
+            ) from ex
     retry_cfg.update({
-        "targets": list(dict.fromkeys(cell["target"] for cell in failed)),
+        "targets": retry_targets,
         "seeds": list(dict.fromkeys(cell["seed"] for cell in failed)),
         # Continuation cells are keyed by prefix, plain cells by agent.
         "_cell_selections": [
@@ -2027,6 +2388,8 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
         ),
         "retry_parent": campaign_id,
     })
+    if not continuation_retry:
+        retry_cfg["target_models"] = retry_target_models
     result = run_campaign(retry_cfg, environments_root, data_root, dry_run=dry_run)
     result["retry_parent"] = campaign_id
     return result
@@ -2042,9 +2405,13 @@ def campaign_ok(state: dict) -> bool:
 
 def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
                *, dry_run: bool = False) -> dict:
-    """Launch one no-LLM VM and verify Docker + the S3 result round trip."""
+    """Launch one no-LLM VM and verify every sandbox + the S3 result round trip."""
     with tempfile.TemporaryDirectory(prefix="mats-aws-smoke-source-") as tmp:
         source = build_source_bundle(environments_root, Path(tmp))
+        try:
+            sandbox_compose_paths = discover_sandbox_compose_files(environments_root)
+        except ValueError as error:
+            raise AwsTrajectoryError(str(error)) from None
         smoke_cfg = {**cfg, "vm_concurrency": 1}
         preflight = preflight_aws(smoke_cfg, environments_root, model_slugs=[])
         campaign_id = (
@@ -2064,9 +2431,11 @@ def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
             "instance_type": cfg["aws_instance_type"],
             "funding": preflight["funding"],
             "hourly_price_usd": preflight["hourly_price_usd"],
+            "root_volume_gb": preflight["root_volume_gb"],
             "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
+            "sandbox_compose_paths": sandbox_compose_paths,
             "job_key": f"{prefix}/job.json",
             "result_key": f"{prefix}/result.tar.gz",
             "complete_key": f"{prefix}/complete.json",
@@ -2077,11 +2446,13 @@ def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
             "campaign_id": campaign_id,
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
+            "sandbox_compose_files": sandbox_compose_paths,
             "ami": preflight["ami"],
             "region": cfg["aws_region"],
             "funding": preflight["funding"],
             "instance_type": cfg["aws_instance_type"],
             "hourly_price_usd": preflight["hourly_price_usd"],
+            "root_volume_gb": preflight["root_volume_gb"],
             "quota_vcpus": preflight["quota_vcpus"],
             "required_vcpus": preflight["required_vcpus"],
             "calls_models": False,
@@ -2102,6 +2473,7 @@ def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
             "region": cfg["aws_region"],
             "instance_type": cfg["aws_instance_type"],
             "hourly_price_usd": preflight["hourly_price_usd"],
+            "root_volume_gb": preflight["root_volume_gb"],
             "vm_concurrency": 1,
             "launch_template_id": preflight["launch_template_id"],
             "source": {key: source[key] for key in ("sha256", "bytes", "files")},
@@ -2126,7 +2498,11 @@ def smoke_test(cfg: dict, environments_root: Path, data_root: Path,
         extracted.mkdir()
         manifest = _secure_extract_result(archive, extracted)
         record = json.loads((extracted / "payload/run/smoke.json").read_text())
-        if not record.get("docker_info_ok") or not record.get("compose_config_ok"):
+        if (
+            not record.get("docker_info_ok")
+            or not record.get("compose_config_ok")
+            or not record.get("bubblewrap_ok")
+        ):
             raise AwsTrajectoryError(f"smoke worker checks failed: {record}")
         local_source = smoke_dir / "remote_source.tar.gz"
         shutil.copy2(source["path"], local_source)

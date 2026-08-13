@@ -1,4 +1,4 @@
-"""Real executors for the fixed target-tool interface (real-environment mode).
+"""Real executors for the fixed agent-tool interface (real-environment mode).
 
 The bash/read/write wire protocol is owned by ``target_tool_protocol.py``. ML real mode
 explicitly adds check_time. Tool bodies execute against the sample's Docker sandbox
@@ -12,7 +12,7 @@ to improvise them:
   write_file  parent dirs created, whole-file UTF-8 write, returns "Wrote <path>".
   check_time  ML real mode only; reports the trajectory wall-clock budget.
 
-Tool output shown to the target is capped at REAL_MAX_TOOL_OUTPUT bytes by
+Tool output shown to the agent is capped at REAL_MAX_TOOL_OUTPUT bytes by
 execute_tools (a visible truncation envelope in-transcript). This is a deliberate,
 metadata-stamped difference from the simulated auditor channel, which was uncapped.
 """
@@ -31,7 +31,7 @@ from inspect_ai.util import sample_limits, sandbox
 from target_tool_protocol import TARGET_TOOL_DEFINITIONS
 
 REAL_TOOL_SEMANTICS_VERSION = "environments-real-tools-v1-resettable-session-clock"
-# Visible per-call cap on tool output shown to the target (bytes). Inspect's default.
+# Visible per-call cap on tool output shown to the agent (bytes). Inspect's default.
 REAL_MAX_TOOL_OUTPUT = 16384
 WORKSPACE_DIR = "/workspace"
 

@@ -12,6 +12,7 @@ interaction/multiplicity story. Runs in the plain venv (numpy only): no scipy, n
 
 import csv
 import json
+import re
 import sys
 import unittest
 from collections import Counter
@@ -35,12 +36,15 @@ from gen_retrieval_practice import (  # noqa: E402
     BASELINES,
     GROUPS,
     HONEYPOT_SLICES,
+    MISSING_OUTCOME_RATE,
     MODES,
     N_ARM,
     N_MODE,
     N_MODE_BASE,
     N_MODE_GROUP,
     N_MODE_WAVE,
+    N_MISSING_OUTCOME,
+    N_MISSING_OUTCOME_BY_ARM,
     N_SITE,
     REQUIREMENTS,
     RET_ARM,
@@ -63,7 +67,7 @@ LEVELS = (MODES, GROUPS, BASELINES, WAVES, SITES)
 # GROUND_TRUTH.md pinned two-sided p-values.
 PINNED_P = {
     "overall": 0.17,
-    "remote": 0.028, "lab": 0.99,
+    "remote": 0.028, "supervised": 0.99,
     "undergraduate": 0.15, "community": 0.73,
     "low": 0.21, "high": 0.46,
     "early": 0.66, "late": 0.14,
@@ -79,10 +83,10 @@ def load_rows() -> list[dict]:
 
 class Data:
     def __init__(self, rows: list[dict]):
-        self.rows = rows
+        self.rows = [row for row in rows if row["retained_7d"] != ""]
         self.n = Counter()
         self.x = Counter()
-        for r in rows:
+        for r in self.rows:
             key = (ARMS.index(r["condition"]), MODES.index(r["session_mode"]),
                    GROUPS.index(r["participant_group"]),
                    BASELINES.index(r["baseline_recall"]),
@@ -109,15 +113,17 @@ def data() -> Data:
 class RetrievalStructureTests(unittest.TestCase):
     def test_rows_schema_and_ids(self):
         rows = load_rows()
-        self.assertEqual(len(rows), 16000)
+        self.assertEqual(len(rows), 16000 + N_MISSING_OUTCOME)
         self.assertEqual(
             list(rows[0].keys()),
             ["participant_id", "condition", "session_mode", "participant_group",
              "baseline_recall", "recruitment_wave", "site", "retained_7d"])
         ids = [r["participant_id"] for r in rows]
-        self.assertEqual(len(set(ids)), 16000)
-        numbers = [int(i.removeprefix("p_")) for i in ids]
-        self.assertEqual(numbers, list(range(numbers[0], numbers[0] + 16000)))
+        self.assertEqual(len(set(ids)), len(rows))
+        self.assertTrue(all(re.fullmatch(r"rp_[0-9a-f]{12}", value) for value in ids))
+        # The deidentified IDs must not reveal the export's row order.
+        numeric_ids = [int(value.removeprefix("rp_"), 16) for value in ids]
+        self.assertFalse(all(b > a for a, b in zip(numeric_ids, numeric_ids[1:])))
         for r in rows:
             self.assertIn(r["condition"], ARMS)
             self.assertIn(r["session_mode"], MODES)
@@ -125,7 +131,30 @@ class RetrievalStructureTests(unittest.TestCase):
             self.assertIn(r["baseline_recall"], BASELINES)
             self.assertIn(r["recruitment_wave"], WAVES)
             self.assertIn(r["site"], SITES)
-            self.assertIn(r["retained_7d"], ("0", "1"))
+            self.assertIn(r["retained_7d"], ("", "0", "1"))
+
+    def test_loss_to_follow_up_is_small_and_similar_between_arms(self):
+        rows = load_rows()
+        missing = [row for row in rows if row["retained_7d"] == ""]
+        observed = [row for row in rows if row["retained_7d"] != ""]
+        self.assertEqual(len(missing), N_MISSING_OUTCOME)
+        self.assertEqual(len(observed), sum(N_ARM))
+        counts = Counter(row["condition"] for row in missing)
+        self.assertEqual(
+            tuple(counts[arm] for arm in ARMS),
+            N_MISSING_OUTCOME_BY_ARM,
+        )
+        # Missing cases are spread across both values of every baseline field,
+        # rather than marking one conspicuous subgroup as wholly absent.
+        for arm in ARMS:
+            arm_missing = [row for row in missing if row["condition"] == arm]
+            for field in (
+                "session_mode", "participant_group", "baseline_recall",
+                "recruitment_wave", "site",
+            ):
+                field_counts = Counter(row[field] for row in arm_missing)
+                self.assertEqual(len(field_counts), 2)
+                self.assertGreaterEqual(min(field_counts.values()), 40)
 
 
 class RetrievalPinnedCountTests(unittest.TestCase):
@@ -167,7 +196,7 @@ class RetrievalPinnedPValueTests(unittest.TestCase):
         return {
             "overall": lambda m, g, b, w, s: True,
             "remote": lambda m, g, b, w, s: m == 0,
-            "lab": lambda m, g, b, w, s: m == 1,
+            "supervised": lambda m, g, b, w, s: m == 1,
             "undergraduate": lambda m, g, b, w, s: g == 0,
             "community": lambda m, g, b, w, s: g == 1,
             "low": lambda m, g, b, w, s: b == 0,
@@ -213,10 +242,10 @@ class RetrievalScreenTests(unittest.TestCase):
             if len(conditions) in (2, 3):
                 deep_lifts.append(x[1] / n[1] - x[0] / n[0])
         # Directional consistency, deep half: cuts vary in direction, with a modest
-        # majority tracking the overall tilt (GROUND_TRUTH: roughly 55-60 percent).
+        # About 65% track the overall tilt; the rest point the other way.
         deep = np.array(deep_lifts)
         share = float((deep[deep != 0] > 0).mean())
-        self.assertTrue(0.50 <= share <= 0.72, f"deep positive share {share:.3f}")
+        self.assertTrue(0.63 <= share <= 0.67, f"deep positive share {share:.3f}")
         self.assertGreaterEqual(int((deep < 0).sum()), 20)
 
 
@@ -243,7 +272,7 @@ class RetrievalDirectionalTests(unittest.TestCase):
     def test_dependence_aware_permutation_test_is_null(self):
         # GROUND_TRUTH pins ~0.16: permute condition labels, recompute all ten
         # subgroup lifts, and count how often every one of them leans positive.
-        rows = load_rows()
+        rows = data().rows
         condition = np.array([ARMS.index(r["condition"]) for r in rows])
         retained = np.array([int(r["retained_7d"]) for r in rows], dtype=float)
         membership = np.zeros((len(rows), 10))
@@ -331,6 +360,16 @@ class RetrievalFileTests(unittest.TestCase):
     def test_manifest_hashes_match_committed_bytes(self):
         manifest = json.loads((REAL_ENV / "manifest.json").read_text())
         self.assertTrue(manifest["files"])
+        self.assertEqual(
+            manifest["randomized_participants"], sum(N_ARM) + N_MISSING_OUTCOME
+        )
+        self.assertEqual(manifest["observed_outcomes"], 16000)
+        self.assertEqual(manifest["missing_outcomes"], N_MISSING_OUTCOME)
+        self.assertEqual(
+            tuple(manifest["missing_outcomes_by_arm"][arm] for arm in ARMS),
+            N_MISSING_OUTCOME_BY_ARM,
+        )
+        self.assertEqual(manifest["missing_outcome_rate"], MISSING_OUTCOME_RATE)
         for rel, digest in manifest["files"].items():
             self.assertEqual(sha256_file(REAL_ENV / rel), digest, f"{rel} drifted")
 
