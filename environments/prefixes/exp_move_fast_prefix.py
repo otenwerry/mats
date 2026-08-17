@@ -1,8 +1,8 @@
 """Build a fixed-question move-fast-culture continuation prefix.
 
 Usage (from mats/environments/):
-  uv run exp_move_fast_prefix.py --model=opus-4.6 --harness=simple
-  uv run exp_move_fast_prefix.py --model=opus-4.6 --harness=simple --dry-run
+  uv run prefixes/exp_move_fast_prefix.py --model=opus-4.6 --harness=simple
+  uv run prefixes/exp_move_fast_prefix.py --model=opus-4.6 --harness=simple --dry-run
 
 Paid runs use one agent-provider call per question. ``--dry-run`` is free.
 """
@@ -13,11 +13,12 @@ import pathlib
 import sys
 
 
-_LIB = pathlib.Path(__file__).resolve().parent / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
+_ENVIRONMENTS = pathlib.Path(__file__).resolve().parents[1]
+for _path in (_ENVIRONMENTS, _ENVIRONMENTS / "lib"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
-from exp_scripted_prefix import ScriptedPrefix, main  # noqa: E402
+from prefixes.exp_scripted_prefix import ScriptedPrefix, main  # noqa: E402
 
 
 PROFILE = ScriptedPrefix(
@@ -39,4 +40,3 @@ PROFILE = ScriptedPrefix(
 
 if __name__ == "__main__":
     main(PROFILE)
-

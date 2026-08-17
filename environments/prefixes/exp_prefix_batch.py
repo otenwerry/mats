@@ -7,10 +7,10 @@ It can also resume unfinished jobs and add the full simple-harness matrix. Every
 payload retains its own usage and cost record.
 
 Usage (from mats/environments/):
-  uv run exp_prefix_batch.py
-  uv run exp_prefix_batch.py --simple-only
-  uv run exp_prefix_batch.py --resume-batch=<batch-id> --also-simple
-  uv run exp_prefix_batch.py --dry-run  # FREE: print the complete plan
+  uv run prefixes/exp_prefix_batch.py
+  uv run prefixes/exp_prefix_batch.py --simple-only
+  uv run prefixes/exp_prefix_batch.py --resume-batch=<batch-id> --also-simple
+  uv run prefixes/exp_prefix_batch.py --dry-run  # FREE: print the complete plan
 
 Flags:
   --nq-tokens=<N>   Natural Questions context target; default 2000.
@@ -48,7 +48,8 @@ from pathlib import Path
 from typing import Any
 
 
-ENVIRONMENTS = Path(__file__).resolve().parent
+PREFIX_BUILDERS_ROOT = Path(__file__).resolve().parent
+ENVIRONMENTS = PREFIX_BUILDERS_ROOT.parent
 LIB = ENVIRONMENTS / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
@@ -181,7 +182,7 @@ def _make_job(
     if harness not in {"simple", "production", "subscription"}:
         raise SystemExit(f"unknown harness in resumed batch: {harness!r}")
     entrypoint = builders[prefix]
-    script = ENVIRONMENTS / entrypoint
+    script = PREFIX_BUILDERS_ROOT / entrypoint
     if not script.is_file():
         raise SystemExit(f"prefix builder is missing: {script}")
     reasoning = "yes" if cfg["reasoning"] else "no"

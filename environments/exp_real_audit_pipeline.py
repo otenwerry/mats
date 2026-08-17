@@ -40,7 +40,7 @@ Flags:
   --skip-viewer        don't rebuild the viewer at the end.
   --compute=aws|local  defaults to aws for every seed family. AWS runs one trajectory
                        on each VM; use local explicitly for laptop debugging.
-  --vm-concurrency=<N> max active trajectory VMs (default 75).
+  --vm-concurrency=<N> max active trajectory VMs (default 250).
   --dry-run            free AWS preflight: cells, source SHA/size, AMI/quota, price,
                        and worst-case compute cost; no VM or model calls.
   --aws-setup (--confirm-approved-account|--confirm-personal-account)
@@ -136,7 +136,7 @@ _VALUE_FLAGS = {
 _SWITCH_FLAGS = {
     "--skip-viewer",
     "--dry-run", "--aws-setup", "--aws-smoke-test", "--confirm-approved-account",
-    "--confirm-personal-account",
+    "--confirm-personal-account", "--retry-pipeline-failures",
 }
 
 
@@ -221,6 +221,16 @@ def _parse_args() -> dict:
         if (resolved_seed_path / "manifest.json").is_file()
         else resolved_seed_path.name
     )
+    if family in {"ml_prefix_only", "p_hacking_prefix_only"}:
+        endpoint = (
+            "prefixes/exp_ml_prefix.py"
+            if family == "ml_prefix_only"
+            else "prefixes/exp_p_hacking_prefix.py"
+        )
+        raise SystemExit(
+            f"{family} is an unjudged prefix source; use {endpoint} instead of the "
+            "real-audit pipeline"
+        )
     pressure = resolve_pressure(_arg("--pressure"), family)
     compute = _arg("--compute") or "aws"
     if compute not in {"aws", "local"}:
@@ -281,6 +291,7 @@ def parse_aws_control_args() -> dict:
         "dry_run": "--dry-run" in sys.argv,
         "concurrency": _posint("--concurrency", DEFAULT_CONCURRENCY),
         "skip_viewer": "--skip-viewer" in sys.argv,
+        "retry_pipeline_failures": "--retry-pipeline-failures" in sys.argv,
     }
 
 
@@ -446,6 +457,10 @@ def main() -> None:
 
         resume_id = _arg("--resume-campaign")
         retry_id = _arg("--retry-failed")
+        if "--retry-pipeline-failures" in sys.argv and not retry_id:
+            raise SystemExit(
+                "--retry-pipeline-failures requires --retry-failed=<campaign>"
+            )
         if resume_id and retry_id:
             raise SystemExit("--resume-campaign and --retry-failed are mutually exclusive")
         if resume_id or retry_id:

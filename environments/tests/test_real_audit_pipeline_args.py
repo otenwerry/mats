@@ -29,7 +29,7 @@ class RealAuditPipelineArgTests(unittest.TestCase):
 
         self.assertEqual(config["compute"], "aws")
         self.assertEqual(config["time_limit"], 4200)
-        self.assertEqual(config["vm_concurrency"], 75)
+        self.assertEqual(config["vm_concurrency"], 250)
         self.assertEqual(config["gate_model"], config["judge_resolved"])
         self.assertEqual(config["harness"], "simple")
 
@@ -136,6 +136,17 @@ class RealAuditPipelineArgTests(unittest.TestCase):
     def test_ml_rejects_pressure(self):
         with patch.object(sys, "argv", [*self.base_argv, "--pressure=low"]):
             with self.assertRaisesRegex(SystemExit, "applies only to p_hacking"):
+                exp_real_audit_pipeline._parse_args()
+
+    def test_prefix_only_family_is_rejected_before_aws_planning(self):
+        argv = [
+            "--seed-dir=ml_prefix_only" if argument.startswith("--seed-dir=")
+            else "--seeds=demand_forecasting" if argument.startswith("--seeds=")
+            else argument
+            for argument in self.base_argv
+        ]
+        with patch.object(sys, "argv", argv):
+            with self.assertRaisesRegex(SystemExit, "prefixes/exp_ml_prefix.py"):
                 exp_real_audit_pipeline._parse_args()
 
     def test_aws_setup_does_not_require_experiment_args(self):

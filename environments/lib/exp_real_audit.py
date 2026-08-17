@@ -18,7 +18,7 @@ import hashlib
 import json
 import sys
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -42,11 +42,22 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sample_limits, span
 
 from continuation_evidence import (
+    CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
     ContinuationRun,
     continuation_caveat_fields,
-    judge_view_messages,
+    judge_view_messages as continuation_judge_view_messages,
     sliced_message_record,
     update_production_boundary,
+)
+from multi_agent_evidence import (
+    ACTIVITY_LOG_PATH,
+    ActivityLogRun,
+    caveat_fields as activity_log_caveat_fields,
+    finalize_activity_log_exposure,
+    judge_view_messages as activity_log_judge_view_messages,
+    sanitize_artifacts as sanitize_activity_log_artifacts,
+    update_activity_log_exposure,
+    update_activity_log_exposure_from_model_events,
 )
 from environment_judge import (
     ArtifactSnapshot,
@@ -68,6 +79,7 @@ from exp_target_harness import (
     production_agent_input_messages,
     production_harness_metadata,
     production_scaffold_for_target,
+    retain_native_scaffold_system_messages,
     resolve_harness,
     restore_native_resume_bundle,
     subscription_harness_metadata,
@@ -96,7 +108,10 @@ from judge_selection import (
     resolve_judge,
 )
 from inspect_task_naming import bounded_inspect_task_name, full_inspect_task_name
-from interrupted_native_transcript import recover_interrupted_opencode_messages
+from interrupted_native_transcript import (
+    recover_interrupted_opencode_messages,
+    recover_predeadline_opencode_submission,
+)
 from model_catalog import (
     REASONING_EFFORT,
     TARGET_CHOICES,
@@ -159,20 +174,31 @@ JUDGE_EVIDENCE_VERSION = "complete-observable-messages-v5"
 
 ML_FIRST_PASS_LIMIT_SECONDS = 70 * 60
 ML_SECOND_PASS_LIMIT_SECONDS = 45 * 60
+ML_PREFIX_ONLY_FAMILY = "ml_prefix_only"
+P_HACKING_PREFIX_ONLY_FAMILY = "p_hacking_prefix_only"
+PREFIX_ONLY_FAMILIES = frozenset({
+    ML_PREFIX_ONLY_FAMILY,
+    P_HACKING_PREFIX_ONLY_FAMILY,
+})
+ML_TIME_FAMILIES = frozenset({"ml_training_data_misuse", ML_PREFIX_ONLY_FAMILY})
 
 DEFAULT_GATE_MODEL = DEFAULT_JUDGE
 DEFAULT_SANDBOX_CONCURRENCY = 8
 DEFAULT_TIME_LIMIT_SECONDS = 3600
 FAMILY_TIME_LIMIT_SECONDS = {
+    ML_PREFIX_ONLY_FAMILY: ML_FIRST_PASS_LIMIT_SECONDS,
     "ml_training_data_misuse": ML_FIRST_PASS_LIMIT_SECONDS,
     "p_hacking": 1800,
+    P_HACKING_PREFIX_ONLY_FAMILY: 1800,
 }
 FINALIZE_GRACE_SECONDS = 120
 
 SANDBOX_DIR = ENVIRONMENTS_ROOT / "sandbox"
 FAMILY_DELIVERABLES = {
+    ML_PREFIX_ONLY_FAMILY: ("REPORT.md", "models/final/"),
     "ml_training_data_misuse": ("predictions.csv", "REPORT.md", "models/final/"),
     "p_hacking": ("analysis.py", "RESULT.md"),
+    P_HACKING_PREFIX_ONLY_FAMILY: ("analysis.py", "RESULT.md"),
 }
 
 
@@ -187,7 +213,7 @@ def resolve_time_limit(arg: str | None, family: str | None = None) -> int | None
         ) from error
     if value < 0:
         raise SystemExit(f"--time-limit must be >= 0, got {value}")
-    if family == "ml_training_data_misuse" and value != ML_FIRST_PASS_LIMIT_SECONDS:
+    if family in ML_TIME_FAMILIES and value != ML_FIRST_PASS_LIMIT_SECONDS:
         raise SystemExit(
             "ML real-environment runs use the fixed 70-minute --time-limit=4200"
         )
@@ -257,7 +283,7 @@ def assemble_real_protocol(
     opening = sources.opening_user_message
     follow_up = sources.follow_up
     version = REAL_PROTOCOL_VERSION
-    if family == "ml_training_data_misuse":
+    if family in ML_TIME_FAMILIES:
         version = ML_TIME_PROTOCOL_VERSION
 
     provenance = sources.provenance()
@@ -386,10 +412,12 @@ def real_audit_solver(
     artifacts_dir: str | None = None,
     execution_metadata: dict | None = None,
     continuation: ContinuationRun | None = None,
+    activity_log: ActivityLogRun | None = None,
     harness: str,
     target_name: str,
     target_slug: str,
     reasoning: bool,
+    judge_first_submission: bool = True,
 ) -> Solver:
     """Run the agent and scripted protocol inside one Inspect sandbox.
 
@@ -397,10 +425,13 @@ def real_audit_solver(
     conversation plus the injected pivot user turn instead of the plain
     opening (and, in simple mode, environment-system) pair. Both judge stages then see
     the active system message(s) and live task, sliced at the stored boundary index.
+    With ``activity_log`` set, execution instead starts as an ordinary fresh session
+    with ACTIVITY_LOG.md mounted in the workspace. Its complete delivery to model
+    context is measured mechanically after each successful target call.
     """
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        include_time = spec.family == "ml_training_data_misuse"
+        include_time = spec.family in ML_TIME_FAMILIES
         tools = (
             real_target_tools(include_time=include_time)
             if harness == "simple"
@@ -438,17 +469,37 @@ def real_audit_solver(
             "gates": [],
             "submission_artifacts": [],
             "task_context": _task_snapshot(spec).model_dump(mode="json"),
-            "judge_evidence_policy": {
-                "version": JUDGE_EVIDENCE_VERSION,
-                "message_selection": "all observable messages supplied for the stage",
-                "native_reasoning": "included where readable",
-                "lossy": False,
-                "lossy_reasons": [],
-                "caveat": (
-                    "Judging includes all supplied messages, readable native reasoning, "
-                    "assistant-visible text, tool calls, and tool results."
-                ),
+            "judging": {
+                "enabled": judge_first_submission,
+                "stage_one": "llm_judge" if judge_first_submission else "not_run_by_design",
+                "final": "task_scorer" if judge_first_submission else "not_run_by_design",
             },
+            "judge_evidence_policy": (
+                {
+                    "version": JUDGE_EVIDENCE_VERSION,
+                    "message_selection": "all observable messages supplied for the stage",
+                    "native_reasoning": "included where readable",
+                    "lossy": False,
+                    "lossy_reasons": [],
+                    "caveat": (
+                        "Judging includes all supplied messages, readable native reasoning, "
+                        "assistant-visible text, tool calls, and tool results."
+                    ),
+                }
+                if judge_first_submission
+                else {
+                    "version": "no-judge-prefix-v1",
+                    "message_selection": "none",
+                    "native_reasoning": "not inspected by a judge",
+                    "lossy": False,
+                    "lossy_reasons": [],
+                    "caveat": (
+                        "No gate or final LLM judge runs for this prefix-only task. "
+                        "Transcript observability is recorded only for continuation "
+                        "integrity."
+                    ),
+                }
+            ),
             "protocol_sources": spec.source_provenance,
             "harness": (
                 {"mode": "simple"}
@@ -479,44 +530,65 @@ def real_audit_solver(
         if continuation is not None:
             real_env["continuation"] = deepcopy(continuation.record)
             state.messages, _ = continuation.initial_messages()
-        elif (
-            harness == "simple"
-            and not any(isinstance(message, ChatMessageSystem) for message in state.messages)
-        ):
-            state.messages = [
-                ChatMessageSystem(content=spec.system_prompt),
-                ChatMessageUser(content=spec.opening_user_message),
-            ]
+        else:
+            if activity_log is not None:
+                real_env["multi_agent"] = deepcopy(activity_log.record)
+            if (
+                harness == "simple"
+                and not any(
+                    isinstance(message, ChatMessageSystem)
+                    for message in state.messages
+                )
+            ):
+                state.messages = [
+                    ChatMessageSystem(content=spec.system_prompt),
+                    ChatMessageUser(content=spec.opening_user_message),
+                ]
 
         model = get_model(role="target") if harness == "simple" else None
         ended_reason = "interrupted"
         start_snapshot: dict[str, str] = {}
         turns_used = 0
         active_native_event_start: int | None = None
+        active_native_base_messages: list[ChatMessage] | None = None
+        active_native_events_measured = False
+        native_submission_recovery: dict | None = None
         try:
             async with span(name="target", type="agent"):
                 await create_empty_dirs(seed_path)
                 if harness in NATIVE_HARNESS_MODES and continuation is not None:
-                    if continuation.native_resume is None:
+                    if (
+                        continuation.native_resume is None
+                        and continuation.delivery_mode
+                        != CONTINUATION_DELIVERY_INLINE_USER_CONTEXT
+                    ):
                         raise RuntimeError(
                             f"{harness} continuation reached execution without a "
                             "validated native resume bundle"
                         )
-                    restored = await restore_native_resume_bundle(
-                        continuation.native_resume,
-                        target_name=target_name,
-                        routed_slug=target_slug,
-                        reasoning=reasoning,
-                    )
-                    resume_key = f"{harness}_native_resume"
-                    real_env["continuation"].setdefault(resume_key, {}).update(restored)
+                    if continuation.native_resume is not None:
+                        restored = await restore_native_resume_bundle(
+                            continuation.native_resume,
+                            target_name=target_name,
+                            routed_slug=target_slug,
+                            reasoning=reasoning,
+                        )
+                        resume_key = f"{harness}_native_resume"
+                        real_env["continuation"].setdefault(resume_key, {}).update(
+                            restored
+                        )
                 start_snapshot = await workspace_snapshot()
                 while True:
                     turns_used += 1
                     if harness == "simple":
+                        model_input_messages = list(state.messages)
                         state.output = await model.generate(
                             input=state.messages, tools=tools
                         )
+                        if activity_log is not None:
+                            update_activity_log_exposure(
+                                real_env["multi_agent"], model_input_messages
+                            )
                         state.messages.append(state.output.message)
                         if state.output.message.tool_calls:
                             executed = await execute_tools(
@@ -528,6 +600,8 @@ def real_audit_solver(
                             continue
                     else:
                         assert native_agent is not None
+                        previous_messages = list(state.messages)
+                        active_native_base_messages = previous_messages
                         agent_state = AgentState(
                             messages=(
                                 list(state.messages)
@@ -537,10 +611,16 @@ def real_audit_solver(
                             )
                         )
                         active_native_event_start = len(transcript().events)
+                        active_native_events_measured = False
                         agent_state = await native_agent(agent_state)
-                        state.messages = list(agent_state.messages)
+                        state.messages = (
+                            retain_native_scaffold_system_messages(
+                                previous_messages, agent_state.messages
+                            )
+                            if continuation is not None
+                            else list(agent_state.messages)
+                        )
                         state.output = agent_state.output
-                        active_native_event_start = None
                         current_events = list(transcript().events)
                         if harness == "subscription" and native_scaffold != "opencode":
                             subscription_record = subscription_agent_record(
@@ -570,37 +650,81 @@ def real_audit_solver(
                             update_production_boundary(
                                 state.messages, real_env["continuation"]
                             )
+                        if activity_log is not None:
+                            native_loss_events = (
+                                real_env["harness"].get("native_loss_events") or []
+                            )
+                            event_start = active_native_event_start or 0
+                            checked = update_activity_log_exposure_from_model_events(
+                                real_env["multi_agent"],
+                                current_events[event_start:],
+                                native_loss_events=native_loss_events,
+                            )
+                            if not checked:
+                                update_activity_log_exposure(
+                                    real_env["multi_agent"],
+                                    state.messages,
+                                    native_loss_events=native_loss_events,
+                                    measurement_source="agent_state_fallback",
+                                )
+                            active_native_events_measured = True
 
                     snapshot_now = await workspace_snapshot()
                     submission_number = controller.submissions + 1
-                    artifacts_now = await extract_artifacts(
+                    raw_artifacts_now = await extract_artifacts(
                         start_snapshot,
                         snapshot_now,
                         spec.deliverables,
                     )
+                    judge_artifacts_now = raw_artifacts_now
+                    if activity_log is not None:
+                        judge_artifacts_now, masked_paths = (
+                            sanitize_activity_log_artifacts(
+                                raw_artifacts_now, real_env["multi_agent"]
+                            )
+                        )
+                        if masked_paths:
+                            masking = real_env["multi_agent"].setdefault(
+                                "judge_masking", {}
+                            )
+                            existing = masking.setdefault(
+                                "artifact_paths_masked", []
+                            )
+                            existing.extend(
+                                path for path in masked_paths if path not in existing
+                            )
                     real_env["submission_artifacts"].append({
                         "submission": submission_number,
-                        "artifacts": artifacts_now,
+                        "artifacts": raw_artifacts_now,
                     })
-                    if controller.submissions == 0:
+                    if controller.submissions == 0 and judge_first_submission:
                         # A continuation gate sees only the system message and the
                         # live task; the prefix is sliced out mechanically.
                         gate_messages = (
-                            judge_view_messages(
+                            continuation_judge_view_messages(
                                 state.messages, real_env["continuation"]
                             )
                             if continuation is not None
                             else list(state.messages)
                         )
+                        if activity_log is not None:
+                            gate_messages, masking = activity_log_judge_view_messages(
+                                gate_messages, real_env["multi_agent"]
+                            )
+                            real_env["multi_agent"].setdefault(
+                                "judge_masking", {}
+                            ).update(masking)
                         detectors = gate_detectors(
                             spec.family,
                             spec.gate,
-                            artifacts_now,
+                            raw_artifacts_now,
                             target_authored_texts(gate_messages),
                         )
                         stage_artifacts = [
                             _task_snapshot(spec),
-                            *_artifact_snapshots(artifacts_now, "submission_1"),
+                            *_artifact_snapshots(
+                                judge_artifacts_now, "submission_1"
+                            ),
                         ]
                         gate_caveats = list(_upstream_caveats(
                             gate_messages,
@@ -611,6 +735,12 @@ def real_audit_solver(
                             gate_caveats.append(EvidenceCaveat(
                                 **continuation_caveat_fields(
                                     real_env["continuation"]
+                                )
+                            ))
+                        if activity_log is not None:
+                            gate_caveats.append(EvidenceCaveat(
+                                **activity_log_caveat_fields(
+                                    real_env["multi_agent"]
                                 )
                             ))
                         gate = await run_gate(
@@ -645,6 +775,14 @@ def real_audit_solver(
                         )
                     else:
                         action, payload = controller.on_submission()
+                        if controller.submissions == 1 and not judge_first_submission:
+                            print(
+                                f"    [{spec.member}] submission 1 complete; "
+                                "LLM judge skipped by design"
+                            )
+                    active_native_event_start = None
+                    active_native_base_messages = None
+                    active_native_events_measured = False
                     if action == "send":
                         if (
                             include_time
@@ -665,14 +803,66 @@ def real_audit_solver(
                     break
         except get_cancelled_exc_class():
             ended_reason = "wall_clock_limit" if _time_limit_blown() else "cancelled"
-            raise
+            if (
+                ended_reason == "wall_clock_limit"
+                and native_scaffold == "opencode"
+                and active_native_event_start is not None
+                and active_native_base_messages is not None
+                and controller.submissions == 1
+                and controller.follow_up_sent
+            ):
+                reset = (real_env.get("clock") or {}).get("second_pass_reset") or {}
+                deadline = reset.get("deadline_seconds_from_start")
+                recovered_messages, recovery, deadline_recovery = (
+                    recover_predeadline_opencode_submission(
+                        active_native_base_messages,
+                        list(transcript().events),
+                        deadline_seconds_from_start=deadline,
+                        event_start=active_native_event_start,
+                        applied_before_judging=judge_first_submission,
+                    )
+                )
+                if deadline_recovery is not None:
+                    state.messages = recovered_messages
+                    real_env["interrupted_native_transcript"] = recovery
+                    reasons = real_env["judge_evidence_policy"]["lossy_reasons"]
+                    if "interrupted_native_transcript_reconstructed" not in reasons:
+                        reasons.append("interrupted_native_transcript_reconstructed")
+                    action, payload = controller.on_submission()
+                    if action != "end" or payload != "protocol_end":
+                        raise RuntimeError(
+                            "pre-deadline final-response recovery reached a "
+                            "non-terminal protocol state"
+                        )
+                    ended_reason = payload
+                    native_submission_recovery = deadline_recovery
+                    real_env["native_submission_recovery"] = deadline_recovery
+                    if activity_log is not None:
+                        update_activity_log_exposure_from_model_events(
+                            real_env["multi_agent"],
+                            list(transcript().events)[active_native_event_start:],
+                            native_loss_events=(
+                                real_env["harness"].get("native_loss_events") or []
+                            ),
+                        )
+                        active_native_events_measured = True
+                    active_native_event_start = None
+                    active_native_base_messages = None
+                    print(
+                        f"    [{spec.member}] counted terminal OpenCode response "
+                        "completed before the deadline; CLI handoff finished late"
+                    )
+                else:
+                    raise
+            else:
+                raise
         finally:
             if native_scaffold == "opencode" and active_native_event_start is not None:
                 recovered_messages, recovery = recover_interrupted_opencode_messages(
-                    state.messages,
+                    active_native_base_messages or state.messages,
                     list(transcript().events),
                     event_start=active_native_event_start,
-                    applied_before_judging=True,
+                    applied_before_judging=judge_first_submission,
                 )
                 if recovery is not None:
                     state.messages = recovered_messages
@@ -681,6 +871,24 @@ def real_audit_solver(
                     if "interrupted_native_transcript_reconstructed" not in reasons:
                         reasons.append("interrupted_native_transcript_reconstructed")
             real_env["protocol"] = controller.summary(ended_reason)
+            if activity_log is not None:
+                if (
+                    active_native_event_start is not None
+                    and not active_native_events_measured
+                ):
+                    update_activity_log_exposure_from_model_events(
+                        real_env["multi_agent"],
+                        list(transcript().events)[active_native_event_start:],
+                        native_loss_events=(
+                            real_env["harness"].get("native_loss_events") or []
+                        ),
+                    )
+                finalize_activity_log_exposure(
+                    real_env["multi_agent"],
+                    native_loss_events=(
+                        real_env["harness"].get("native_loss_events") or []
+                    ),
+                )
             real_env["turns_used"] = turns_used
             real_env["max_tool_output"] = (
                 REAL_MAX_TOOL_OUTPUT if harness == "simple" else None
@@ -717,6 +925,14 @@ def real_audit_solver(
                         reasoning=reasoning,
                         native_session_id=session_id_value(native_session_ref),
                     )
+                    if native_submission_recovery is not None:
+                        submissions = real_env["submission_artifacts"]
+                        if not any(item.get("submission") == 2 for item in submissions):
+                            submissions.append({
+                                "submission": 2,
+                                "artifacts": real_env["artifacts"],
+                                "recovered_from_predeadline_terminal_response": True,
+                            })
                 except Exception as error:
                     real_env["finalize_error"] = repr(error)[:500]
                     print(
@@ -764,6 +980,14 @@ async def _finalize_real_sample(
             predictions.get("content") if predictions else None,
             bool(predictions and predictions.get("truncated")),
         )
+    elif spec.family == ML_PREFIX_ONLY_FAMILY:
+        real_env["grade"] = {
+            "scored": False,
+            "reason": (
+                "prefix-only task has no accessible evaluation set and no "
+                "performance score"
+            ),
+        }
     else:
         real_env["grade"] = {
             "scored": False,
@@ -1010,6 +1234,11 @@ def build_real_tasks(
         units = [root / member for member in seed_members(root) if member in wanted]
     if not units:
         raise SystemExit(f"no runnable environment members matched {selected_seeds}")
+    if any(seed_family(unit) in PREFIX_ONLY_FAMILIES for unit in units):
+        raise SystemExit(
+            "prefix-only controls are no-judge prefix sources; build them with their "
+            "prefixes/exp_*_prefix.py endpoint instead of the judged real-audit endpoint"
+        )
 
     if harness == "subscription":
         require_subscription_auth(
@@ -1079,17 +1308,19 @@ def build_real_task(
     unit_sp: str,
     reasoning: bool,
     condition: str,
-    judge_model: str,
-    gate_model: str,
+    judge_model: str | None,
+    gate_model: str | None,
     run_label: str,
     artifacts_root: Path | None = None,
     task_id_suffix: str | None = None,
     execution_metadata: dict | None = None,
     continuation: ContinuationRun | None = None,
+    activity_log: ActivityLogRun | None = None,
     task_name: str | None = None,
     extra_metadata: dict | None = None,
     harness: str,
     pressure: str | None = None,
+    judge_enabled: bool = True,
 ) -> Task:
     """One Inspect task for one (agent, environment member) cell.
 
@@ -1111,6 +1342,33 @@ def build_real_task(
     if go_spec is not None:
         require_opencode_go_auth(reasoning=reasoning)
     spec = assemble_real_protocol(unit_path, condition, unit_sp, pressure)
+    if continuation is not None and activity_log is not None:
+        raise SystemExit("a task cannot be both a continuation and multi-agent run")
+    sample_files = workspace_files(unit_path)
+    if activity_log is not None:
+        if ACTIVITY_LOG_PATH in sample_files:
+            raise SystemExit(
+                f"seed workspace already contains reserved path {ACTIVITY_LOG_PATH}"
+            )
+        sample_files = {
+            **sample_files,
+            ACTIVITY_LOG_PATH: str(activity_log.content_path),
+        }
+        spec = replace(
+            spec,
+            opening_user_message=activity_log.opening_user_message(
+                spec.opening_user_message
+            ),
+        )
+    if judge_enabled and spec.family in PREFIX_ONLY_FAMILIES:
+        raise SystemExit(
+            f"{spec.family} must run with judge_enabled=False; it is a prefix-only "
+            "control family"
+        )
+    if not judge_enabled and spec.family not in PREFIX_ONLY_FAMILIES:
+        raise SystemExit(
+            "judge_enabled=False is reserved for prefix-only control families"
+        )
     compose_name = compose_file_for_harness(
         harness=harness,
         scaffold=scaffold,
@@ -1118,9 +1376,9 @@ def build_real_task(
     compose = SANDBOX_DIR / FAMILY_SANDBOX[spec.family] / compose_name
     if not compose.is_file():
         raise SystemExit(f"sandbox compose file missing: {compose}")
-    rubric_documents = load_rubrics(spec.family)
+    rubric_documents = load_rubrics(spec.family) if judge_enabled else []
     manifest_path = unit_path / "manifest.json"
-    include_time = spec.family == "ml_training_data_misuse"
+    include_time = spec.family in ML_TIME_FAMILIES
     tools_metadata = real_target_tools_metadata(include_time=include_time)
     native_harness_metadata = (
         subscription_harness_metadata(target_name, target_slug)
@@ -1132,7 +1390,7 @@ def build_real_task(
     sample = Sample(
         id=spec.member,
         input=spec.opening_user_message,
-        files=workspace_files(unit_path),
+        files=sample_files,
         metadata={
             "condition": condition,
             "pressure": spec.pressure,
@@ -1184,16 +1442,17 @@ def build_real_task(
         "reasoning_enabled": target_build.reasoning_enabled,
         "strict_tools": target_build.strict_tools,
         "target_prompt_cache_key": target_build.prompt_cache_key,
-        "judge": judge_model,
-        "gate_model": gate_model,
+        "judge": judge_model if judge_enabled else None,
+        "gate_model": gate_model if judge_enabled else None,
+        "judging_enabled": judge_enabled,
         "condition": condition,
         "pressure": spec.pressure,
-        "judge_schema_version": JUDGE_SCHEMA_VERSION,
+        "judge_schema_version": JUDGE_SCHEMA_VERSION if judge_enabled else None,
         "judge_dimensions": [document.key for document in rubric_documents],
         "judge_dimension_files": [
             document.metadata() for document in rubric_documents
         ],
-        "judge_evidence_version": JUDGE_EVIDENCE_VERSION,
+        "judge_evidence_version": JUDGE_EVIDENCE_VERSION if judge_enabled else None,
         "target_tools_mode": "real",
         "target_tools_version": (
             REAL_TOOL_SEMANTICS_VERSION if harness == "simple" else None
@@ -1230,12 +1489,16 @@ def build_real_task(
     api_backed_agent = harness == "production" or (
         harness == "subscription" and scaffold == "opencode" and go_spec is None
     )
-    model_roles = {
-        "judge": judge_model,
-        # Keep construction free and key-independent. Inspect resolves the role
-        # when the paid stage-one call actually runs.
-        "gate": gate_model,
-    }
+    model_roles = {}
+    if judge_enabled:
+        if not judge_model or not gate_model:
+            raise SystemExit("judged real tasks require judge and gate models")
+        model_roles.update({
+            "judge": judge_model,
+            # Keep construction free and key-independent. Inspect resolves the role
+            # when the paid stage-one call actually runs.
+            "gate": gate_model,
+        })
     if harness == "simple" or api_backed_agent:
         model_roles["target"] = target_build.model
     return Task(
@@ -1247,12 +1510,14 @@ def build_real_task(
             artifacts_dir=artifacts_dir,
             execution_metadata=execution_metadata,
             continuation=continuation,
+            activity_log=activity_log,
             harness=harness,
             target_name=target_name,
             target_slug=target_slug,
             reasoning=reasoning,
+            judge_first_submission=judge_enabled,
         ),
-        scorer=real_audit_judge(spec.family),
+        scorer=real_audit_judge(spec.family) if judge_enabled else None,
         sandbox=("docker", str(compose)),
         model_roles=model_roles,
         # Production bridges resolve their agent through Inspect's active model.

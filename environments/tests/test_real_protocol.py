@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import pathlib
 import sys
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -86,6 +87,11 @@ def test_opencode_uses_models_dev_ids_without_changing_the_host_model(
     assert opencode_scaffold_model(target_name, routed_slug) == expected
     metadata = production_harness_metadata(target_name, routed_slug)
     assert metadata["scaffold_model_config"] == expected
+    assert metadata["prompt_transport"] == {
+        "method": "stdin",
+        "format": "opencode_1.18.14_positional_message_v1",
+        "argv_contains_prompt": False,
+    }
 
 
 def test_production_agents_use_exact_pins_and_disable_native_network_tools() -> None:
@@ -106,11 +112,17 @@ def test_production_agents_use_exact_pins_and_disable_native_network_tools() -> 
     assert codex.call_args.kwargs["web_search"] == "disabled"
     assert codex.call_args.kwargs["home_dir"] == "/root/.codex"
 
-    with patch("inspect_swe.opencode", return_value="opencode-agent") as opencode:
+    with (
+        patch(
+            "exp_target_harness.install_inspect_swe_opencode_stdin_transport"
+        ) as install_stdin,
+        patch("inspect_swe.opencode", return_value="opencode-agent") as opencode,
+    ):
         agent, session_id = build_production_agent(
             "deepseek-v4-pro",
             "openrouter/deepseek/deepseek-v4-pro-20260423",
         )
+    install_stdin.assert_called_once_with()
     assert agent == "opencode-agent" and session_id is None
     assert opencode.call_args.kwargs["version"] == PRODUCTION_SCAFFOLD_VERSIONS["opencode"]
     assert opencode.call_args.kwargs["opencode_model"] == (
@@ -122,13 +134,19 @@ def test_production_agents_use_exact_pins_and_disable_native_network_tools() -> 
     assert inline["permission"] == {"webfetch": "deny", "websearch": "deny"}
 
     go_model = object()
-    with patch("inspect_swe.opencode", return_value="go-agent") as opencode:
+    with (
+        patch(
+            "exp_target_harness.install_inspect_swe_opencode_stdin_transport"
+        ) as install_stdin,
+        patch("inspect_swe.opencode", return_value="go-agent") as opencode,
+    ):
         agent, session_id = build_production_agent(
             "qwen3.7-max",
             "openrouter/qwen/qwen3.7-max",
             opencode_model_override="opencode-go/qwen3.7-max",
             opencode_model_aliases={"qwen3.7-max": go_model},
         )
+    install_stdin.assert_called_once_with()
     assert agent == "go-agent" and session_id is None
     assert opencode.call_args.kwargs["opencode_model"] == (
         "opencode-go/qwen3.7-max"
@@ -217,6 +235,137 @@ def test_controller_stops_after_the_single_deterministic_follow_up() -> None:
     assert clean.on_submission() == ("end", "protocol_end")
     assert clean.summary("protocol_end")["submissions"] == 2
     assert "finalize_sent" not in clean.summary("protocol_end")
+
+
+@pytest.mark.anyio
+async def test_predeadline_opencode_final_counts_when_cli_handoff_finishes_late() -> None:
+    from inspect_ai.agent import AgentState
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, ModelOutput
+
+    from exp_real_audit import real_audit_solver
+
+    class HandoffCancelled(Exception):
+        pass
+
+    transcript = SimpleNamespace(events=[])
+    calls = 0
+
+    async def native_agent(agent_state):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            output = ModelOutput.from_content("mock/glm", "First pass complete.")
+            returned = AgentState(
+                messages=[
+                    *agent_state.messages,
+                    ChatMessageAssistant(content="First pass complete."),
+                ]
+            )
+            returned.output = output
+            return returned
+
+        output = ModelOutput.from_content("mock/glm", "Second pass complete.")
+        output.time = 2.0
+        transcript.events.append(SimpleNamespace(
+            event="model",
+            role="target",
+            model="mock/glm",
+            input=list(agent_state.messages),
+            output=output,
+            uuid="terminal-event",
+            timestamp="2026-08-14T12:00:00Z",
+            working_start=10.0,
+            working_time=None,
+            pending=None,
+            error=None,
+            retries=None,
+        ))
+        raise HandoffCancelled
+
+    @asynccontextmanager
+    async def no_op_span(**_kwargs):
+        yield
+
+    async def finalize(
+        _state, _spec, real_env, _start_snapshot, _artifacts_dir, **_kwargs
+    ):
+        real_env["artifacts"] = {"files": [], "lossy_reasons": []}
+        real_env["grade"] = {
+            "scored": False,
+            "deliverables": {"REPORT.md": True, "models/final/": True},
+            "all_present": True,
+        }
+
+    spec = RealProtocolSpec(
+        version=ML_TIME_PROTOCOL_VERSION,
+        family="ml_prefix_only",
+        member="fraud_detection",
+        pressure=None,
+        system_prompt="",
+        opening_user_message="OPEN",
+        follow_up="FOLLOW UP",
+        deliverables=("REPORT.md", "models/final/"),
+        gate=GateConfig(),
+        task_readme="README",
+        source_provenance={},
+    )
+    with (
+        patch("exp_real_audit.production_scaffold_for_target", return_value="opencode"),
+        patch(
+            "exp_real_audit.build_production_agent",
+            return_value=(native_agent, None),
+        ),
+        patch("exp_real_audit.transcript", return_value=transcript),
+        patch("exp_real_audit.span", side_effect=no_op_span),
+        patch("exp_real_audit.create_empty_dirs", new=AsyncMock()),
+        patch("exp_real_audit.workspace_snapshot", new=AsyncMock(return_value={})),
+        patch(
+            "exp_real_audit.extract_artifacts",
+            new=AsyncMock(return_value={"files": [], "lossy_reasons": []}),
+        ),
+        patch("exp_real_audit.update_resolved_scaffold_version", new=AsyncMock()),
+        patch("exp_real_audit.update_scaffold_loss_events", new=AsyncMock()),
+        patch(
+            "exp_real_audit.reset_sample_time_remaining",
+            return_value={
+                "elapsed_seconds_at_reset": 0.0,
+                "remaining_seconds_after_reset": 12.5,
+                "deadline_seconds_from_start": 12.5,
+            },
+        ),
+        patch("exp_real_audit.get_cancelled_exc_class", return_value=HandoffCancelled),
+        patch("exp_real_audit._time_limit_blown", return_value=True),
+        patch("exp_real_audit._finalize_real_sample", side_effect=finalize),
+    ):
+        solve = real_audit_solver(
+            spec=spec,
+            seed_path="unused",
+            condition="allow",
+            harness="production",
+            target_name="glm-5.1",
+            target_slug="mock/glm",
+            reasoning=True,
+            judge_first_submission=False,
+        )
+        state = SimpleNamespace(
+            messages=[ChatMessageUser(content="OPEN")],
+            output=None,
+            metadata={},
+        )
+        result = await solve(state, None)
+
+    real_env = result.metadata["real_env"]
+    assert real_env["protocol"] == {
+        "submissions": 2,
+        "first_gate_verdict": None,
+        "follow_up_sent": True,
+        "ended_reason": "protocol_end",
+    }
+    assert real_env["native_submission_recovery"]["accepted_as_submission"] is True
+    assert real_env["native_submission_recovery"][
+        "margin_before_deadline_seconds"
+    ] == 0.5
+    assert [item["submission"] for item in real_env["submission_artifacts"]] == [1, 2]
 
 
 def test_ml_protocol_comes_only_from_local_pinned_sources() -> None:

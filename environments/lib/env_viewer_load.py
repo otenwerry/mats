@@ -17,6 +17,7 @@ would silently change the meaning of historical data.
 from __future__ import annotations
 
 from copy import deepcopy
+import gc
 import json
 import pickle
 import re
@@ -1399,6 +1400,197 @@ def link_rejudge_sources(audits: list[dict]) -> None:
             }
 
 
+_PROMOTED_JUDGMENT_FIELDS = (
+    "judge",
+    "judgment_role",
+    "score_key",
+    "score_value",
+    "score_metadata",
+    "scores",
+    "summary",
+    "highlights",
+    "explanation",
+    "judgment",
+    "judge_failure",
+)
+
+_SUPERSEDED_STATUS_FIELDS = (
+    "judgment_transcript_coverage",
+    "load_issues",
+    "flags",
+    "mechanical_status",
+    "benchmark_eligible",
+    "prefix_eligible",
+    "integrity_status",
+    "integrity_issues",
+    "prefix_issues",
+    "status_tags",
+)
+
+_JUDGED_MESSAGE_FIELDS = (
+    "role",
+    "text",
+    "reasoning",
+    "other_content_blocks",
+    "tool_calls",
+    "tool_call_id",
+    "function",
+    "error",
+    "source_id",
+)
+
+
+def _judged_message_sequence(audit: dict) -> list[dict]:
+    return [
+        {
+            field: deepcopy(message.get(field))
+            for field in _JUDGED_MESSAGE_FIELDS
+            if field in message
+        }
+        for message in audit.get("messages") or []
+    ]
+
+
+def promote_rejudge_judgments(
+    audits: list[dict], promoted_run_names: Iterable[str]
+) -> int:
+    """Make explicitly selected rejudgments canonical on their source rows.
+
+    Promotion is deliberately fail-closed. A selected run must be present, contain
+    only successful structured rejudgments, resolve one-to-one onto source rows whose
+    stored judges missed reconstructed messages, and carry the exact same judged
+    message sequence. Raw Inspect logs are never changed; the superseded fields remain
+    attached to the viewer audit for provenance and judge-comparison rendering.
+    """
+
+    selected = {str(name) for name in promoted_run_names}
+    if not selected:
+        return 0
+
+    present = {
+        str(audit.get("mode") or "")
+        for audit in audits
+        if str(audit.get("mode") or "") in selected
+    }
+    missing = sorted(selected - present)
+    if missing:
+        raise ValueError(
+            "promoted rejudge run directories are not loaded: " + ", ".join(missing)
+        )
+
+    originals_by_id = {
+        int(audit["id"]): audit
+        for audit in audits
+        if not audit.get("retrospective_rejudge") and audit.get("id") is not None
+    }
+    claimed_sources: dict[int, str] = {}
+    promoted = 0
+    for rejudge in audits:
+        mode = str(rejudge.get("mode") or "")
+        if mode not in selected:
+            continue
+        retrospective = rejudge.get("retrospective_rejudge")
+        if not isinstance(retrospective, dict):
+            raise ValueError(
+                f"promoted rejudge run {mode} contains a non-rejudge trajectory"
+            )
+        source_id = rejudge.get("source_trajectory_id")
+        original = originals_by_id.get(int(source_id)) if source_id is not None else None
+        if original is None:
+            raise ValueError(
+                f"promoted rejudge trajectory {rejudge.get('id')} has no loaded source"
+            )
+        if int(source_id) in claimed_sources:
+            raise ValueError(
+                "multiple promoted rejudgments target source trajectory "
+                f"{source_id}: {claimed_sources[int(source_id)]}, {mode}"
+            )
+        judgment = rejudge.get("judgment") or {}
+        envelope = judgment.get("envelope") or {}
+        raw_result = judgment.get("raw_result")
+        if not isinstance(raw_result, dict):
+            raw_result = envelope.get("result")
+        if (
+            rejudge.get("judge_failure")
+            or judgment.get("format") != "structured"
+            or not isinstance(raw_result, dict)
+            or envelope.get("post_validation") != "passed"
+        ):
+            raise ValueError(
+                f"promoted rejudge trajectory {rejudge.get('id')} has no valid judgment"
+            )
+        coverage = original.get("judgment_transcript_coverage") or {}
+        if not coverage.get("stored_judgment_predates_reconstruction"):
+            raise ValueError(
+                f"source trajectory {source_id} has no superseded transcript judgment"
+            )
+        if _judged_message_sequence(original) != _judged_message_sequence(rejudge):
+            raise ValueError(
+                f"promoted rejudge trajectory {rejudge.get('id')} does not match "
+                f"source trajectory {source_id}'s judged messages"
+            )
+
+        superseded_fields = {
+            field: deepcopy(original.get(field))
+            for field in (
+                *_PROMOTED_JUDGMENT_FIELDS,
+                *_SUPERSEDED_STATUS_FIELDS,
+            )
+        }
+        original["superseded_judgment"] = {
+            "reason": "stored_judgment_missed_recovered_messages",
+            "replaced_by_rejudge_run": mode,
+            "replaced_by_rejudge_trajectory_id": rejudge.get("id"),
+            "audit_fields": superseded_fields,
+        }
+        for field in _PROMOTED_JUDGMENT_FIELDS:
+            original[field] = deepcopy(rejudge.get(field))
+        original["judgment_role"] = "promoted_retrospective_rejudge"
+        original["promoted_rejudge"] = {
+            "run": mode,
+            "trajectory_id": rejudge.get("id"),
+            "source_key": retrospective.get("source_key"),
+            "judge": rejudge.get("judge"),
+            "judging_method_sha256": envelope.get("judge_method_sha256"),
+            "campaign_fingerprint": retrospective.get("campaign_fingerprint"),
+            "reason": "stored_judgment_missed_recovered_messages",
+        }
+        message_count = len(original.get("messages") or [])
+        original["judgment_transcript_coverage"] = {
+            "complete": True,
+            "stored_judgment_predates_reconstruction": False,
+            "messages_seen_by_canonical_judgment": message_count,
+            "messages_shown_after_reconstruction": message_count,
+            "recovered_messages_not_seen_by_canonical_judgment": 0,
+            "judgment_source": "promoted_retrospective_rejudge",
+        }
+        original["load_issues"] = [
+            issue for issue in original.get("load_issues") or []
+            if not (
+                isinstance(issue, dict)
+                and issue.get("kind")
+                == "stored_judgment_missing_recovered_messages"
+            )
+        ]
+        stored_integrity = deepcopy(original.get("stored_integrity") or {})
+        stored_integrity["issues"] = [
+            issue for issue in stored_integrity.get("issues") or []
+            if str(issue) != "judge_missing_recovered_messages"
+        ]
+        original["stored_integrity"] = stored_integrity
+        real_env = deepcopy(original.get("real_env") or {})
+        real_env["final_judgment"] = {
+            **deepcopy(envelope),
+            "result": deepcopy(raw_result),
+        }
+        original["real_env"] = real_env
+        finalize_audit_integrity(original)
+
+        claimed_sources[int(source_id)] = mode
+        promoted += 1
+    return promoted
+
+
 def attach_remote_compute(mode_dir: Path, audits: list[dict]) -> list[dict]:
     """Attach final VM-cost records from a verified imported AWS campaign."""
 
@@ -1566,23 +1758,84 @@ async def load_mode(
     return audits
 
 
+def _prune_superseded_mode_pickles(
+    mode_dir: Path, cache_root: Path | None
+) -> None:
+    """Remove whole-run caches after the bounded store has the same run."""
+
+    if cache_root is None or not cache_root.is_dir():
+        return
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", mode_dir.name)
+    for path in cache_root.glob(f"mode__{safe}__*.pkl"):
+        path.unlink(missing_ok=True)
+
+
 async def load_all(
-    logs_root: Path, *, cache_root: Path | None = None, use_cache: bool = True
+    logs_root: Path, *, cache_root: Path | None = None, use_cache: bool = True,
+    audit_store: Any | None = None, progress: bool = False,
 ) -> tuple[list[dict], list[dict]]:
-    """Load every run directory, returning visible per-directory errors separately."""
+    """Load every run directory, returning visible per-directory errors separately.
+
+    When ``audit_store`` is supplied, only compact index/aggregate records stay in
+    memory.  Full normalized audits are persisted one by one for later detail-page
+    hydration.  The ordinary list-returning behavior remains available to loader tests
+    and small callers.
+    """
     if not logs_root.is_dir():
         return [], []
     audits: list[dict] = []
     errors: list[dict] = []
-    for mode_dir in sorted(path for path in logs_root.iterdir() if path.is_dir()):
-        try:
-            audits.extend(await load_mode(
-                mode_dir, cache_root=cache_root, use_cache=use_cache
-            ))
-        except Exception as error:  # one malformed run must not hide every healthy run
-            errors.append({
-                "mode": mode_dir.name,
-                "error_type": type(error).__name__,
-                "error": str(error),
-            })
+    mode_dirs = sorted(path for path in logs_root.iterdir() if path.is_dir())
+    for mode_index, mode_dir in enumerate(mode_dirs, start=1):
+        signature = _mode_signature(mode_dir)
+        cached = (
+            audit_store.cached_mode(mode_dir.name, signature)
+            if audit_store is not None and use_cache
+            else None
+        )
+        if cached is not None:
+            audits.extend(cached)
+            _prune_superseded_mode_pickles(mode_dir, cache_root)
+        else:
+            try:
+                loaded = await load_mode(
+                    mode_dir,
+                    # The bounded store supersedes the old whole-mode pickle.  Writing
+                    # both would retain two multi-gigabyte viewer caches on disk.
+                    cache_root=None if audit_store is not None else cache_root,
+                    use_cache=False if audit_store is not None else use_cache,
+                )
+            except MemoryError:
+                raise
+            except Exception as error:  # one malformed run must not hide healthy runs
+                errors.append({
+                    "mode": mode_dir.name,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                })
+            else:
+                if audit_store is None:
+                    audits.extend(loaded)
+                else:
+                    # Store failures are fatal. Continuing after a disk/database
+                    # error could publish a viewer that silently dropped healthy data.
+                    audits.extend(
+                        audit_store.replace_mode(mode_dir.name, signature, loaded)
+                    )
+                    _prune_superseded_mode_pickles(mode_dir, cache_root)
+                    del loaded
+                    gc.collect()
+        if progress and (mode_index % 10 == 0 or mode_index == len(mode_dirs)):
+            print(
+                f"viewer: loaded {mode_index}/{len(mode_dirs)} run directories "
+                f"({len(audits):,} compact trajectories, {len(errors)} errors)",
+                flush=True,
+            )
+    if audit_store is not None:
+        audit_store.prune_modes({path.name for path in mode_dirs})
+        if cache_root is not None and cache_root.is_dir():
+            # Every active run is now present in the bounded store. Any remaining
+            # whole-mode files belong to directories that were removed or renamed.
+            for path in cache_root.glob("mode__*.pkl"):
+                path.unlink(missing_ok=True)
     return audits, errors

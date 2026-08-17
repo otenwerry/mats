@@ -62,6 +62,10 @@ Flags:
   --vm-concurrency / --aws-region / --aws-instance-type / --aws-bucket /
   --aws-secret-env        as in exp_real_audit_pipeline.
   --resume-campaign=<id> / --retry-failed=<id>  continuation campaigns supported.
+  --retry-pipeline-failures  with --retry-failed, also retry completed cells whose
+                          stored pipeline exit was nonzero or missing.
+  --allow-incomplete-prefixes  permit ML prefix-only controls missing REPORT.md or
+                          models/final/; the override is recorded in run provenance.
   --skip-viewer           don't rebuild the viewer at the end.
   --dry-run               FREE: validate + print the full plan (local), or the plan
                           plus the AWS campaign preflight (aws). No model calls.
@@ -137,7 +141,12 @@ _VALUE_FLAGS = {
     "--aws-region", "--aws-instance-type", "--aws-bucket", "--aws-secret-env",
     "--resume-campaign", "--retry-failed",
 }
-_SWITCH_FLAGS = {"--skip-viewer", "--dry-run"}
+_SWITCH_FLAGS = {
+    "--skip-viewer",
+    "--dry-run",
+    "--allow-incomplete-prefixes",
+    "--retry-pipeline-failures",
+}
 _REJECTED_FLAGS = {
     "--reasoning": (
         "--reasoning is not a continuation flag: each prefix records the reasoning "
@@ -244,6 +253,16 @@ def _parse_args() -> dict:
         if (resolved_seed_path / "manifest.json").is_file()
         else resolved_seed_path.name
     )
+    if family in {"ml_prefix_only", "p_hacking_prefix_only"}:
+        endpoint = (
+            "prefixes/exp_ml_prefix.py"
+            if family == "ml_prefix_only"
+            else "prefixes/exp_p_hacking_prefix.py"
+        )
+        raise SystemExit(
+            f"{family} is a prefix source, not a continuation destination; "
+            f"generate it with {endpoint} and select a judged new task"
+        )
     pressure = resolve_pressure(_arg("--pressure"), family)
     compute = _arg("--compute") or "aws"
     if compute not in {"aws", "local"}:
@@ -282,6 +301,7 @@ def _parse_args() -> dict:
             if name.strip()
         ],
         "dry_run": "--dry-run" in sys.argv,
+        "allow_incomplete_prefixes": "--allow-incomplete-prefixes" in sys.argv,
         # Reasoning is per-prefix; this run-level slot only fills the stored AWS
         # pipeline_config shape.
         "reasoning": None,
@@ -293,7 +313,10 @@ def _load_plan(cfg: dict):
 
     print("[plan] loading prefixes, validating invariants, building cells ...")
     specs = load_prefix_specs(
-        cfg["prefix_ids"], cfg["prefix_files"], harness=cfg["harness"]
+        cfg["prefix_ids"],
+        cfg["prefix_files"],
+        harness=cfg["harness"],
+        allow_incomplete_prefixes=cfg["allow_incomplete_prefixes"],
     )
     cells = build_continuation_cells(specs, cfg["seeds_path"], cfg["seeds"])
     for unit_path in {cell.unit_path for cell in cells}:
@@ -434,6 +457,10 @@ def main() -> None:
     try:
         resume_id = _arg("--resume-campaign")
         retry_id = _arg("--retry-failed")
+        if "--retry-pipeline-failures" in sys.argv and not retry_id:
+            raise SystemExit(
+                "--retry-pipeline-failures requires --retry-failed=<campaign>"
+            )
         if resume_id and retry_id:
             raise SystemExit("--resume-campaign and --retry-failed are mutually exclusive")
         if resume_id or retry_id:

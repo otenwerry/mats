@@ -52,6 +52,14 @@ def old_prefix_files(path: Path = OLD_RUNS_FILE) -> frozenset[str]:
     return _string_set(_old_manifest(path), "prefix_files", path)
 
 
+def promoted_rejudge_run_names(path: Path = OLD_RUNS_FILE) -> frozenset[str]:
+    """Rejudge runs explicitly approved to replace their source judgments."""
+
+    return _string_set(
+        _old_manifest(path), "promoted_rejudge_run_directories", path
+    )
+
+
 def old_source_run_names(path: Path = OLD_RUNS_FILE) -> frozenset[str]:
     """Original real-v* directories needed by retrospective rejudging."""
 

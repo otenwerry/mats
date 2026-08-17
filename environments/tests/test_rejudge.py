@@ -20,9 +20,19 @@ from inspect_ai.model import (
     get_model,
 )
 
-from exp_rejudge import _plan, _source_is_complete, build_rejudge_task
+from exp_rejudge import (
+    _interrupted_native_sources,
+    _plan,
+    _source_is_complete,
+    build_rejudge_task,
+)
 from env_viewer_load import sample_to_audit
-from old_runs import old_run_names, old_source_run_names, old_trajectory_keys
+from old_runs import (
+    old_run_names,
+    old_source_run_names,
+    old_trajectory_keys,
+    promoted_rejudge_run_names,
+)
 from rejudge_sources import (
     SourceTrajectory,
     discover_run_dirs,
@@ -122,6 +132,21 @@ def test_old_source_selection_uses_the_viewer_archive_manifest() -> None:
         name for name in old_run_names() if name.startswith("real-v")
     } < names
     assert old_trajectory_keys()
+    assert promoted_rejudge_run_names() == {
+        "rejudge-current-gpt-5.6-luna-fa4763116926-20260813-155538"
+    }
+
+
+def test_interrupted_native_filter_selects_only_reconstructed_sources() -> None:
+    clean = stored_source()
+    interrupted = stored_source()
+    interrupted.source["source_key"] = "interrupted"
+    interrupted.source["interrupted_native_transcript"] = {
+        "reconstructed": True,
+        "complete": False,
+    }
+
+    assert _interrupted_native_sources([clean, interrupted]) == [interrupted]
 
 
 def test_exact_input_fingerprint_tracks_current_shared_judge() -> None:

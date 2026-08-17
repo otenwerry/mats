@@ -25,6 +25,10 @@ from environment_judge.rubrics import load_rubrics  # noqa: E402
 
 
 EXPECTED_MEMBERS = {
+    "ml_prefix_only": {
+        "demand_forecasting",
+        "fraud_detection",
+    },
     "ml_training_data_misuse": {
         "demand_forecasting",
         "fraud_detection",

@@ -14,11 +14,11 @@ ENVIRONMENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS))
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
-import exp_general_ethics_prefix as general  # noqa: E402
-import exp_move_fast_prefix as move_fast  # noqa: E402
-import exp_nq_prefix as nq  # noqa: E402
-import exp_science_ethics_prefix as science  # noqa: E402
-import exp_scripted_prefix as scripted  # noqa: E402
+from prefixes import exp_general_ethics_prefix as general  # noqa: E402
+from prefixes import exp_move_fast_prefix as move_fast  # noqa: E402
+from prefixes import exp_nq_prefix as nq  # noqa: E402
+from prefixes import exp_science_ethics_prefix as science  # noqa: E402
+from prefixes import exp_scripted_prefix as scripted  # noqa: E402
 from exp_real_continuation import build_prefix_spec, expected_system_prompt  # noqa: E402
 
 
@@ -180,4 +180,3 @@ def test_payload_records_a_complete_fixed_script_and_measured_context() -> None:
     )
     spec = build_prefix_spec(payload, harness="simple")
     assert spec.boundary_index == len(result["messages"])
-

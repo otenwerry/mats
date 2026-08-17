@@ -1,6 +1,6 @@
 """Shared paid runner for short, fixed-question continuation prefixes.
 
-Top-level ``exp_*_prefix.py`` endpoints provide the actual question scripts. This
+Sibling ``exp_*_prefix.py`` endpoints provide the actual question scripts. This
 module deliberately reuses the NQ conversation engine so simple, production, and
 subscription prefixes have the same system-prompt, native-resume, usage, cost, and
 provider-cache behavior.
@@ -16,7 +16,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-import exp_nq_prefix as nq
+from prefixes import exp_nq_prefix as nq
 from cost_tracking import install_cost_tracking
 from exp_real_continuation import (
     PREFIX_FORMAT,

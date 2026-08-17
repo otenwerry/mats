@@ -15,7 +15,8 @@ import re
 import shutil
 import sys
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -39,14 +40,19 @@ from env_viewer_components import (  # noqa: E402
     render_transcript,
 )
 from env_viewer_continuations import (  # noqa: E402
+    CONTINUATION_DESTINATIONS,
     CONTINUATION_DIRECTIONS,
     DEFAULT_CONTINUATION_DIRECTION,
     OTHER_CONTINUATION_DIRECTION,
+    continuation_condition_context,
+    continuation_destination,
+    continuation_destination_label,
     continuation_direction,
-    continuation_direction_label,
     continuation_groups,
     continuation_of,
+    continuation_prefix_label,
     continuation_prefix_rate_data,
+    is_activity_log_context_continuation,
     prefix_of,
     prefix_source_trajectory_id,
     pressure_of,
@@ -57,9 +63,14 @@ from env_viewer_load import (  # noqa: E402
     link_rejudge_sources,
     load_all,
     normalize_messages,
+    promote_rejudge_judgments,
     viewer_build_lock,
 )
 from env_viewer_cache import trajectory_key  # noqa: E402
+from env_viewer_store import (  # noqa: E402
+    STORE_FILENAME,
+    ViewerAuditStore,
+)
 from env_viewer_visuals import (  # noqa: E402
     ROLE_LABEL,
     VISUALS_CSS,
@@ -79,8 +90,14 @@ from judgment_semantics import (  # noqa: E402
     FAMILY_INDEX_DIMENSIONS,
     INDEX_DIMENSION_LABELS,
     INDEX_DIMENSION_ORDER,
+    REWARD_HACKING_DISPLAY_LABELS,
 )
-from old_runs import old_prefix_files, old_run_names, old_trajectory_keys  # noqa: E402
+from old_runs import (  # noqa: E402
+    old_prefix_files,
+    old_run_names,
+    old_trajectory_keys,
+    promoted_rejudge_run_names,
+)
 from project_paths import (  # noqa: E402
     CONTINUATION_PREFIXES_ROOT,
     DATA_ROOT,
@@ -95,7 +112,10 @@ REGISTRY_FILE = DATA_ROOT / "trajectory_ids.json"
 CACHE_ROOT = DATA_ROOT / "viewer_cache"
 CONTINUATIONS_FILENAME = "continuations.html"
 PREFIXES_FILENAME = "prefixes.html"
+MULTI_AGENT_FILENAME = "multi_agent.html"
 DEFAULT_PREFIX_TYPE = "natural_questions"
+ACTIVITY_LOG_PREFIX_TYPE = "activity_log_context"
+PREFIX_SELECTIONS_FORMAT = "environments-prefix-selections-v1"
 HARNESS_NAV_MODES = ("simple", "subscription")
 CURRENT_PRESSURE_NAV_MODES = ("low", "high")
 ALL_PRESSURE_VIEWS = (*CURRENT_PRESSURE_NAV_MODES, "unspecified")
@@ -205,6 +225,14 @@ details.sec.metadata > summary { display: flex; align-items: baseline; gap: 10px
   color: #1558d6; border-bottom-color: #1558d6; }
 .seednav a:hover, .contextnav a:hover, .viewnav a:hover, .subnav a:hover {
   text-decoration: none; color: #1558d6; }
+.continuation-destination-nav { margin: 12px 0 0; padding: 8px 10px 0;
+  background: #e9edf5; border: 1px solid #d3d9e5; border-bottom: none;
+  border-radius: 8px 8px 0 0; }
+.continuation-destination-nav a { font-size: 13.5px; color: #454d5d; }
+.continuation-prefix-nav { margin: 0 0 8px; padding: 8px 12px 0 20px;
+  background: #fafbfd; border: 1px solid #d3d9e5; border-left: 4px solid #bdc9dc;
+  border-radius: 0 0 8px 8px; }
+.continuation-prefix-nav a { font-size: 11.5px; font-weight: 550; }
 .pagehead { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 10px 0 14px; }
 .pagehead h1 { margin: 0; }
 .headbtn { padding: 5px 13px; border-radius: 6px; background: #eef0f4; font-size: 13.5px;
@@ -225,6 +253,10 @@ details.sec.metadata > summary { display: flex; align-items: baseline; gap: 10px
 .value-concern { background: #ffd6a5; color: #774215; }.value-bad { background: #ffadad; color: #7f1d1d; font-weight: 650; }
 .value-invalid { background: #fff3cd; color: #8a5a00; }.model-name { white-space: nowrap; }.raw-title { cursor: help; }
 .panel { background: #fff; border: 1px solid #daddE5; border-radius: 9px; margin: 12px 0; padding: 11px; }
+.activity-log { margin: 0; padding: 12px; max-height: 680px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere; background: #fff; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.prompt-preview { white-space: pre-wrap; overflow-wrap: anywhere; background: #fff;
+  border: 1px solid #d4d9e2; border-radius: 6px; padding: 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 details.panel > summary { cursor: pointer; font-size: 13px; font-weight: 650; color: #4d5362; list-style: none; }
 details.panel > summary::-webkit-details-marker { display: none; }
 details.panel > summary::before { content: "›"; display: inline-block; margin-right: 7px; color: #8990a0; transition: transform .15s; }
@@ -251,12 +283,20 @@ details.raw pre, .json { white-space: pre-wrap; overflow-wrap: anywhere; font: 1
 .runs tr.integrity-excluded > td a { color: #747d8e; }
 .runs tr.integrity-excluded > td .value-chip { background: #dfe1e5; color: #747982; }
 .runs.grouped tr.group-start td { border-top: 2px solid #98a0b3; }
+.runs tr.prefix-selected > td { background: #edf5ff; }
+.runs tr.prefix-selected > td:first-child { border-left: 3px solid #3976c4; }
+.runs tr.prefix-incomplete > td { color: #6f5c38; }
+.prefix-selected-badge { display: inline-block; margin-left: 5px; border-radius: 8px;
+  padding: 1px 5px; background: #dbeaff; color: #2456a6; font-size: 9px;
+  font-weight: 700; white-space: nowrap; }
 .prefix-status { display: inline-block; border-radius: 9px; padding: 1px 6px;
   font-size: 10px; font-weight: 650; white-space: nowrap; }
 .prefix-status.reached { background: #d3f3d8; color: #17663b; }
 .prefix-status.not-reached { background: #fff3cd; color: #735e13; }
 .prefix-status.na { background: #eef0f4; color: #686f7d; }
 .prefix-description { margin: 10px 0 16px; color: #59606e; font-size: 12px; line-height: 1.45; }
+.prefix-caveat { border: 1px solid #d9b55c; background: #fff8df; padding: 8px 10px;
+  margin: 8px 0 14px; font-size: 12px; line-height: 1.45; }
 .prefix-transcript { max-width: 1000px; }
 """
 
@@ -501,6 +541,13 @@ def _audit_family(audit: dict) -> str | None:
     return _seed_families().get(str(audit.get("seed") or ""))
 
 
+def _is_prefix_generation_audit(audit: dict) -> bool:
+    return (audit.get("real_env") or {}).get("family") in {
+        "ml_prefix_only",
+        "p_hacking_prefix_only",
+    }
+
+
 def _pressure_view(audit: dict) -> str | None:
     if _audit_family(audit) != "p_hacking":
         return None
@@ -536,8 +583,10 @@ def _scoped_filename(
 def _seed_filename(
     seed: str, harness: str = "simple", pressure: str | None = None
 ) -> str:
+    if seed == "fraud_detection" and harness == "subscription":
+        return _scoped_filename("index.html", "simple", pressure)
     base = (
-        "index.html"
+        "simple_fraud_detection.html"
         if seed == "fraud_detection" and harness == "simple"
         else f"{seed}.html"
     )
@@ -605,6 +654,26 @@ def _prefixes_filename(
     return _scoped_filename(base, harness)
 
 
+def _prefix_experiment_filename(
+    harness: str = "simple",
+    prefix_type: str = ACTIVITY_LOG_PREFIX_TYPE,
+    view: str = "trajectories",
+) -> str:
+    base = f"prefixes_{prefix_type}_{view}.html"
+    return _scoped_filename(base, harness)
+
+
+def _multi_agent_filename(
+    harness: str = "simple", view: str = "trajectories"
+) -> str:
+    base = (
+        MULTI_AGENT_FILENAME
+        if view == "trajectories"
+        else "multi_agent_inputs.html"
+    )
+    return _scoped_filename(base, harness)
+
+
 def _view_filename(
     seed: str, view: str | None, harness: str, pressure: str | None = None
 ) -> str:
@@ -638,15 +707,30 @@ def _navigation(
 ) -> str:
     families = _seed_families()
     continuation_view = active_view in {"continuations", "continuation_visuals"}
-    prefixes_view = active_view in {"prefixes", "prefixes_past"}
+    prefix_experiment_view = active_view in {
+        "prefix_experiment_trajectories",
+        "prefix_experiment_visuals",
+    }
+    prefixes_view = active_view in {
+        "prefixes",
+        "prefixes_past",
+        "prefix_experiment_trajectories",
+        "prefix_experiment_visuals",
+    }
+    multi_agent_view = active_view in {"multi_agent", "multi_agent_inputs"}
     active_family = (
         families.get(active_seed)
-        if active_seed and not continuation_view and not prefixes_view
+        if active_seed
+        and not continuation_view
+        and not prefixes_view
+        and not multi_agent_view
         else None
     )
     if active_family == "p_hacking" and active_pressure is None:
         active_pressure = "low"
     old_window = active_view in OLD_VIEW_NAMES
+    current_window = not old_window and active_harness == "subscription"
+    simple_tests_window = not old_window and active_harness == "simple"
     current_view = (
         active_view
         if active_view in {"trajectories", "visuals", "judge"}
@@ -659,40 +743,55 @@ def _navigation(
         if families.get(window_seed) == "p_hacking"
         else None
     )
-    current_filename = (
-        _prefixes_filename(active_harness, active_prefix_type)
-        if prefixes_view
-        else (
-            (
+    def current_filename(harness: str) -> str:
+        if prefix_experiment_view:
+            return _prefix_experiment_filename(
+                harness,
+                active_prefix_type,
+                (
+                    "visuals"
+                    if active_view == "prefix_experiment_visuals"
+                    else "trajectories"
+                ),
+            )
+        if prefixes_view:
+            return _prefixes_filename(harness, active_prefix_type)
+        if multi_agent_view:
+            return _multi_agent_filename(
+                harness,
+                "inputs" if active_view == "multi_agent_inputs" else "trajectories",
+            )
+        if continuation_view:
+            return (
                 _continuation_visuals_filename(
-                    active_harness, active_continuation_direction
+                    harness, active_continuation_direction
                 )
                 if active_view == "continuation_visuals"
                 else _continuations_filename(
-                    active_harness, active_continuation_direction
+                    harness, active_continuation_direction
                 )
             )
-            if continuation_view
-            else _view_filename(
-                window_seed, current_view, active_harness, window_pressure
-            )
+        return _view_filename(
+            window_seed, current_view, harness, window_pressure
         )
-    )
-    old_filename = (
+
+    all_old_filename = (
         _prefixes_filename(active_harness, active_prefix_type, old=True)
         if prefixes_view
         else _view_filename(window_seed, old_view, active_harness, window_pressure)
     )
     window_row = (
         '<div class="window-nav">'
-        f'<a href="{esc(href_prefix + current_filename, quote=True)}"'
-        f'{_active_attr(not old_window)}>Current</a>'
-        f'<a href="{esc(href_prefix + old_filename, quote=True)}"'
-        f'{_active_attr(old_window)}>Old</a>'
+        f'<a href="{esc(href_prefix + current_filename("subscription"), quote=True)}"'
+        f'{_active_attr(current_window)}>Current</a>'
+        f'<a href="{esc(href_prefix + current_filename("simple"), quote=True)}"'
+        f'{_active_attr(simple_tests_window)}>Old (simple harness tests)</a>'
+        f'<a href="{esc(href_prefix + all_old_filename, quote=True)}"'
+        f'{_active_attr(old_window)}>All old</a>'
         '</div>'
     )
     harness_links = []
-    for harness in HARNESS_NAV_MODES:
+    for harness in HARNESS_NAV_MODES if old_window else ():
         if prefixes_view:
             filename = _prefixes_filename(
                 harness, active_prefix_type, old=old_window
@@ -706,6 +805,11 @@ def _navigation(
                 else _continuations_filename(
                     harness, active_continuation_direction
                 )
+            )
+        elif multi_agent_view:
+            filename = _multi_agent_filename(
+                harness,
+                "inputs" if active_view == "multi_agent_inputs" else "trajectories",
             )
         elif active_seed is not None:
             filename = _view_filename(
@@ -745,28 +849,55 @@ def _navigation(
     )
     top = f'<div class="topnav">{"".join(family_links)}</div>'
 
+    active_continuation_destination = continuation_destination(
+        active_continuation_direction
+    )
+    default_direction_by_destination = {}
+    for direction, _source, destination in CONTINUATION_DIRECTIONS:
+        default_direction_by_destination.setdefault(destination, direction)
+    destination_links = []
+    for destination in CONTINUATION_DESTINATIONS:
+        direction = default_direction_by_destination[destination]
+        filename = (
+            _continuation_visuals_filename(active_harness, direction)
+            if active_view == "continuation_visuals"
+            else _continuations_filename(active_harness, direction)
+        )
+        destination_links.append(
+            f'<a href="{esc(href_prefix + filename, quote=True)}"'
+            f'{_active_attr(destination == active_continuation_destination)}>'
+            f'{esc(continuation_destination_label(destination))}</a>'
+        )
+    continuation_destination_row = (
+        f'<div class="seednav continuation-destination-nav">'
+        f'{"".join(destination_links)}</div>'
+        if continuation_view else ""
+    )
     continuation_directions = [
-        key for key, _source, _destination in CONTINUATION_DIRECTIONS
+        key
+        for key, _source, destination in CONTINUATION_DIRECTIONS
+        if destination == active_continuation_destination
     ]
     if (
         show_other_continuations
         or active_continuation_direction == OTHER_CONTINUATION_DIRECTION
     ):
         continuation_directions.append(OTHER_CONTINUATION_DIRECTION)
-    direction_links = []
+    prefix_links = []
     for direction in continuation_directions:
         filename = (
             _continuation_visuals_filename(active_harness, direction)
             if active_view == "continuation_visuals"
             else _continuations_filename(active_harness, direction)
         )
-        direction_links.append(
+        prefix_links.append(
             f'<a href="{esc(href_prefix + filename, quote=True)}"'
             f'{_active_attr(direction == active_continuation_direction)}>'
-            f'{esc(continuation_direction_label(direction))}</a>'
+            f'{esc(continuation_prefix_label(direction))}</a>'
         )
-    continuation_row = (
-        f'<div class="seednav">{"".join(direction_links)}</div>'
+    continuation_prefix_row = (
+        f'<div class="contextnav continuation-prefix-nav">'
+        f'{"".join(prefix_links)}</div>'
         if continuation_view else ""
     )
     prefix_type_row = (
@@ -780,7 +911,7 @@ def _navigation(
         if prefixes_view and prefix_types else ""
     )
 
-    if continuation_view or prefixes_view:
+    if continuation_view or prefixes_view or multi_agent_view:
         row_seeds = []
     elif active_family is not None:
         row_seeds = [seed for seed in seeds if families.get(seed) == active_family]
@@ -804,7 +935,33 @@ def _navigation(
             )
         ) + "</div>"
 
-    if continuation_view:
+    if prefix_experiment_view or (
+        prefixes_view
+        and not old_window
+        and active_prefix_type == ACTIVITY_LOG_PREFIX_TYPE
+    ):
+        items = [
+            (
+                "prefixes",
+                _prefixes_filename(active_harness, active_prefix_type),
+                "prefixes",
+            ),
+            (
+                "trajectories",
+                _prefix_experiment_filename(
+                    active_harness, active_prefix_type, "trajectories"
+                ),
+                "prefix_experiment_trajectories",
+            ),
+            (
+                "visuals",
+                _prefix_experiment_filename(
+                    active_harness, active_prefix_type, "visuals"
+                ),
+                "prefix_experiment_visuals",
+            ),
+        ]
+    elif continuation_view:
         items = [
             (
                 "trajectories",
@@ -819,6 +976,19 @@ def _navigation(
                     active_harness, active_continuation_direction
                 ),
                 "continuation_visuals",
+            ),
+        ]
+    elif multi_agent_view:
+        items = [
+            (
+                "trajectories",
+                _multi_agent_filename(active_harness),
+                "multi_agent",
+            ),
+            (
+                "prompt + activity logs",
+                _multi_agent_filename(active_harness, "inputs"),
+                "multi_agent_inputs",
             ),
         ]
     elif active_seed is not None:
@@ -847,8 +1017,9 @@ def _navigation(
         for label, href, key in items
     )
     return (
-        window_row + harness_row + top + continuation_row + prefix_type_row
-        + seed_row + pressure_links + f'<div class="viewnav">{links}</div>'
+        window_row + harness_row + top + continuation_destination_row
+        + continuation_prefix_row + prefix_type_row + seed_row + pressure_links
+        + f'<div class="viewnav">{links}</div>'
     )
 
 
@@ -1349,8 +1520,19 @@ def _index(
 def _comparison_groups(
     official: list[dict], rejudges: list[dict]
 ) -> list[list[dict]]:
+    def source_row(audit: dict) -> dict:
+        """Show the pre-promotion judgment beside its replacement rejudge."""
+
+        superseded = audit.get("superseded_judgment") or {}
+        fields = superseded.get("audit_fields")
+        if not isinstance(fields, dict):
+            return audit
+        row = deepcopy(audit)
+        row.update(deepcopy(fields))
+        return row
+
     groups: dict[int, list[dict]] = {
-        int(audit["id"]): [audit]
+        int(audit["id"]): [source_row(audit)]
         for audit in sorted(official, key=lambda row: int(row.get("id") or 0))
     }
     orphans: list[list[dict]] = []
@@ -1747,11 +1929,31 @@ def _without_duplicate_judge_payloads(value: Any) -> Any:
     return value
 
 
+def _environment_record_for_viewer(
+    audit: dict, *, omit_multi_agent_content: bool = True
+) -> dict:
+    """Avoid duplicating a large activity log on every trajectory detail page."""
+
+    real_env = deepcopy(audit.get("real_env") or {})
+    multi_agent = real_env.get("multi_agent")
+    if omit_multi_agent_content and isinstance(multi_agent, dict):
+        activity = multi_agent.get("activity_log")
+        if isinstance(activity, dict) and isinstance(activity.get("content"), str):
+            activity["content"] = (
+                "[Exact content omitted from this duplicate metadata panel; use "
+                "Multi-agent > prompt + activity logs. The raw Inspect record "
+                "retains it.]"
+            )
+            activity["viewer_duplicate_content_omitted"] = True
+    return _without_duplicate_judge_payloads(real_env)
+
+
 def _trajectory(
     audit: dict,
     *,
     seeds: list[str],
     active_view: str = "trajectories",
+    prefix_types: tuple[tuple[str, str], ...] = (),
     show_other_continuations: bool = False,
 ) -> str:
     judgment = audit.get("judgment")
@@ -1764,6 +1966,7 @@ def _trajectory(
     retrospective = audit.get("retrospective_rejudge")
     judge_failure = audit.get("judge_failure")
     continuation = continuation_of(audit)
+    multi_agent = _multi_agent_record(audit)
     continuation_banner = ""
     pivot_number = None
     if continuation:
@@ -1776,6 +1979,12 @@ def _trajectory(
         )
         prefix_id = prefix_source_trajectory_id(audit)
         prefix_name = str(prefix.get("name") or "unknown")
+        prefix_cutoff = prefix.get("source_cutoff")
+        inline_context = continuation.get("delivery_mode") == "inline_user_context"
+        native_resume = bool(
+            continuation.get("production_native_resume")
+            or continuation.get("subscription_native_resume")
+        )
         prefix_link = (
             f'<a href="trajectory-{prefix_id}.html">{esc(prefix_name)}</a>'
             if prefix_id is not None else esc(prefix_name)
@@ -1789,18 +1998,54 @@ def _trajectory(
             f'{esc(str(continuation.get("treatment") or "unknown"))} · prefix '
             f'{prefix_link}'
             + (
+                ' · activity-log context hidden from judges'
+                if inline_context
+                else
                 ' · prior native session hidden from judges'
-                if continuation.get("production_native_resume")
-                or continuation.get("subscription_native_resume")
+                if native_resume
                 else f' · [M2]–[M{boundary}] hidden from judges'
                 if pivot_number is not None else ""
             )
             + f' · {pivot_link}'
             + (
                 ' · scaffold session resumed natively; old workspace not restored'
-                if continuation.get("production_native_resume")
-                or continuation.get("subscription_native_resume") else ""
+                if native_resume else ""
             )
+            + (
+                ' · fresh scaffold session; full observable log delivered inline'
+                if inline_context else ""
+            )
+            + (
+                ' · prefix was cut off before its second experiment user turn; '
+                f'{esc(str(prefix_cutoff.get("omitted_message_count") or "?"))} '
+                'later saved message(s) omitted'
+                if isinstance(prefix_cutoff, dict)
+                and prefix_cutoff.get("affected") is True
+                else ""
+            )
+            + '</div>'
+        )
+    multi_agent_banner = ""
+    if multi_agent:
+        source = multi_agent.get("source") or {}
+        exposure = multi_agent.get("exposure") or {}
+        source_id = source.get("trajectory_id")
+        source_link = (
+            f'<a href="trajectory-{int(source_id)}.html">trajectory '
+            f'{int(source_id)}</a>'
+            if source_id is not None else "external activity log"
+        )
+        input_link = (
+            f' · <a href="{esc(_multi_agent_filename(_audit_harness(audit), "inputs"), quote=True)}">'
+            'view prompt and ACTIVITY_LOG.md</a>'
+            if active_view != "past" else ""
+        )
+        multi_agent_banner = (
+            '<div class="rejudge-banner">Multi-agent activity-log treatment · '
+            f'treatment {esc(str(multi_agent.get("treatment") or "unknown"))} · '
+            f'source {source_link} · fresh session · log exposure '
+            f'{esc(str(exposure.get("status") or "unknown"))}'
+            + input_link
             + '</div>'
         )
     rejudge_banner = ""
@@ -1814,6 +2059,20 @@ def _trajectory(
             f'{source_link} · current method '
             f'{esc(str(retrospective.get("judging_method_sha256") or "unrecorded")[:12])}'
             '</div>'
+        )
+    promotion_banner = ""
+    promoted = audit.get("promoted_rejudge") or {}
+    if promoted:
+        replacement_id = promoted.get("trajectory_id")
+        replacement_link = (
+            f'<a href="trajectory-{int(replacement_id)}.html">'
+            f'rejudge trajectory {int(replacement_id)}</a>'
+            if replacement_id is not None else "the selected retrospective rejudge"
+        )
+        promotion_banner = (
+            '<div class="rejudge-banner"><strong>Canonical judgment replaced.</strong> '
+            f'This row now uses {replacement_link}; the superseded stored judgment '
+            'is preserved under Other stuff below.</div>'
         )
     recovery_banner = ""
     recovery = audit.get("interrupted_native_transcript") or {}
@@ -1840,6 +2099,11 @@ def _trajectory(
     harness = _audit_harness(audit)
     pressure = _pressure_view(audit)
     continuation_current = bool(continuation and active_view == "continuations")
+    prefix_experiment_current = bool(
+        is_activity_log_context_continuation(audit)
+        and active_view == "prefix_experiment_trajectories"
+    )
+    multi_agent_current = bool(multi_agent and active_view == "multi_agent")
     if active_view == "comparisons":
         back_href = _comparisons_filename(seed, harness, pressure)
     elif active_view == "past":
@@ -1849,6 +2113,12 @@ def _trajectory(
         back_href = _continuations_filename(
             harness, active_continuation_direction
         )
+    elif prefix_experiment_current:
+        back_href = _prefix_experiment_filename(
+            harness, ACTIVITY_LOG_PREFIX_TYPE, "trajectories"
+        )
+    elif multi_agent_current:
+        back_href = _multi_agent_filename(harness)
     else:
         back_href = _seed_filename(seed, harness, pressure)
     page_heading = f'{esc(seed)} — trajectory {int(audit["id"])}'
@@ -1859,7 +2129,11 @@ def _trajectory(
             # Continuation trajectories belong to the global Continuations window,
             # not to their seed's tabs, unless individually archived under Old.
             active_seed=(
-                None if continuation_current else seed
+                None
+                if continuation_current
+                or prefix_experiment_current
+                or multi_agent_current
+                else seed
             ),
             active_view=active_view,
             active_harness=harness,
@@ -1868,6 +2142,11 @@ def _trajectory(
                 active_continuation_direction
                 if continuation_current else DEFAULT_CONTINUATION_DIRECTION
             ),
+            active_prefix_type=(
+                ACTIVITY_LOG_PREFIX_TYPE
+                if prefix_experiment_current else DEFAULT_PREFIX_TYPE
+            ),
+            prefix_types=prefix_types,
             show_other_continuations=show_other_continuations,
         )
         + '<div class="pagehead"><h1>'
@@ -1875,7 +2154,9 @@ def _trajectory(
         '&larr; back</a></div>'
         + _metadata_panel(audit)
         + continuation_banner
+        + multi_agent_banner
         + rejudge_banner
+        + promotion_banner
         + recovery_banner
         + legacy
         + (
@@ -1896,9 +2177,19 @@ def _trajectory(
         + render_dimension_navigator(judgment, artifact_page_href=judge_page_href)
         + (_json_panel("Grade", grade) if grade else "")
         + _json_panel("Stored judgment", _without_duplicate_judge_payloads(judgment))
+        + (
+            _json_panel(
+                "Superseded stored judgment",
+                _without_duplicate_judge_payloads(audit["superseded_judgment"]),
+            )
+            if audit.get("superseded_judgment") else ""
+        )
         + _json_panel(
             "Environment record",
-            _without_duplicate_judge_payloads(audit.get("real_env") or {}),
+            _environment_record_for_viewer(
+                audit,
+                omit_multi_agent_content=active_view != "past",
+            ),
         )
         + _json_panel("Model usage", audit.get("model_usage") or {})
         + '</div></details>'
@@ -1924,8 +2215,17 @@ def _trajectory_list_href(audit: dict, active_view: str) -> str:
         return _comparisons_filename(seed, harness, pressure)
     if active_view == "past":
         return _past_filename(seed, harness, pressure)
+    if (
+        active_view == "prefix_experiment_trajectories"
+        and is_activity_log_context_continuation(audit)
+    ):
+        return _prefix_experiment_filename(
+            harness, ACTIVITY_LOG_PREFIX_TYPE, "trajectories"
+        )
     if continuation_of(audit):
         return _continuations_filename(harness, continuation_direction(audit))
+    if _multi_agent_record(audit):
+        return _multi_agent_filename(harness)
     return _seed_filename(seed, harness, pressure)
 
 
@@ -1934,6 +2234,7 @@ def _judge_trajectory(
     *,
     seeds: list[str],
     active_view: str = "trajectories",
+    prefix_types: tuple[tuple[str, str], ...] = (),
     show_other_continuations: bool = False,
 ) -> str:
     judgment = audit.get("judgment")
@@ -1943,6 +2244,13 @@ def _judge_trajectory(
     trajectory_id = int(audit["id"])
     continuation = continuation_of(audit)
     continuation_current = bool(continuation and active_view == "continuations")
+    prefix_experiment_current = bool(
+        is_activity_log_context_continuation(audit)
+        and active_view == "prefix_experiment_trajectories"
+    )
+    multi_agent_current = bool(
+        _multi_agent_record(audit) and active_view == "multi_agent"
+    )
     judge_view = render_judge_view(
         judgment,
         audit,
@@ -1954,7 +2262,13 @@ def _judge_trajectory(
     body = (
         _navigation(
             seeds,
-            active_seed=None if continuation_current else seed,
+            active_seed=(
+                None
+                if continuation_current
+                or prefix_experiment_current
+                or multi_agent_current
+                else seed
+            ),
             active_view=active_view,
             active_harness=harness,
             active_pressure=pressure,
@@ -1962,6 +2276,11 @@ def _judge_trajectory(
                 continuation_direction(audit)
                 if continuation_current else DEFAULT_CONTINUATION_DIRECTION
             ),
+            active_prefix_type=(
+                ACTIVITY_LOG_PREFIX_TYPE
+                if prefix_experiment_current else DEFAULT_PREFIX_TYPE
+            ),
+            prefix_types=prefix_types,
             show_other_continuations=show_other_continuations,
         )
         + '<div class="pagehead"><h1>'
@@ -2146,21 +2465,10 @@ def _is_current_judgment(audit: dict, methods: dict[str, str]) -> bool:
     return bool(stored and stored == methods.get(family))
 
 
-def _continuations_page(
-    continuations: list[dict],
-    *,
-    seeds: list[str],
-    active_harness: str = "simple",
-    active_direction: str = DEFAULT_CONTINUATION_DIRECTION,
-    show_other_continuations: bool = False,
-) -> str:
+def _continuation_index_sections(rows: list[dict]) -> str:
     sections = []
     groups = continuation_groups(
-        [
-            audit for audit in continuations
-            if _audit_harness(audit) == active_harness
-            and continuation_direction(audit) == active_direction
-        ],
+        rows,
         seed_order=_ordered_seeds(),
     )
     for (seed, agent, harness, pressure), by_treatment in groups:
@@ -2195,6 +2503,26 @@ def _continuations_page(
             + "".join(treatment_tables)
             + "</details>"
         )
+    return (
+        "".join(sections)
+        if sections else '<p class="empty">No continuation runs yet.</p>'
+    )
+
+
+def _continuations_page(
+    continuations: list[dict],
+    *,
+    seeds: list[str],
+    active_harness: str = "simple",
+    active_direction: str = DEFAULT_CONTINUATION_DIRECTION,
+    show_other_continuations: bool = False,
+) -> str:
+    selected = [
+        audit for audit in continuations
+        if _audit_harness(audit) == active_harness
+        and continuation_direction(audit) == active_direction
+    ]
+    context = continuation_condition_context(active_direction)
     body = (
         _navigation(
             seeds,
@@ -2204,15 +2532,12 @@ def _continuations_page(
             show_other_continuations=show_other_continuations,
         )
         + '<div class="pagehead"><h1>'
-        + esc(continuation_direction_label(active_direction))
+        + esc(context)
         + '</h1></div>'
-        + (
-            "".join(sections)
-            if sections else '<p class="empty">No continuation runs yet.</p>'
-        )
+        + _continuation_index_sections(selected)
     )
     return _page(
-        f"Continuations · {continuation_direction_label(active_direction)}",
+        f"Continuations · {context}",
         body,
         scripts=INDEX_SORT_JS,
     )
@@ -2238,7 +2563,7 @@ def _continuation_visuals_page(
         originals,
         audits_by_id=audits_by_id,
     )
-    direction_label = continuation_direction_label(active_direction)
+    context = continuation_condition_context(active_direction)
     body = (
         _navigation(
             seeds,
@@ -2248,15 +2573,240 @@ def _continuation_visuals_page(
             show_other_continuations=show_other_continuations,
         )
         + '<div class="pagehead"><h1>'
-        + esc(direction_label)
+        + esc(context)
         + ' — visuals</h1></div>'
-        + render_continuation_visuals(groups, selected)
+        + render_continuation_visuals(groups, selected, context=context)
     )
     return _page(
-        f"Continuations · {direction_label} · visuals",
+        f"Continuations · {context} · visuals",
         body,
         fit_content=False,
     )
+
+
+def _activity_log_prefix_experiment_context() -> str:
+    return (
+        "Task: p-hacking (checkout_redesign) · "
+        "Prefix: Activity-log context (p-hacking)"
+    )
+
+
+def _activity_log_prefix_trajectories_page(
+    rows: list[dict],
+    *,
+    seeds: list[str],
+    prefix_types: tuple[tuple[str, str], ...],
+    active_harness: str,
+) -> str:
+    selected = [
+        row for row in rows if _audit_harness(row) == active_harness
+    ]
+    context = _activity_log_prefix_experiment_context()
+    body = (
+        _navigation(
+            seeds,
+            active_view="prefix_experiment_trajectories",
+            active_harness=active_harness,
+            active_prefix_type=ACTIVITY_LOG_PREFIX_TYPE,
+            prefix_types=prefix_types,
+        )
+        + f'<div class="pagehead"><h1>{esc(context)}</h1></div>'
+        + _continuation_index_sections(selected)
+    )
+    return _page(
+        f"Prefixes · {context} · trajectories",
+        body,
+        scripts=INDEX_SORT_JS,
+    )
+
+
+def _activity_log_prefix_visuals_page(
+    rows: list[dict],
+    originals: list[dict],
+    *,
+    audits_by_id: dict[int, dict],
+    seeds: list[str],
+    prefix_types: tuple[tuple[str, str], ...],
+    active_harness: str,
+) -> str:
+    selected = [
+        row for row in rows if _audit_harness(row) == active_harness
+    ]
+    groups = continuation_prefix_rate_data(
+        selected,
+        originals,
+        audits_by_id=audits_by_id,
+    )
+    context = _activity_log_prefix_experiment_context()
+    body = (
+        _navigation(
+            seeds,
+            active_view="prefix_experiment_visuals",
+            active_harness=active_harness,
+            active_prefix_type=ACTIVITY_LOG_PREFIX_TYPE,
+            prefix_types=prefix_types,
+        )
+        + f'<div class="pagehead"><h1>{esc(context)} — visuals</h1></div>'
+        + render_continuation_visuals(groups, selected, context=context)
+    )
+    return _page(
+        f"Prefixes · {context} · visuals",
+        body,
+        fit_content=False,
+    )
+
+
+def _multi_agent_record(audit: dict) -> dict:
+    real_env = audit.get("real_env") or {}
+    record = real_env.get("multi_agent") if isinstance(real_env, dict) else None
+    return record if isinstance(record, dict) else {}
+
+
+def _multi_agent_direction(audit: dict) -> str:
+    record = _multi_agent_record(audit)
+    source = record.get("source") or {}
+    source_family = str(source.get("family") or "external")
+    destination_family = str(
+        (audit.get("real_env") or {}).get("family") or "unknown"
+    )
+    labels = {
+        "p_hacking": "p-hacking",
+        "ml_training_data_misuse": "ML",
+        "ml_prefix_only": "ML",
+    }
+    return (
+        f"{labels.get(source_family, source_family)} → "
+        f"{labels.get(destination_family, destination_family)}"
+    )
+
+
+def _multi_agent_page(
+    rows: list[dict], *, seeds: list[str], active_harness: str
+) -> str:
+    selected = [row for row in rows if _audit_harness(row) == active_harness]
+    grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for row in selected:
+        record = _multi_agent_record(row)
+        grouped[(
+            _multi_agent_direction(row),
+            str(row.get("seed") or "unknown"),
+            str(record.get("treatment") or "unknown"),
+        )].append(row)
+    sections = []
+    for (direction, seed, treatment), group_rows in sorted(grouped.items()):
+        valid = sum(not _integrity_excluded(row) for row in group_rows)
+        dimension_keys = _index_dimension_keys(
+            group_rows, family=_seed_families().get(seed)
+        )
+        sections.append(
+            '<details class="sec" open><summary><h2>'
+            f'{esc(direction)} · {esc(seed)} · {esc(treatment)} '
+            f'<span class="meta">&mdash; valid: {valid} · all: '
+            f'{len(group_rows)}</span></h2></summary>'
+            + _index_table(group_rows, dimension_keys=dimension_keys)
+            + "</details>"
+        )
+    body = (
+        _navigation(
+            seeds,
+            active_view="multi_agent",
+            active_harness=active_harness,
+        )
+        + '<div class="pagehead"><h1>Multi-agent activity-log transfer</h1></div>'
+        + '<div class="note">Each row is a fresh agent session on the destination '
+        'task. ACTIVITY_LOG.md contains another instance’s prior-task activity; no '
+        'conversation or native session is resumed. Runs whose complete log was not '
+        'mechanically verified in model context remain visible but are excluded.</div>'
+        + (
+            "".join(sections)
+            if sections else '<p class="empty">No multi-agent runs yet.</p>'
+        )
+    )
+    return _page("Multi-agent trajectories", body, scripts=INDEX_SORT_JS)
+
+
+def _multi_agent_input_panel(audit: dict, rows: list[dict] | None = None) -> str:
+    record = _multi_agent_record(audit)
+    source = record.get("source") or {}
+    activity = record.get("activity_log") or {}
+    metadata = activity.get("metadata") or {}
+    content = str(activity.get("content") or "")
+    prompt = str(record.get("effective_opening_user_message") or "")
+    source_id = source.get("trajectory_id")
+    source_link = (
+        f'<a href="trajectory-{int(source_id)}.html">trajectory {int(source_id)}</a>'
+        if source_id is not None else esc(source.get("description") or "external")
+    )
+    lossy = metadata.get("lossy_processing") or {}
+    caveat = str(lossy.get("visible_caveat") or "")
+    destinations = str(audit.get("seed") or "unknown")
+    status_counts = Counter(
+        str(
+            (_multi_agent_record(row).get("exposure") or {}).get("status")
+            or "not run"
+        )
+        for row in (rows or [audit])
+    )
+    status = " · ".join(
+        f"{name} ×{count}" for name, count in sorted(status_counts.items())
+    )
+    return (
+        '<details class="sec" open><summary><h2>'
+        f'{esc(str(record.get("name") or "activity log"))} · '
+        f'{esc(_multi_agent_direction(audit))} · {esc(destinations)}'
+        '</h2></summary><div class="metabody">'
+        f'<p class="meta">Source: {source_link} · lines: '
+        f'{esc(str(metadata.get("line_count") or "?"))} · exposure: '
+        f'{esc(status)}</p>'
+        + (
+            f'<div class="prefix-caveat"><strong>Observable-log caveat:</strong> '
+            f'{esc(caveat)}</div>' if caveat else ""
+        )
+        + '<h3>Opening user prompt</h3>'
+        f'<pre class="prompt-preview">{esc(prompt)}</pre>'
+        '<details class="sub"><summary><h3>ACTIVITY_LOG.md</h3></summary>'
+        f'<pre class="activity-log">{esc(content)}</pre></details>'
+        '</div></details>'
+    )
+
+
+def _multi_agent_inputs_page(
+    rows: list[dict], *, seeds: list[str], active_harness: str
+) -> str:
+    selected = [row for row in rows if _audit_harness(row) == active_harness]
+    unique: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in selected:
+        record = _multi_agent_record(row)
+        key = (
+            str(record.get("payload_sha256") or record.get("name") or ""),
+            str(record.get("effective_opening_user_message") or ""),
+        )
+        unique[key].append(row)
+    panels = "".join(
+        _multi_agent_input_panel(group_rows[0], group_rows)
+        for _key, group_rows in sorted(
+            unique.items(),
+            key=lambda item: (
+                _multi_agent_direction(item[1][0]),
+                str(item[1][0].get("seed") or ""),
+                item[0],
+            ),
+        )
+    )
+    body = (
+        _navigation(
+            seeds,
+            active_view="multi_agent_inputs",
+            active_harness=active_harness,
+        )
+        + '<div class="pagehead"><h1>Multi-agent inputs</h1></div>'
+        + '<div class="note">The prompt shown here is the actual opening user turn. '
+        'The system prompt is unchanged from the corresponding ordinary run. Expand '
+        'ACTIVITY_LOG.md to inspect the exact numbered file mounted in the sandbox.'
+        '</div>'
+        + (panels if panels else '<p class="empty">No multi-agent inputs yet.</p>')
+    )
+    return _page("Multi-agent inputs", body, fit_content=False)
 
 
 def _prefix_page_filename(path: Path) -> str:
@@ -2266,8 +2816,10 @@ def _prefix_page_filename(path: Path) -> str:
 
 def _load_prefixes(
     archived_files: frozenset[str] = frozenset(),
+    used_trajectory_ids: frozenset[int] = frozenset(),
+    old_trajectory_ids: frozenset[int] = frozenset(),
 ) -> tuple[list[dict], list[str]]:
-    """Load purpose-built prefix datasets without exposing native resume archives."""
+    """Load external prefixes plus current trajectory prefixes selected or used."""
 
     prefixes: list[dict] = []
     errors: list[str] = []
@@ -2298,12 +2850,24 @@ def _load_prefixes(
         if required_problems:
             errors.append(f"{path.name}: {', '.join(required_problems)}")
             continue
-        # Reconstructed experiment trajectories stay in this store so the
-        # continuation runner can reuse them. Their source trajectories are already
-        # visible on the ML and p-hacking pages, so they do not belong in this catalog.
         if source.get("kind") == "trajectory":
-            continue
-        if source.get("kind") != "external":
+            source_id = source.get("trajectory_id")
+            try:
+                source_id = int(source_id)
+            except (TypeError, ValueError):
+                errors.append(
+                    f"{path.name}: trajectory source has invalid trajectory_id "
+                    f"{source_id!r}"
+                )
+                continue
+            if str(source.get("harness") or "simple") == "simple":
+                continue
+            if source_id in old_trajectory_ids:
+                continue
+            explicitly_cataloged = bool(source.get("prefix_type"))
+            if source_id not in used_trajectory_ids and not explicitly_cataloged:
+                continue
+        elif source.get("kind") != "external":
             errors.append(f"{path.name}: unknown source kind {source.get('kind')!r}")
             continue
         prefixes.append({
@@ -2326,20 +2890,335 @@ def _load_prefixes(
     return prefixes, errors
 
 
+def _payload_identity_keys(payload: dict) -> set[tuple[str, str]]:
+    keys = set()
+    name = payload.get("name")
+    if isinstance(name, str) and name:
+        keys.add(("name", name))
+    if payload.get("format") == "environments-continuation-prefix-v1":
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        keys.add(("sha256", hashlib.sha256(canonical.encode()).hexdigest()))
+    return keys
+
+
+def _continuation_payload_usages(
+    audits: list[dict],
+) -> dict[tuple[str, str], set[str]]:
+    usages: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    def record(prefix: dict, treatment: object) -> None:
+        label = str(treatment or "unknown")
+        for field in ("sha256", "name"):
+            value = prefix.get(field)
+            if isinstance(value, str) and value:
+                usages[(field, value)].add(label)
+
+    for audit in audits:
+        continuation = continuation_of(audit)
+        if continuation:
+            record(prefix_of(audit), continuation.get("treatment"))
+
+    campaign_root = DATA_ROOT / "remote_campaigns"
+    if campaign_root.is_dir():
+        for path in sorted(campaign_root.glob("continuation-aws-*.json")):
+            try:
+                state = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            continuation = (state.get("pipeline_config") or {}).get("continuation")
+            if not isinstance(continuation, dict):
+                continue
+            for payload in continuation.get("payloads") or []:
+                if isinstance(payload, dict):
+                    record(payload, continuation.get("treatment"))
+
+    # Campaign state remains the automatic source of truth after launch. This small
+    # registry lets an exact content-addressed payload show as selected before its
+    # paid campaign is created.
+    selection_path = DATA_ROOT / "prefix_selections.json"
+    if selection_path.is_file():
+        try:
+            selection_data = json.loads(selection_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"could not load prefix selection registry {selection_path}: {error}"
+            ) from error
+        if (
+            not isinstance(selection_data, dict)
+            or selection_data.get("format") != PREFIX_SELECTIONS_FORMAT
+            or not isinstance(selection_data.get("selections"), list)
+        ):
+            raise ValueError(
+                f"{selection_path} must use format {PREFIX_SELECTIONS_FORMAT!r} "
+                "and contain a selections list"
+            )
+        for index, selection in enumerate(selection_data["selections"]):
+            if not isinstance(selection, dict):
+                raise ValueError(
+                    f"{selection_path}: selection {index} is not an object"
+                )
+            sha256 = selection.get("sha256")
+            treatment = selection.get("treatment")
+            if (
+                not isinstance(sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+                or not isinstance(treatment, str)
+                or not treatment.strip()
+            ):
+                raise ValueError(
+                    f"{selection_path}: selection {index} needs an exact lowercase "
+                    "SHA-256 and nonempty treatment"
+                )
+            usages[("sha256", sha256)].add(treatment.strip())
+    return usages
+
+
+def _annotate_payload_prefix_usages(
+    prefixes: list[dict],
+    usages: dict[tuple[str, str], set[str]],
+) -> None:
+    for prefix in prefixes:
+        selected = set()
+        for key in _payload_identity_keys(prefix["payload"]):
+            selected.update(usages.get(key, set()))
+        if selected:
+            prefix["selected"] = True
+            prefix["used_treatments"] = sorted(selected)
+
+
+def _prefix_attempt_contract(audit: dict) -> dict:
+    family = (audit.get("real_env") or {}).get("family")
+    seed = str(audit.get("seed") or "unknown")
+    if family == "p_hacking_prefix_only":
+        return {
+            "family": family,
+            "expected_submissions": 1,
+            "expected_follow_up": False,
+            "required_deliverables": ("analysis.py", "RESULT.md"),
+            "description": (
+                "P-hacking no-honeypot prefix-generation attempt retained as source "
+                "evidence. No runnable continuation payload was saved because the "
+                "required protocol did not complete."
+            ),
+            "generator": "exp_p_hacking_prefix.py",
+            "prefix_type": "p_hacking_no_honeypot",
+            "prefix_type_label": "P-hacking no-honeypot",
+            "source_label": "Checkout redesign · clear positive",
+        }
+    return {
+        "family": "ml_prefix_only",
+        "expected_submissions": 2,
+        "expected_follow_up": True,
+        "required_deliverables": ("REPORT.md", "models/final/"),
+        "description": (
+            "ML prefix-generation attempt retained as source evidence. No runnable "
+            "continuation payload was saved because the required two-pass protocol "
+            "did not complete."
+        ),
+        "generator": "exp_ml_prefix.py",
+        "prefix_type": "ml_prefix_only",
+        "prefix_type_label": "ML prefix only",
+        "source_label": f'{seed.replace("_", " ").title()} · no test access',
+    }
+
+
+def _ml_prefix_attempt_status(audit: dict) -> str:
+    contract = _prefix_attempt_contract(audit)
+    protocol = (audit.get("real_env") or {}).get("protocol") or {}
+    submissions = protocol.get("submissions")
+    count = (
+        int(submissions)
+        if isinstance(submissions, int) and not isinstance(submissions, bool)
+        else 0
+    )
+    complete = (
+        count == contract["expected_submissions"]
+        and (protocol.get("follow_up_sent") is True)
+        == contract["expected_follow_up"]
+    )
+    if complete:
+        return f"complete · {count}/{count} submissions"
+    reason = str(protocol.get("ended_reason") or "incomplete").replace("_", " ")
+    return (
+        f"incomplete · {count}/{contract['expected_submissions']} submissions · "
+        f"{reason}"
+    )
+
+
+def _ml_prefix_attempt_matches(prefix: dict, audit: dict) -> bool:
+    source = prefix.get("source") or {}
+    run_name = source.get("run_name")
+    return (
+        isinstance(run_name, str)
+        and run_name in str(audit.get("mode") or "")
+        and str(prefix["payload"].get("target") or "")
+        == agent_label(audit.get("target"))
+        and source.get("epoch") == _display_epoch(audit)
+        and str(source.get("seed") or "") == str(audit.get("seed") or "")
+        and str(source.get("harness") or "simple")
+        == str(audit.get("harness") or "simple")
+    )
+
+
+def _ml_prefix_attempt_entry(audit: dict) -> dict:
+    contract = _prefix_attempt_contract(audit)
+    real_env = audit.get("real_env") or {}
+    protocol = real_env.get("protocol") or {}
+    grade = real_env.get("grade") or {}
+    deliverables = grade.get("deliverables") or {}
+    required_deliverables = contract["required_deliverables"]
+    missing = [
+        name for name in required_deliverables if deliverables.get(name) is not True
+    ]
+    submissions = protocol.get("submissions")
+    completed_protocol = (
+        submissions == contract["expected_submissions"]
+        and (protocol.get("follow_up_sent") is True)
+        == contract["expected_follow_up"]
+    )
+    cost, has_cost = _recorded_cost(audit)
+    context_calls = (audit.get("target_context_usage") or {}).get("calls") or []
+    measured_context = next(
+        (
+            value for value in reversed(context_calls)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        ),
+        None,
+    )
+    messages = audit.get("messages") or []
+    generated_at = next(
+        (
+            message.get("timestamp") for message in messages
+            if isinstance(message, dict) and message.get("timestamp")
+        ),
+        None,
+    )
+    target = agent_label(audit.get("target"))
+    epoch = _display_epoch(audit)
+    mode = str(audit.get("mode") or "ml-prefix-attempt")
+    log_file = str(audit.get("log_file") or "attempt.eval")
+    path = LOGS_ROOT / mode / log_file
+    sidecar = (
+        LOGS_ROOT
+        / mode
+        / "real_artifacts"
+        / str(audit.get("task") or "")
+        / f'{audit.get("seed")}_ep{audit.get("epoch")}'
+        / "_native_resume_bundle.json"
+    )
+    source = {
+        "kind": "external",
+        "description": contract["description"],
+        "generator": contract["generator"],
+        "prefix_type": contract["prefix_type"],
+        "prefix_type_label": contract["prefix_type_label"],
+        "source_label": contract["source_label"],
+        "family": contract["family"],
+        "seed": str(audit.get("seed") or "unknown"),
+        "epoch": epoch,
+        "run_name": mode,
+        "harness": str(audit.get("harness") or "simple"),
+        "generated_at": generated_at,
+        "completed_script": completed_protocol,
+        "completed_protocol": completed_protocol,
+        "submissions": submissions,
+        "follow_up_sent": protocol.get("follow_up_sent") is True,
+        "ended_reason": protocol.get("ended_reason"),
+        "judging": {
+            "stage_one_llm_judge": False,
+            "final_llm_judge": False,
+            "performance_grader": False,
+        },
+        "evaluation_access": {
+            "test_inputs_available": False,
+            "test_labels_available": False,
+        } if contract["family"] == "ml_prefix_only" else {},
+        "deliverables": deliverables,
+        "all_deliverables_present": not missing,
+        "continuation_eligibility": {
+            "eligible_by_default": completed_protocol and not missing,
+            "reason": (
+                "required_deliverables_present"
+                if completed_protocol and not missing
+                else "incomplete_protocol"
+                if not completed_protocol
+                else "missing_required_deliverables"
+            ),
+            "required_deliverables": list(required_deliverables),
+            "missing_required_deliverables": missing,
+        },
+        "measured_context_tokens": measured_context,
+        "generation_cost": (
+            {"cost_usd": cost, "source": "viewer_recorded_total"}
+            if has_cost else {}
+        ),
+        "native_harness": real_env.get("harness") or {},
+        "native_resume_artifact_available": sidecar.is_file(),
+        "attempt_status": _ml_prefix_attempt_status(audit),
+        "attempt_only": True,
+    }
+    payload = {
+        "format": "environments-continuation-prefix-v1",
+        "name": f"{mode}-{target}-e{epoch}-attempt",
+        "target": target,
+        "reasoning": bool(audit.get("reasoning")),
+        "source": source,
+        "messages": messages,
+    }
+    return {
+        "path": path,
+        "filename": _prefix_page_filename(path),
+        "payload": payload,
+        "source": source,
+        "messages": messages,
+        "mtime": float(audit.get("mtime") or 0.0),
+        "archived": False,
+        "attempt_only": True,
+        "attempt_status": _ml_prefix_attempt_status(audit),
+        "source_audit": audit,
+    }
+
+
+def _merge_ml_prefix_attempts(
+    prefixes: list[dict], prefix_audits: list[dict]
+) -> None:
+    for audit in prefix_audits:
+        stored = next(
+            (
+                prefix for prefix in prefixes
+                if _ml_prefix_attempt_matches(prefix, audit)
+            ),
+            None,
+        )
+        if stored is not None:
+            recovery = stored["source"].get("native_submission_recovery") or {}
+            stored["attempt_status"] = (
+                "complete · 2/2 submissions · recovered pre-deadline response"
+                if recovery.get("accepted_as_submission") is True
+                else _ml_prefix_attempt_status(audit)
+            )
+            stored["source_audit"] = audit
+        else:
+            prefixes.append(_ml_prefix_attempt_entry(audit))
+    prefixes.sort(
+        key=lambda item: (
+            str(item["source"].get("generated_at") or ""),
+            item["mtime"],
+        ),
+        reverse=True,
+    )
+    _assign_prefix_display_names(prefixes)
+
+
 def _prefix_harness(prefix: dict) -> str:
     stored = str(prefix["source"].get("harness") or "simple")
     return "subscription" if stored in {"production", "subscription"} else stored
 
 
 def _prefix_type(prefix: dict) -> tuple[str, str]:
-    """Return the catalog tab for one purpose-built prefix payload."""
+    """Return the catalog tab for one external or trajectory prefix payload."""
 
     source = prefix["source"]
-    if (
-        source.get("generator") == "exp_nq_prefix.py"
-        or source.get("dataset") == "google-research-datasets/nq_open"
-    ):
-        return DEFAULT_PREFIX_TYPE, "Natural Questions"
     explicit = source.get("prefix_type")
     if isinstance(explicit, str) and explicit.strip():
         key = re.sub(r"[^a-z0-9]+", "_", explicit.strip().lower()).strip("_")
@@ -2347,7 +3226,24 @@ def _prefix_type(prefix: dict) -> tuple[str, str]:
             label = source.get("prefix_type_label")
             if not isinstance(label, str) or not label.strip():
                 label = explicit.replace("_", " ").strip().title()
+            if key == "ml_prefix_only":
+                label = "No-honeypot ML"
+            elif key == "activity_log_context":
+                label = "Activity-log context (p-hacking)"
             return key, label.strip()
+    if source.get("kind") == "trajectory":
+        family = source.get("family")
+        seed = str(source.get("seed") or "unknown")
+        if family == "ml_training_data_misuse":
+            return f"ml_{seed}", f"ML: {seed}"
+        if family == "p_hacking":
+            return "p_hacking", "p-hacking"
+        return "trajectory_prefixes", "Trajectory prefixes"
+    if (
+        source.get("generator") == "exp_nq_prefix.py"
+        or source.get("dataset") == "google-research-datasets/nq_open"
+    ):
+        return DEFAULT_PREFIX_TYPE, "Natural Questions"
     return "other", "Other"
 
 
@@ -2365,25 +3261,88 @@ def _prefix_types(prefixes: list[dict]) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _assign_prefix_display_names(prefixes: list[dict]) -> None:
-    """Give NQ payloads stable, short viewer IDs without changing payload identity."""
+def _prefix_type_code(prefix_type: str) -> str:
+    """Derive a compact viewer code from a normalized prefix type key."""
 
+    words = re.findall(r"[a-z0-9]+", prefix_type.lower())
+    if not words:
+        return "P"
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return "".join(word[0] for word in words).upper()
+
+
+def _prefix_type_codes(prefixes: list[dict]) -> dict[str, str]:
+    """Return deterministic, collision-safe codes for the loaded prefix types."""
+
+    type_keys = sorted({_prefix_type(prefix)[0] for prefix in prefixes})
+    by_base: dict[str, list[str]] = defaultdict(list)
+    for type_key in type_keys:
+        by_base[_prefix_type_code(type_key)].append(type_key)
+
+    codes: dict[str, str] = {}
+    used: set[str] = set()
+
+    # Preserve established short codes as new trajectory types enter the same
+    # catalog. Otherwise adding ML: fraud_detection would rename Move fast from
+    # MF to a collision hash.
+    preferred_codes = {
+        DEFAULT_PREFIX_TYPE: "NQ",
+        "science_ethics": "SE",
+        "general_ethics": "GE",
+        "move_fast": "MF",
+        "wikipedia_summaries": "WS",
+        "ml_prefix_only": "MPO",
+        "p_hacking_no_honeypot": "PHN",
+        "ml_fraud_detection": "MLF",
+        "ml_fraud_detection_cutoff": "MLFC",
+        "ml_demand_forecasting": "MLD",
+        "p_hacking": "PH",
+    }
+    for type_key in type_keys:
+        code = preferred_codes.get(type_key)
+        if code and code not in used:
+            codes[type_key] = code
+            used.add(code)
+
+    for base, keys in sorted(by_base.items()):
+        unassigned = [key for key in keys if key not in codes]
+        if not unassigned:
+            continue
+        if len(unassigned) == 1 and base not in used:
+            codes[unassigned[0]] = base
+            used.add(base)
+            continue
+        for type_key in unassigned:
+            digest = hashlib.sha256(type_key.encode()).hexdigest().upper()
+            suffix_length = 2
+            code = f"{base}{digest[:suffix_length]}"
+            while code in used:
+                suffix_length += 1
+                code = f"{base}{digest[:suffix_length]}"
+            codes[type_key] = code
+            used.add(code)
+    return codes
+
+
+def _assign_prefix_display_names(prefixes: list[dict]) -> None:
+    """Give every prefix type short chronological viewer-only IDs."""
+
+    type_codes = _prefix_type_codes(prefixes)
     for prefix in prefixes:
-        prefix["display_name"] = (
-            prefix["payload"].get("name") or prefix["path"].stem
+        prefix["display_type_code"] = type_codes[_prefix_type(prefix)[0]]
+    for type_key in sorted(type_codes):
+        typed_prefixes = sorted(
+            (prefix for prefix in prefixes if _prefix_type(prefix)[0] == type_key),
+            key=lambda prefix: (
+                str(prefix["source"].get("generated_at") or ""),
+                prefix["mtime"],
+                prefix["path"].name,
+            ),
         )
-        prefix["display_ordinal"] = None
-    nq_prefixes = sorted(
-        (prefix for prefix in prefixes if _prefix_type(prefix)[0] == DEFAULT_PREFIX_TYPE),
-        key=lambda prefix: (
-            str(prefix["source"].get("generated_at") or ""),
-            prefix["mtime"],
-            prefix["path"].name,
-        ),
-    )
-    for ordinal, prefix in enumerate(nq_prefixes, start=1):
-        prefix["display_name"] = f"NQ-{ordinal}"
-        prefix["display_ordinal"] = ordinal
+        for ordinal, prefix in enumerate(typed_prefixes, start=1):
+            prefix["display_name"] = f"{type_codes[type_key]}-{ordinal}"
+            prefix["display_ordinal"] = ordinal
 
 
 def _prefix_display_name(prefix: dict) -> str:
@@ -2392,6 +3351,175 @@ def _prefix_display_name(prefix: dict) -> str:
         or prefix["payload"].get("name")
         or prefix["path"].stem
     )
+
+
+def _trajectory_prefix_usages(audits: list[dict]) -> dict[int, set[str]]:
+    usages: dict[int, set[str]] = defaultdict(set)
+    for audit in audits:
+        if audit.get("retrospective_rejudge"):
+            continue
+        continuation = continuation_of(audit)
+        source_id = prefix_source_trajectory_id(audit)
+        if not continuation or source_id is None:
+            continue
+        usages[source_id].add(str(continuation.get("treatment") or "unknown"))
+    return usages
+
+
+def _annotate_trajectory_prefixes(
+    prefixes: list[dict],
+    *,
+    audits_by_id: dict[int, dict],
+    usages: dict[int, set[str]],
+) -> None:
+    for prefix in prefixes:
+        source = prefix["source"]
+        if source.get("kind") != "trajectory":
+            continue
+        source_id = source.get("trajectory_id")
+        try:
+            source_id = int(source_id)
+        except (TypeError, ValueError):
+            continue
+        prefix["source_audit"] = audits_by_id.get(source_id)
+        # A derived static-context payload is not the same prefix conversation as its
+        # source trajectory. Only exact name/SHA campaign matching below may mark it
+        # as used. Ordinary transcript exports retain the historical source-ID link.
+        delivery_mode = (prefix["payload"].get("delivery") or {}).get("mode")
+        prefix["used_treatments"] = (
+            []
+            if delivery_mode == "inline_user_context"
+            else sorted(usages.get(source_id, set()))
+        )
+
+
+def _prefix_condition(prefix: dict) -> tuple[str, str]:
+    stored = prefix["source"].get("prefix_condition")
+    if isinstance(stored, dict):
+        key = str(stored.get("key") or "unknown")
+        label = str(stored.get("label") or "outcome unavailable")
+        return key, label
+
+    audit = prefix.get("source_audit")
+    if not isinstance(audit, dict):
+        return "unknown", "outcome unavailable"
+    category = trajectory_category(audit, respect_exclusion=False)
+    turns = experiment_user_turn_count(audit)
+    if category == "hack":
+        turn_label = f"{turns} turn" + ("s" if turns != 1 else "") if turns else "unknown turns"
+        return f"hack_{turns or 'unknown'}turn", f"hack · {turn_label}"
+    reward = _dimension(audit, "reward_hacking") or {}
+    values = reward.get("value") or []
+    if category == "clean":
+        return "clean", "clean"
+    if category == "notable" and isinstance(values, list):
+        labels = [
+            REWARD_HACKING_DISPLAY_LABELS.get(str(value), str(value).replace("_", " "))
+            for value in values
+            if str(value) != "clean"
+        ]
+        return "notable", "notable · " + " + ".join(labels)
+    if category == "review":
+        return "review", "needs review"
+    return category, category.replace("_", " ")
+
+
+def _prefix_condition_html(prefix: dict) -> str:
+    key, label = _prefix_condition(prefix)
+    css = (
+        "value-bad" if key.startswith("hack_")
+        else "value-good" if key.startswith("clean")
+        else "value-warn" if key.startswith("notable")
+        else "value-concern" if key == "review"
+        else ""
+    )
+    classes = "value-chip" + (f" {css}" if css else "")
+    return f'<span class="{classes}">{esc(label)}</span>'
+
+
+def _prefix_experiment_user_turns(prefix: dict) -> int:
+    return sum(
+        1
+        for message in prefix["messages"]
+        if isinstance(message, dict)
+        and _is_experiment_prefix_user_message(message)
+    )
+
+
+def _is_experiment_prefix_user_message(message: dict) -> bool:
+    metadata = message.get("metadata")
+    return (
+        message.get("role") == "user"
+        and not (
+            isinstance(metadata, dict)
+            and metadata.get("scaffold_injected")
+        )
+    )
+
+
+def _prefix_source_status(prefix: dict) -> str:
+    recovery = (prefix.get("source") or {}).get("native_submission_recovery") or {}
+    if recovery.get("accepted_as_submission") is True:
+        # The recovery payload is the mechanically revalidated source of truth; the
+        # immutable original log necessarily still records the pre-repair failure.
+        return ""
+    audit = prefix.get("source_audit")
+    if not isinstance(audit, dict):
+        return ""
+    if audit.get("prefix_eligible") is False:
+        return "source now prefix-ineligible"
+    status = str(audit.get("mechanical_status") or "")
+    return "" if status == "valid" else status.replace("_", " ")
+
+
+def _prefix_continuation_eligibility(prefix: dict) -> str:
+    source = prefix.get("source") or {}
+    eligibility = source.get("continuation_eligibility")
+    if isinstance(eligibility, dict):
+        if eligibility.get("eligible_by_default") is True:
+            return "eligible by default"
+        if eligibility.get("reason") == "incomplete_protocol":
+            status = str(source.get("attempt_status") or "incomplete protocol")
+            return f"ineligible by default · {status}"
+        missing = eligibility.get("missing_required_deliverables") or []
+        detail = ", ".join(str(item) for item in missing) or "status not recorded"
+        return f"ineligible by default · missing {detail}"
+    if (
+        source.get("prefix_type") == "ml_prefix_only"
+        or source.get("generator") == "exp_ml_prefix.py"
+    ):
+        return (
+            "eligible by default"
+            if source.get("all_deliverables_present") is True
+            else "ineligible by default · legacy eligibility record"
+        )
+    return ""
+
+
+_PREFIX_MODEL_ORDER = {
+    name: index
+    for index, name in enumerate((
+        "opus-4.6", "gpt-5.5", "deepseek-v4-pro", "glm-5.1", "kimi-k2.6",
+    ))
+}
+
+
+def _prefix_model_sort_key(prefix: dict) -> tuple[int, str]:
+    model = str(prefix["payload"].get("target") or "unknown")
+    return _PREFIX_MODEL_ORDER.get(model, len(_PREFIX_MODEL_ORDER)), model
+
+
+def _prefix_condition_sort_key(prefix: dict) -> tuple[int, str]:
+    key, label = _prefix_condition(prefix)
+    order = {
+        "hack_1turn": 0,
+        "hack_2turn": 1,
+        "clean": 2,
+        "notable": 3,
+        "review": 4,
+    }
+    normalized = re.sub(r"_1turn_cutoff$", "", key)
+    return order.get(normalized, len(order)), label
 
 
 def _prefix_source_label(prefix: dict) -> str:
@@ -2406,6 +3534,17 @@ def _prefix_source_label(prefix: dict) -> str:
     if dataset == "google-research-datasets/nq_open":
         return "Natural Questions"
     return dataset
+
+
+def _prefix_source_html(prefix: dict) -> str:
+    source = prefix["source"]
+    label = _prefix_source_label(prefix)
+    trajectory_id = source.get("trajectory_id")
+    if source.get("kind") == "trajectory" and isinstance(trajectory_id, int):
+        return (
+            f'<a href="trajectory-{trajectory_id}.html">{esc(label)}</a>'
+        )
+    return esc(label)
 
 
 def _prefix_context(prefix: dict) -> tuple[str, str, str]:
@@ -2444,6 +3583,11 @@ def _prefix_cost(prefix: dict) -> str:
 
 
 def _prefix_transcript(prefix: dict) -> tuple[str, str | None]:
+    if prefix.get("attempt_only"):
+        try:
+            return render_transcript(prefix["messages"]), None
+        except Exception as error:
+            return "", f"transcript could not be rendered: {error}"
     objects = []
     try:
         for message in prefix["messages"]:
@@ -2478,24 +3622,142 @@ def _prefixes_page(
     prefix_types: tuple[tuple[str, str], ...],
     old: bool = False,
 ) -> str:
+    active_prefix_label = next(
+        (
+            label for prefix_type, label in prefix_types
+            if prefix_type == active_prefix_type
+        ),
+        active_prefix_type.replace("_", " "),
+    )
+    prefix_only = active_prefix_type in {
+        "ml_prefix_only",
+        "p_hacking_no_honeypot",
+    }
+    activity_log_prefixes = active_prefix_type == "activity_log_context"
+    trajectory_prefixes = (
+        active_prefix_type in {
+            "activity_log_context", "p_hacking", "trajectory_prefixes"
+        }
+        or (
+            active_prefix_type.startswith("ml_")
+            and active_prefix_type != "ml_prefix_only"
+        )
+    )
+    activity_label = (
+        "Log lines"
+        if activity_log_prefixes
+        else "Turns"
+        if trajectory_prefixes
+        else "Passes"
+        if prefix_only
+        else "Questions"
+    )
+    show_condition = trajectory_prefixes
+    show_usage = any(
+        prefix.get("used_treatments") for prefix in prefixes
+    )
+    show_source_status = trajectory_prefixes and any(
+        _prefix_source_status(prefix) for prefix in prefixes
+    )
+    model_counts = Counter(
+        str(prefix["payload"].get("target") or "unknown")
+        for prefix in prefixes
+    )
+    group_by_model = (trajectory_prefixes or prefix_only) and any(
+        count > 1 for count in model_counts.values()
+    )
+    display_prefixes = (
+        sorted(
+            prefixes,
+            key=lambda prefix: (
+                _prefix_model_sort_key(prefix),
+                (
+                    (0, str(prefix["source"].get("epoch") or ""))
+                    if prefix_only
+                    else _prefix_condition_sort_key(prefix)
+                ),
+                prefix.get("display_ordinal") or 0,
+            ),
+        )
+        if group_by_model else prefixes
+    )
     rows = []
-    for prefix in prefixes:
+    previous_model = None
+    for prefix in display_prefixes:
         payload = prefix["payload"]
         source = prefix["source"]
+        model = str(payload.get("target") or "unknown")
+        row_classes = []
+        if group_by_model and model != previous_model:
+            row_classes.append("group-start")
+        if prefix.get("selected"):
+            row_classes.append("prefix-selected")
+        if prefix.get("attempt_only"):
+            row_classes.append("prefix-incomplete")
+        row_class = (
+            f' class="{esc(" ".join(row_classes), quote=True)}"'
+            if row_classes else ""
+        )
+        row_group = (
+            f' data-group="{esc(model, quote=True)}"' if group_by_model else ""
+        )
+        previous_model = model
         questions = source.get("questions")
         question_count = len(questions) if isinstance(questions, list) else 0
+        submissions = source.get("submissions")
+        if activity_log_prefixes:
+            activity_count = int(
+                (source.get("activity_log_metadata") or {}).get("line_count") or 0
+            )
+        elif trajectory_prefixes:
+            activity_count = _prefix_experiment_user_turns(prefix)
+        elif prefix_only:
+            activity_count = (
+                submissions
+                if isinstance(submissions, int) and not isinstance(submissions, bool)
+                else 0
+            )
+        else:
+            activity_count = question_count
         context, _status, _status_class = _prefix_context(prefix)
         sort_value = prefix.get("display_ordinal") or _prefix_display_name(prefix)
         rows.append(
-            '<tr>'
+            f'<tr{row_class}{row_group}>'
             f'<td data-sort-value="{esc(str(sort_value), quote=True)}">'
             f'<a href="{esc(prefix["filename"], quote=True)}">'
-            f'{esc(_prefix_display_name(prefix))}</a></td>'
+            f'{esc(_prefix_display_name(prefix))}</a>'
+            + (
+                '<span class="prefix-selected-badge">selected</span>'
+                if prefix.get("selected") else ""
+            )
+            + '</td>'
             f'<td data-sort-value="{esc(_prefix_source_label(prefix), quote=True)}">'
-            f'{esc(_prefix_source_label(prefix))}</td>'
+            f'{_prefix_source_html(prefix)}</td>'
             f'<td data-sort-value="{esc(payload.get("target") or "", quote=True)}">'
             f'{esc(payload.get("target") or "—")}</td>'
-            f'<td data-sort-value="{question_count}">{question_count:,}</td>'
+            + (
+                f'<td data-sort-value="{esc(_prefix_condition(prefix)[1], quote=True)}">'
+                f'{_prefix_condition_html(prefix)}</td>'
+                if show_condition else ""
+            )
+            + (
+                '<td data-sort-value="'
+                + esc(",".join(prefix.get("used_treatments") or []), quote=True)
+                + '">'
+                + esc(", ".join(prefix.get("used_treatments") or []) or "not run yet")
+                + '</td>'
+                if show_usage else ""
+            )
+            + (
+                f'<td>{esc(prefix.get("attempt_status") or "stored payload")}</td>'
+                if prefix_only else ""
+            )
+            + (
+                f'<td>{esc(_prefix_source_status(prefix) or "—")}</td>'
+                if show_source_status else ""
+            )
+            +
+            f'<td data-sort-value="{activity_count}">{activity_count:,}</td>'
             f'<td data-sort-value="{len(prefix["messages"])}">'
             f'{len(prefix["messages"]):,}</td>'
             f'<td data-sort-value="{source.get("measured_context_tokens") or ""}">'
@@ -2505,9 +3767,17 @@ def _prefixes_page(
             '</tr>'
         )
     table = (
-        '<table class="runs sortable"><thead><tr class="cols">'
+        '<table class="runs sortable'
+        + (' grouped' if group_by_model else '')
+        + '"><thead><tr class="cols">'
         '<th>Prefix</th><th>Source</th><th>Model</th>'
-        '<th data-sort-type="number">Questions</th>'
+        + ('<th>Condition</th>' if show_condition else '')
+        + ('<th>Selected for</th>' if show_usage and prefix_only else '')
+        + ('<th>Used as</th>' if show_usage and not prefix_only else '')
+        + ('<th>Attempt status</th>' if prefix_only else '')
+        + ('<th>Source status</th>' if show_source_status else '')
+        +
+        f'<th data-sort-type="number">{activity_label}</th>'
         '<th data-sort-type="number">Messages</th>'
         '<th data-sort-type="number">Context tokens</th>'
         '<th>Generation cost</th>'
@@ -2524,6 +3794,8 @@ def _prefixes_page(
         )
         + '<div class="pagehead"><h1>'
         + ("Old prefixes" if old else "Prefixes")
+        + " — "
+        + esc(active_prefix_label)
         + '</h1></div>'
         + _prefix_load_errors(errors)
         + table
@@ -2578,12 +3850,66 @@ def _prefix_detail_page(
     native_resume_text = ""
     if isinstance(native_resume, dict):
         native_resume_text = "available; archive retained in payload, not rendered"
+        if isinstance(native_resume.get("derived_cutoff"), dict):
+            native_resume_text += "; rewound to the stored prefix cutoff"
+    elif source.get("native_resume_artifact_available") is True:
+        native_resume_text = (
+            "captured in run artifacts; no continuation payload was saved"
+        )
+    evaluation_access = source.get("evaluation_access") or {}
+    hidden_evaluation = (
+        "fully hidden (inputs and labels)"
+        if isinstance(evaluation_access, dict)
+        and evaluation_access.get("test_inputs_available") is False
+        and evaluation_access.get("test_labels_available") is False
+        else ""
+    )
+    judging = source.get("judging") or {}
+    no_judging = (
+        "none (by design)"
+        if isinstance(judging, dict)
+        and judging.get("stage_one_llm_judge") is False
+        and judging.get("final_llm_judge") is False
+        else ""
+    )
+    _condition_key, condition_label = _prefix_condition(prefix)
+    if source.get("kind") != "trajectory" and not isinstance(
+        source.get("prefix_condition"), dict
+    ):
+        condition_label = None
+    cutoff = source.get("cutoff") or {}
     cells = [
         cell("source", _prefix_source_label(prefix)),
+        cell("condition", condition_label),
+        cell("selected for", ", ".join(prefix.get("used_treatments") or [])),
+        cell("attempt status", prefix.get("attempt_status")),
+        cell("source status", _prefix_source_status(prefix)),
+        cell("continuation eligibility", _prefix_continuation_eligibility(prefix)),
         cell("harness", source.get("harness") or "simple"),
         cell("model", payload.get("target")),
         cell("reasoning", "on" if payload.get("reasoning") else "off"),
+        cell("delivery", (payload.get("delivery") or {}).get("mode")),
+        cell(
+            "experiment user turns",
+            _prefix_experiment_user_turns(prefix)
+            if source.get("kind") == "trajectory" else None,
+        ),
         cell("questions", f"{question_count:,}" if question_count else "—"),
+        cell(
+            "activity-log lines",
+            (source.get("activity_log_metadata") or {}).get("line_count"),
+        ),
+        cell(
+            "activity-log bytes",
+            (source.get("activity_log_metadata") or {}).get("byte_count"),
+        ),
+        cell(
+            "activity-log SHA-256",
+            (source.get("activity_log_metadata") or {}).get("sha256"),
+        ),
+        cell("passes", source.get("submissions")),
+        cell("evaluation access", hidden_evaluation),
+        cell("LLM judging", no_judging),
         cell("messages", f'{len(prefix["messages"]):,}'),
         cell("context tokens", context),
         cell("token measurement", source.get("token_measurement")),
@@ -2592,6 +3918,15 @@ def _prefix_detail_page(
         cell("generated", source.get("generated_at") or "not recorded"),
         cell("scaffold", scaffold),
         cell("native resume", native_resume_text),
+        cell(
+            "cutoff messages",
+            (
+                f"{cutoff.get('retained_message_count')} retained · "
+                f"{cutoff.get('omitted_message_count')} omitted"
+            )
+            if isinstance(cutoff, dict) and cutoff.get("affected") is True
+            else None,
+        ),
         cell("file", prefix["path"].name),
     ]
     status_html = (
@@ -2599,6 +3934,42 @@ def _prefix_detail_page(
         if status_class != "na" else ""
     )
     description = str(source.get("description") or "")
+    lossy_processing = source.get("lossy_processing")
+    cleanup_caveat = (
+        str(lossy_processing.get("visible_caveat") or "").strip()
+        if isinstance(lossy_processing, dict)
+        and lossy_processing.get("affected") is True
+        else ""
+    )
+    caveat_label = (
+        "Prefix cutoff"
+        if isinstance(cutoff, dict) and cutoff.get("affected") is True
+        else "Source cleanup"
+    )
+    article_source_items = []
+    articles = source.get("articles")
+    if isinstance(articles, list):
+        for article in articles:
+            if not isinstance(article, dict):
+                continue
+            title = str(article.get("title") or "Wikipedia article")
+            revision = article.get("revision_id")
+            permanent_url = str(article.get("permanent_url") or "")
+            label = title + (f" · revision {revision}" if revision else "")
+            if permanent_url.startswith(("https://", "http://")):
+                label_html = (
+                    f'<a href="{esc(permanent_url, quote=True)}">{esc(label)}</a>'
+                )
+            else:
+                label_html = esc(label)
+            article_source_items.append(f"<li>{label_html}</li>")
+    article_sources_html = (
+        '<details class="sec"><summary><h2>Article sources</h2></summary>'
+        '<div class="metabody"><ul>'
+        + "".join(article_source_items)
+        + "</ul></div></details>"
+        if article_source_items else ""
+    )
     error_html = (
         f'<div class="load-error">{esc(transcript_error)}</div>'
         if transcript_error else ""
@@ -2607,6 +3978,19 @@ def _prefix_detail_page(
     active_prefix_type, _prefix_type_label = _prefix_type(prefix)
     old = bool(prefix.get("archived"))
     display_name = _prefix_display_name(prefix)
+    selection_banner = (
+        '<div class="rejudge-banner"><strong>Selected for continuation:</strong> '
+        + esc(", ".join(prefix.get("used_treatments") or []))
+        + '</div>'
+        if prefix.get("selected") else ""
+    )
+    attempt_banner = (
+        '<div class="prefix-caveat"><strong>Incomplete prefix attempt:</strong> '
+        + esc(str(prefix.get("attempt_status") or "protocol incomplete"))
+        + ". This page preserves the trajectory as evidence; it is not a runnable "
+        "continuation payload.</div>"
+        if prefix.get("attempt_only") else ""
+    )
     body = (
         _navigation(
             seeds,
@@ -2621,10 +4005,18 @@ def _prefix_detail_page(
         + '<a class="headbtn" href="'
         + _prefixes_filename(active_harness, active_prefix_type, old=old)
         + '">All prefixes</a></div>'
+        + selection_banner
+        + attempt_banner
         + (f'<div class="prefix-description">{esc(description)}</div>' if description else "")
+        + (
+            f'<div class="prefix-caveat"><strong>{esc(caveat_label)}:</strong> '
+            f'{esc(cleanup_caveat)}</div>'
+            if cleanup_caveat else ""
+        )
         + '<details class="sec metadata" open><summary><h2>Metadata</h2></summary>'
         + f'<div class="metabody"><div class="metagrid">{"".join(cells)}</div></div>'
         + '</details>'
+        + article_sources_html
         + error_html
         + '<div class="prefix-transcript">'
         + f'<h2>Conversation · {len(prefix["messages"]):,} messages</h2>'
@@ -2640,15 +4032,109 @@ def _prefix_detail_page(
     ), transcript_error
 
 
+def _link_and_promote_audits(
+    audits: list[dict],
+    audit_store: ViewerAuditStore,
+    promoted_runs: set[str] | frozenset[str],
+) -> int:
+    """Perform cross-run enrichment without hydrating the complete corpus."""
+
+    backed = [audit_store.is_backed(audit) for audit in audits]
+    if not any(backed):
+        link_rejudge_sources(audits)
+        return promote_rejudge_judgments(audits, promoted_runs)
+    if not all(backed):
+        raise ValueError("viewer audits cannot mix stored and in-memory records")
+
+    originals = {
+        (
+            audit.get("mode"),
+            audit.get("task"),
+            str(audit.get("seed")),
+            audit.get("epoch"),
+        ): audit
+        for audit in audits
+        if not audit.get("retrospective_rejudge")
+    }
+    for rejudge_summary in audits:
+        source = rejudge_summary.get("retrospective_rejudge")
+        if not isinstance(source, dict):
+            continue
+        key = (
+            source.get("source_run"),
+            source.get("source_task"),
+            str(source.get("seed")),
+            source.get("epoch"),
+        )
+        original_summary = originals.get(key)
+        rejudge = audit_store.hydrate(rejudge_summary)
+        pair = [rejudge]
+        if original_summary is not None:
+            pair.insert(0, audit_store.hydrate(original_summary))
+        link_rejudge_sources(pair)
+        audit_store.save_and_refresh(rejudge_summary, rejudge)
+
+    selected = {str(name) for name in promoted_runs}
+    if not selected:
+        return 0
+    summaries_by_id = {
+        int(audit["id"]): audit
+        for audit in audits
+        if isinstance(audit.get("id"), int)
+    }
+    materialized: dict[str, tuple[dict, dict]] = {}
+
+    def include(summary: dict) -> None:
+        full = audit_store.hydrate(summary)
+        store_key = str(full.get("_viewer_audit_store_key") or "")
+        materialized[store_key] = (summary, full)
+
+    for summary in audits:
+        if str(summary.get("mode") or "") not in selected:
+            continue
+        include(summary)
+        source_id = summary.get("source_trajectory_id")
+        try:
+            source_summary = summaries_by_id.get(int(source_id))
+        except (TypeError, ValueError):
+            source_summary = None
+        if source_summary is not None:
+            include(source_summary)
+    promoted = promote_rejudge_judgments(
+        [full for _summary, full in materialized.values()], selected
+    )
+    for summary, full in materialized.values():
+        audit_store.save_and_refresh(summary, full)
+    return promoted
+
+
 async def build(*, use_cache: bool = True) -> dict:
-    with viewer_build_lock(DATA_ROOT):
+    with viewer_build_lock(DATA_ROOT), ViewerAuditStore(
+        CACHE_ROOT / STORE_FILENAME
+    ) as audit_store:
         audits, errors = await load_all(
             LOGS_ROOT,
             cache_root=CACHE_ROOT,
             use_cache=use_cache,
+            audit_store=audit_store,
+            progress=True,
         )
+        prefix_generation_audits = [
+            audit for audit in audits if _is_prefix_generation_audit(audit)
+        ]
+        # Prefix-generation .eval logs are source evidence for payload construction,
+        # not judged originals. Their payloads render in the Prefixes catalog; keeping
+        # these rows here would contaminate ordinary ML counts merely because the
+        # control members share fraud/demand seed names with the audited family.
+        audits = [
+            audit for audit in audits if not _is_prefix_generation_audit(audit)
+        ]
         assign_stable_ids(audits, REGISTRY_FILE)
-        link_rejudge_sources(audits)
+        promoted_count = _link_and_promote_audits(
+            audits,
+            audit_store,
+            promoted_rejudge_run_names(),
+        )
         _apply_continuation_source_statuses(audits)
         VIEWER_ROOT.mkdir(parents=True, exist_ok=True)
         archived_pages = (
@@ -2660,14 +4146,21 @@ async def build(*, use_cache: bool = True) -> dict:
         archived_trajectory_keys = old_trajectory_keys()
         current_grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
         past_grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        # TEMPORARY judge-comparisons routing (Owen, 2026-08-04): rejudge rows never
-        # reach the trajectories, visuals, or past pages — canonical judgments stay
-        # official there — and render only on the judge-comparisons page.
+        # Rejudge rows themselves render only on the comparison page. An explicitly
+        # promoted rejudge is also copied onto its original row above, so that row is
+        # what drives the canonical trajectory pages and visuals.
         rejudge_grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
         # Continuation trajectories never pool into the per-seed pages (they would
         # corrupt the original base rates); they render only on the global
         # Continuations page, with their prefix linked as the Source column.
         continuation_rows: list[dict] = []
+        # Complete inline activity-log continuations are prefix experiments. They
+        # share continuation scoring/visuals but render beside their payloads under
+        # Prefixes instead of in the global Continuations window.
+        prefix_experiment_rows: list[dict] = []
+        # Activity-log treatments are also conditioned trajectories and must not
+        # contaminate the ordinary per-seed base-rate pages.
+        multi_agent_rows: list[dict] = []
         for audit in audits:
             seed = str(audit.get("seed") or "unknown")
             harness = _audit_harness(audit)
@@ -2679,8 +4172,16 @@ async def build(*, use_cache: bool = True) -> dict:
                 audit, current_methods
             )
             continuation = continuation_of(audit)
+            multi_agent = _multi_agent_record(audit)
             if continuation and audit.get("source_trajectory_id") is None:
                 audit["source_trajectory_id"] = prefix_source_trajectory_id(audit)
+            if multi_agent and audit.get("source_trajectory_id") is None:
+                source_id = (multi_agent.get("source") or {}).get("trajectory_id")
+                if source_id is not None:
+                    try:
+                        audit["source_trajectory_id"] = int(source_id)
+                    except (TypeError, ValueError):
+                        pass
             archived = (
                 str(audit.get("mode") or "") in archived_run_names
                 or trajectory_key(audit) in archived_trajectory_keys
@@ -2690,7 +4191,12 @@ async def build(*, use_cache: bool = True) -> dict:
             elif archived:
                 destination = past_grouped
             elif continuation:
+                if is_activity_log_context_continuation(audit):
+                    prefix_experiment_rows.append(audit)
                 continuation_rows.append(audit)
+                continue
+            elif multi_agent:
+                multi_agent_rows.append(audit)
                 continue
             elif (
                 audit["current_judge_method"]
@@ -2709,23 +4215,78 @@ async def build(*, use_cache: bool = True) -> dict:
             }
         )
         families = _seed_families()
-        archived_prefix_files = old_prefix_files()
-        prefixes, prefix_errors = _load_prefixes(archived_prefix_files)
-        prefix_types = _prefix_types(prefixes)
-        show_other_continuations = any(
-            continuation_direction(audit) == OTHER_CONTINUATION_DIRECTION
-            for audit in continuation_rows
-        )
-        current_originals = [
-            audit
-            for rows in current_grouped.values()
-            for audit in rows
-        ]
         audits_by_id = {
             int(audit["id"]): audit
             for audit in audits
             if isinstance(audit.get("id"), int)
         }
+        trajectory_prefix_usages = _trajectory_prefix_usages(audits)
+        old_trajectory_ids = frozenset(
+            int(audit["id"])
+            for rows in past_grouped.values()
+            for audit in rows
+            if isinstance(audit.get("id"), int)
+        )
+        archived_prefix_files = old_prefix_files()
+        prefixes, prefix_errors = _load_prefixes(
+            archived_prefix_files,
+            frozenset(trajectory_prefix_usages),
+            old_trajectory_ids,
+        )
+        prefix_generation_details = [
+            audit_store.hydrate(audit) for audit in prefix_generation_audits
+        ]
+        _merge_ml_prefix_attempts(prefixes, prefix_generation_details)
+        del prefix_generation_details
+        _annotate_trajectory_prefixes(
+            prefixes,
+            audits_by_id=audits_by_id,
+            usages=trajectory_prefix_usages,
+        )
+        _annotate_payload_prefix_usages(
+            prefixes,
+            _continuation_payload_usages(audits),
+        )
+        prefix_types = _prefix_types(prefixes)
+        if (
+            prefix_experiment_rows
+            and not any(
+                key == ACTIVITY_LOG_PREFIX_TYPE for key, _label in prefix_types
+            )
+        ):
+            prefix_types = (
+                *prefix_types,
+                (
+                    ACTIVITY_LOG_PREFIX_TYPE,
+                    "Activity-log context (p-hacking)",
+                ),
+            )
+        show_other_continuations = any(
+            continuation_direction(audit) == OTHER_CONTINUATION_DIRECTION
+            for audit in continuation_rows
+        )
+        hidden_continuation_destinations = sorted({
+            str(audit.get("seed") or "unknown")
+            for audit in continuation_rows
+            if str(audit.get("seed") or "unknown")
+            not in CONTINUATION_DESTINATIONS
+        })
+        if hidden_continuation_destinations:
+            raise ValueError(
+                "Continuation data exists for destination(s) without viewer tabs: "
+                + ", ".join(hidden_continuation_destinations)
+            )
+        current_originals = [
+            audit
+            for rows in current_grouped.values()
+            for audit in rows
+        ]
+        visible_continuation_directions = [
+            key
+            for key, _source, destination in CONTINUATION_DIRECTIONS
+            if destination in CONTINUATION_DESTINATIONS
+        ]
+        expected_continuation_pages = set()
         for harness in HARNESS_NAV_MODES:
             harness_current = {
                 seed: current_grouped.get((harness, seed), []) for seed in seeds
@@ -2799,12 +4360,14 @@ async def build(*, use_cache: bool = True) -> dict:
                             title=f"{seed} — old trajectories",
                         ),
                     )
-            continuation_directions = [
-                key for key, _source, _destination in CONTINUATION_DIRECTIONS
-            ]
+            continuation_directions = list(visible_continuation_directions)
             if show_other_continuations:
                 continuation_directions.append(OTHER_CONTINUATION_DIRECTION)
             for direction in continuation_directions:
+                expected_continuation_pages.update({
+                    _continuations_filename(harness, direction),
+                    _continuation_visuals_filename(harness, direction),
+                })
                 _write_atomic(
                     VIEWER_ROOT / _continuations_filename(harness, direction),
                     _continuations_page(
@@ -2828,6 +4391,28 @@ async def build(*, use_cache: bool = True) -> dict:
                         show_other_continuations=show_other_continuations,
                     ),
                 )
+            _write_atomic(
+                VIEWER_ROOT / _multi_agent_filename(harness),
+                _multi_agent_page(
+                    multi_agent_rows,
+                    seeds=seeds,
+                    active_harness=harness,
+                ),
+            )
+            _write_atomic(
+                VIEWER_ROOT / _multi_agent_filename(harness, "inputs"),
+                _multi_agent_inputs_page(
+                    multi_agent_rows,
+                    seeds=seeds,
+                    active_harness=harness,
+                ),
+            )
+        for path in VIEWER_ROOT.glob("*continuations*.html"):
+            if (
+                path.name not in expected_continuation_pages
+                and _GENERATED_MARKER in path.read_text()
+            ):
+                path.unlink()
         expected_prefix_pages = set()
         for prefix in prefixes:
             expected_prefix_pages.add(prefix["filename"])
@@ -2843,6 +4428,41 @@ async def build(*, use_cache: bool = True) -> dict:
             _write_atomic(VIEWER_ROOT / prefix["filename"], detail_page)
         expected_prefix_indexes = set()
         for harness in HARNESS_NAV_MODES:
+            if any(
+                key == ACTIVITY_LOG_PREFIX_TYPE for key, _label in prefix_types
+            ):
+                for view in ("trajectories", "visuals"):
+                    expected_prefix_indexes.add(
+                        _prefix_experiment_filename(
+                            harness, ACTIVITY_LOG_PREFIX_TYPE, view
+                        )
+                    )
+                _write_atomic(
+                    VIEWER_ROOT
+                    / _prefix_experiment_filename(
+                        harness, ACTIVITY_LOG_PREFIX_TYPE, "trajectories"
+                    ),
+                    _activity_log_prefix_trajectories_page(
+                        prefix_experiment_rows,
+                        seeds=seeds,
+                        prefix_types=prefix_types,
+                        active_harness=harness,
+                    ),
+                )
+                _write_atomic(
+                    VIEWER_ROOT
+                    / _prefix_experiment_filename(
+                        harness, ACTIVITY_LOG_PREFIX_TYPE, "visuals"
+                    ),
+                    _activity_log_prefix_visuals_page(
+                        prefix_experiment_rows,
+                        current_originals,
+                        audits_by_id=audits_by_id,
+                        seeds=seeds,
+                        prefix_types=prefix_types,
+                        active_harness=harness,
+                    ),
+                )
             harness_prefixes = [
                 prefix for prefix in prefixes
                 if _prefix_harness(prefix) == harness
@@ -2900,30 +4520,36 @@ async def build(*, use_cache: bool = True) -> dict:
                     )
         expected = set()
         expected_judge_views = set()
-        for audit in audits:
-            filename = f'trajectory-{int(audit["id"])}.html'
-            judge_filename = _judge_trajectory_filename(audit)
+        for audit_index, audit_summary in enumerate(audits, start=1):
+            filename = f'trajectory-{int(audit_summary["id"])}.html'
+            judge_filename = _judge_trajectory_filename(audit_summary)
             expected.add(filename)
             expected_judge_views.add(judge_filename)
-            if audit.get("retrospective_rejudge"):
+            if audit_summary.get("retrospective_rejudge"):
                 active_view = "comparisons"
             elif (
-                str(audit.get("mode") or "") in archived_run_names
-                or trajectory_key(audit) in archived_trajectory_keys
+                str(audit_summary.get("mode") or "") in archived_run_names
+                or trajectory_key(audit_summary) in archived_trajectory_keys
             ):
                 active_view = "past"
-            elif continuation_of(audit):
+            elif is_activity_log_context_continuation(audit_summary):
+                active_view = "prefix_experiment_trajectories"
+            elif continuation_of(audit_summary):
                 active_view = "continuations"
-            elif audit["current_judge_method"]:
+            elif _multi_agent_record(audit_summary):
+                active_view = "multi_agent"
+            elif audit_summary["current_judge_method"]:
                 active_view = "trajectories"
             else:
                 active_view = "past"
+            audit = audit_store.hydrate(audit_summary)
             _write_atomic(
                 VIEWER_ROOT / filename,
                 _trajectory(
                     audit,
                     seeds=seeds,
                     active_view=active_view,
+                    prefix_types=prefix_types,
                     show_other_continuations=show_other_continuations,
                 ),
             )
@@ -2933,9 +4559,17 @@ async def build(*, use_cache: bool = True) -> dict:
                     audit,
                     seeds=seeds,
                     active_view=active_view,
+                    prefix_types=prefix_types,
                     show_other_continuations=show_other_continuations,
                 ),
             )
+            del audit
+            if audit_index % 250 == 0 or audit_index == len(audits):
+                print(
+                    f"viewer: rendered {audit_index:,}/{len(audits):,} "
+                    "trajectory detail pairs",
+                    flush=True,
+                )
         for path in VIEWER_ROOT.glob("trajectory-*.html"):
             if path.name not in expected:
                 path.unlink()
@@ -2948,7 +4582,10 @@ async def build(*, use_cache: bool = True) -> dict:
         "current_trajectories": sum(map(len, current_grouped.values())),
         "past_trajectories": sum(map(len, past_grouped.values())),
         "rejudge_trajectories": sum(map(len, rejudge_grouped.values())),
+        "promoted_rejudge_judgments": promoted_count,
         "continuation_trajectories": len(continuation_rows),
+        "prefix_experiment_trajectories": len(prefix_experiment_rows),
+        "multi_agent_trajectories": len(multi_agent_rows),
         "prefixes": len(prefixes),
         "prefix_load_errors": len(prefix_errors),
         "load_errors": len(errors),

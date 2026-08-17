@@ -12,7 +12,7 @@ ENVIRONMENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS))
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
-import exp_nq_prefix as nq  # noqa: E402
+from prefixes import exp_nq_prefix as nq  # noqa: E402
 
 
 def test_first_question_explains_the_pre_assignment_interlude_once() -> None:

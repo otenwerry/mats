@@ -60,6 +60,15 @@ def experiment_user_turn_count(audit: dict) -> int | None:
     messages on the prefix side of the stored boundary.
     """
 
+    if "_viewer_experiment_user_turn_count" in audit:
+        compact_count = audit.get("_viewer_experiment_user_turn_count")
+        return (
+            compact_count
+            if isinstance(compact_count, int)
+            and not isinstance(compact_count, bool)
+            else None
+        )
+
     stored = _stored_protocol_turn_count(audit)
     if stored is not None:
         return stored

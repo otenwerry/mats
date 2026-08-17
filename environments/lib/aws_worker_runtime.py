@@ -23,6 +23,7 @@ from aws_runtime_contract import (
     DEFAULT_WORKER_PIPELINE_SCRIPT,
     FAILURE_PACKAGE_SECONDS,
     SSM_PARAMETER_NAME,
+    WORKER_ACTIVITY_LOG_PAYLOAD_PATH,
     WORKER_PIPELINE_SCRIPTS,
     WORKER_PREFIX_PAYLOAD_PATH,
     WORKER_VERSION,
@@ -426,6 +427,36 @@ def worker_main(job_path: Path) -> int:
                     f"check ({digest[:12]} != {job['prefix_payload_sha256'][:12]})"
                 ),
                 "failure_code": "prefix_checksum_failed",
+                "completed_at": _utc_now(),
+            }
+            marker = worker_root / "failure.json"
+            marker.write_text(json.dumps(failure, sort_keys=True))
+            _aws_cli(
+                "s3", "cp", str(marker),
+                f"s3://{job['bucket']}/{job['failure_key']}",
+                "--region", job["region"], "--sse", "AES256",
+            )
+            return 1
+    if job.get("activity_log_payload_key"):
+        payload_path = Path(WORKER_ACTIVITY_LOG_PAYLOAD_PATH)
+        _aws_cli(
+            "s3", "cp",
+            f"s3://{job['bucket']}/{job['activity_log_payload_key']}",
+            str(payload_path), "--region", job["region"],
+        )
+        digest = sha256_file(payload_path)
+        if digest != job["activity_log_payload_sha256"]:
+            failure = {
+                "schema_version": AWS_SCHEMA_VERSION,
+                "campaign_id": job["campaign_id"],
+                "cell_id": job["cell_id"],
+                "instance_id": instance_id,
+                "reason": (
+                    "downloaded activity-log payload failed its SHA-256 check "
+                    f"({digest[:12]} != "
+                    f"{job['activity_log_payload_sha256'][:12]})"
+                ),
+                "failure_code": "activity_log_checksum_failed",
                 "completed_at": _utc_now(),
             }
             marker = worker_root / "failure.json"

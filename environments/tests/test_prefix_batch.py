@@ -13,7 +13,7 @@ ENVIRONMENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS))
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
-import exp_prefix_batch as batch  # noqa: E402
+from prefixes import exp_prefix_batch as batch  # noqa: E402
 
 
 def default_cfg() -> dict:

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import random
 import re
 import shlex
 import shutil
@@ -36,6 +37,7 @@ from aws_runtime_contract import (
     DEFAULT_WORKER_PIPELINE_SCRIPT,
     FAILURE_PACKAGE_SECONDS,
     SSM_PARAMETER_NAME,
+    WORKER_ACTIVITY_LOG_PAYLOAD_PATH,
     WORKER_PIPELINE_SCRIPTS,
     WORKER_PREFIX_PAYLOAD_PATH,
     WORKER_VERSION,
@@ -47,7 +49,7 @@ from exp_subscription_harness import (
 )
 from exp_target_harness import opencode_go_model_spec, production_scaffold_for_target
 from inspect_task_naming import bounded_inspect_task_name
-from project_paths import ENV_FILE
+from project_paths import DATA_ROOT, ENV_FILE
 from sandbox_runtime import (
     compose_file_for_harness,
     discover_sandbox_compose_files,
@@ -59,7 +61,9 @@ from sandbox_runtime import (
 STACK_NAME = "mats-environments"
 DEFAULT_REGION = "us-west-2"
 DEFAULT_INSTANCE_TYPE = "c7a.xlarge"
-DEFAULT_VM_CONCURRENCY = 75
+# Verified 2026-08-14: us-west-2 Standard On-Demand quota is 1,000 vCPUs;
+# c7a.xlarge uses 4 vCPUs, allowing 250 simultaneous trajectory workers.
+DEFAULT_VM_CONCURRENCY = 250
 LEGACY_ROOT_VOLUME_GB = 16
 ROOT_VOLUME_GB = 32
 S3_RETENTION_DAYS = 7
@@ -88,6 +92,18 @@ AWS_AUTH_EXPIRY_CODES = frozenset({
     "ExpiredTokenException",
     "RequestExpired",
 })
+EC2_LAUNCH_THROTTLE_CODES = frozenset({
+    "RequestLimitExceeded",
+    "RequestThrottled",
+    "ServiceUnavailable",
+    "Throttling",
+    "ThrottlingException",
+})
+EC2_LAUNCH_MAX_ATTEMPTS = 12
+EC2_LAUNCH_BACKOFF_CAP_SECONDS = 30.0
+AWS_CREDENTIAL_PROCESS = (
+    Path(__file__).resolve().parent.parent / "tools" / "aws_credential_process.py"
+)
 
 class AwsTrajectoryError(RuntimeError):
     pass
@@ -222,17 +238,27 @@ def aws_clients(region: str) -> dict:
     # a one-off shell setting wins over the saved project default.
     load_dotenv(ENV_FILE, override=False)
     profile = os.environ.get("AWS_PROFILE") or None
-    session = boto3.Session(profile_name=profile, region_name=region)
-    credentials = session.get_credentials()
-    if profile and credentials is None:
+    direct_session = boto3.Session(profile_name=profile, region_name=region)
+    if profile and shutil.which("aws") is not None:
+        # Even when Botocore can initially read an ``aws login`` profile, it can
+        # materialize that profile as fixed short-lived credentials.  Long-running
+        # controllers then fail at expiry.  The CLI export provider preserves the
+        # Expiration field and is re-invoked by Botocore when credentials need to be
+        # refreshed.
         session = _aws_cli_export_session(boto3, profile=profile, region=region)
-    elif credentials is None:
-        raise AwsTrajectoryError(
-            f"AWS_PROFILE is unset after loading {ENV_FILE}, and Boto3 found no "
-            "default credentials; add AWS_PROFILE=<profile> to that exact file"
-        )
-    elif profile:
-        print(f"AWS credentials: profile={profile} via Boto3 credential chain")
+    else:
+        credentials = direct_session.get_credentials()
+        if credentials is None:
+            raise AwsTrajectoryError(
+                f"AWS_PROFILE is unset after loading {ENV_FILE}, and Boto3 found no "
+                "default credentials; add AWS_PROFILE=<profile> to that exact file"
+            )
+        session = direct_session
+        if profile:
+            print(
+                f"AWS credentials: profile={profile} via Boto3 credential chain "
+                "(AWS CLI unavailable, so automatic CLI refresh is disabled)"
+            )
     return {
         "sts": session.client("sts"),
         "s3": session.client("s3"),
@@ -245,7 +271,13 @@ def aws_clients(region: str) -> dict:
 
 
 def _aws_cli_export_session(boto3_module, *, profile: str, region: str):
-    """Bridge an AWS CLI login profile into Botocore's refreshable provider chain."""
+    """Bridge an AWS CLI profile through one shared refresh/cache process.
+
+    Every controller has its own Botocore provider.  The helper serializes their CLI
+    refreshes and reuses one protected temporary-credential cache, preventing a batch
+    of long-running controllers from stampeding the AWS login token endpoint when the
+    original credentials expire together.
+    """
 
     from botocore.credentials import ProcessProvider
     from botocore.session import Session as BotocoreSession
@@ -256,16 +288,24 @@ def _aws_cli_export_session(boto3_module, *, profile: str, region: str):
             f"AWS profile {profile!r} has no SDK-readable credentials and the AWS "
             "CLI is not on PATH; install AWS CLI v2 or use an SDK-readable profile"
         )
+    if not AWS_CREDENTIAL_PROCESS.is_file():
+        raise AwsTrajectoryError(
+            f"AWS credential-process helper is missing: {AWS_CREDENTIAL_PROCESS}"
+        )
     bridge_profile = "mats-aws-cli-export"
+    cache_key = hashlib.sha256(profile.encode()).hexdigest()[:16]
+    auth_root = DATA_ROOT / "aws_auth"
     command = shlex.join([
-        aws,
-        "configure",
-        "export-credentials",
+        sys.executable,
+        str(AWS_CREDENTIAL_PROCESS),
         "--profile",
         profile,
-        "--format",
-        "process",
-        "--no-cli-pager",
+        "--aws-path",
+        aws,
+        "--cache-path",
+        str(auth_root / f"credentials-{cache_key}.json"),
+        "--lock-path",
+        str(auth_root / f"credentials-{cache_key}.lock"),
     ])
     provider = ProcessProvider(
         bridge_profile,
@@ -295,7 +335,7 @@ def _aws_cli_export_session(boto3_module, *, profile: str, region: str):
             f"`aws login --profile {profile}` and retry"
         )
     print(
-        f"AWS credentials: profile={profile} via AWS CLI refreshable credential bridge"
+        f"AWS credentials: profile={profile} via shared AWS CLI refresh/cache bridge"
     )
     return session
 
@@ -1255,6 +1295,101 @@ def build_cells(cfg: dict, *, campaign_id: str, source: dict,
     return cells
 
 
+def build_prefix_generation_cells(
+    cfg: dict,
+    *,
+    campaign_id: str,
+    source: dict,
+    bucket: str,
+    hourly_price: float,
+) -> list[dict]:
+    """Cells for no-judge prefix generation: one VM per prefix."""
+
+    cells = []
+    pipeline_script = str(
+        cfg.get("prefix_pipeline_script") or "prefixes/exp_ml_prefix.py"
+    )
+    if pipeline_script not in WORKER_PIPELINE_SCRIPTS:
+        raise AwsTrajectoryError(
+            f"unsupported prefix pipeline script {pipeline_script!r}"
+        )
+    task_namespace = str(cfg.get("prefix_task_namespace") or "ml_prefix_only")
+    campaign_namespace = str(cfg.get("prefix_campaign_namespace") or "ml-prefix")
+    selections = cfg.get("_cell_selections") or [
+        (target, seed, original_epoch)
+        for target in cfg["targets"]
+        for seed in cfg["seeds"]
+        for original_epoch in range(1, cfg["epochs"] + 1)
+    ]
+    target_models = dict(zip(cfg["targets"], cfg["target_models"], strict=True))
+    for target, seed, original_epoch in selections:
+        raw = f"{campaign_namespace}-{cfg['name']}-{target}-{seed}-e{original_epoch}"
+        suffix = hashlib.sha256(raw.encode()).hexdigest()[:8]
+        cell_id = f"{_safe_slug(raw)}-{suffix}"
+        task_suffix = cell_id
+        worker_run_dir = f"{campaign_id}-{cell_id}"
+        cell_prefix = f"campaigns/{campaign_id}/cells/{cell_id}"
+        target_fragment = re.sub(r"[^a-z0-9]+", "-", target.lower()).strip("-")
+        task_name = bounded_inspect_task_name(
+            f"{task_namespace}_{seed}_{target_fragment or 'model'}",
+            task_suffix,
+        )
+        args = [
+            f"--targets={target}",
+            f"--seeds={seed}",
+            "--epochs=1",
+            f"--harness={cfg['harness']}",
+            f"--reasoning={'yes' if cfg['reasoning'] else 'no'}",
+            f"--name={cfg['name']}",
+            "--concurrency=1",
+            "--sandbox-concurrency=1",
+            f"--time-limit={cfg['time_limit']}",
+            "--compute=local",
+            "--skip-viewer",
+        ]
+        if cfg.get("pressure") is not None:
+            args.append(f"--pressure={cfg['pressure']}")
+        sandbox_compose = _sandbox_compose_for_target(
+            cfg, target=target, target_model=target_models[target]
+        )
+        cells.append({
+            "schema_version": AWS_SCHEMA_VERSION,
+            "kind": "trajectory",
+            "campaign_id": campaign_id,
+            "cell_id": cell_id,
+            "target": target,
+            "target_model": target_models[target],
+            "harness": cfg["harness"],
+            "family": _seed_family(cfg),
+            "sandbox_compose": sandbox_compose,
+            "seed": seed,
+            "original_epoch": original_epoch,
+            "pipeline_script": pipeline_script,
+            "task_suffix": task_suffix,
+            "task_name": task_name,
+            "worker_run_dir": worker_run_dir,
+            "bucket": bucket,
+            "region": cfg["aws_region"],
+            "instance_type": cfg["aws_instance_type"],
+            "funding": cfg.get("aws_funding"),
+            "hourly_price_usd": hourly_price,
+            "root_volume_gb": ROOT_VOLUME_GB,
+            "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
+            "source_sha256": source["sha256"],
+            "source_bytes": source["bytes"],
+            "job_key": f"{cell_prefix}/job.json",
+            "result_key": f"{cell_prefix}/result.tar.gz",
+            "complete_key": f"{cell_prefix}/complete.json",
+            "failure_key": f"{cell_prefix}/failure.json",
+            "pipeline_args": args,
+            "allowed_secret_names": list(
+                cfg.get("worker_allowed_secret_names") or []
+            ),
+            "status": "planned",
+        })
+    return cells
+
+
 def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
                              bucket: str, hourly_price: float) -> list[dict]:
     """Cells for a continuation campaign: one VM per (prefix, seed, epoch).
@@ -1313,6 +1448,8 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
         ]
         if cfg.get("pressure"):
             args.append(f"--pressure={cfg['pressure']}")
+        if cfg.get("allow_incomplete_prefixes"):
+            args.append("--allow-incomplete-prefixes")
         sandbox_compose = _sandbox_compose_for_target(
             cfg, target=payload["target"], target_model=payload["target_model"]
         )
@@ -1361,6 +1498,106 @@ def build_continuation_cells(cfg: dict, *, campaign_id: str, source: dict,
     return cells
 
 
+def build_multi_agent_cells(cfg: dict, *, campaign_id: str, source: dict,
+                            bucket: str, hourly_price: float) -> list[dict]:
+    """One VM per (activity log, new seed, epoch), mirroring continuations."""
+
+    experiment = cfg["multi_agent"]
+    treatment = experiment["treatment"]
+    payloads_by_name = {item["name"]: item for item in experiment["payloads"]}
+    selections = cfg.get("_cell_selections") or [
+        (payload["name"], seed, original_epoch)
+        for payload in experiment["payloads"]
+        for seed in cfg["seeds"]
+        for original_epoch in range(1, cfg["epochs"] + 1)
+    ]
+    cells = []
+    for activity_name, seed, original_epoch in selections:
+        payload = payloads_by_name.get(activity_name)
+        if payload is None:
+            raise AwsTrajectoryError(
+                f"multi-agent cell references unknown activity log {activity_name!r}"
+            )
+        raw = f"{treatment}-{activity_name}-{seed}-e{original_epoch}"
+        suffix = hashlib.sha256(raw.encode()).hexdigest()[:8]
+        cell_id = f"{_safe_slug(raw)}-{suffix}"
+        task_suffix = cell_id
+        worker_run_dir = f"{campaign_id}-{cell_id}"
+        cell_prefix = f"campaigns/{campaign_id}/cells/{cell_id}"
+        model_last = payload["target_model"].split("/")[-1]
+        task_name = bounded_inspect_task_name(
+            f"multi_agent_{treatment}_{model_last}_{seed}_a{activity_name}",
+            task_suffix,
+        )
+        args = [
+            f"--treatment={treatment}",
+            f"--activity-log-files={WORKER_ACTIVITY_LOG_PAYLOAD_PATH}",
+            f"--seed-dir={cfg.get('seed_dir') or Path(cfg['seeds_path']).name}",
+            f"--seeds={seed}",
+            "--epochs=1",
+            f"--harness={cfg['harness']}",
+            f"--condition={cfg['condition']}",
+            f"--judge={cfg['judge_resolved']}",
+            f"--gate-model={cfg['gate_model']}",
+            "--concurrency=1",
+            "--sandbox-concurrency=1",
+            f"--time-limit={cfg['time_limit']}",
+            "--compute=local",
+            "--skip-viewer",
+        ]
+        if cfg.get("pressure"):
+            args.append(f"--pressure={cfg['pressure']}")
+        sandbox_compose = _sandbox_compose_for_target(
+            cfg, target=payload["target"], target_model=payload["target_model"]
+        )
+        payload_key = (
+            f"campaigns/{campaign_id}/activity-logs/"
+            f"{activity_name}-{payload['sha256'][:12]}.json"
+        )
+        cells.append({
+            "schema_version": AWS_SCHEMA_VERSION,
+            "kind": "trajectory",
+            "campaign_id": campaign_id,
+            "cell_id": cell_id,
+            "target": payload["target"],
+            "target_model": payload["target_model"],
+            "harness": cfg["harness"],
+            "family": _seed_family(cfg),
+            "sandbox_compose": sandbox_compose,
+            "seed": seed,
+            "original_epoch": original_epoch,
+            "treatment": treatment,
+            "activity_log_name": activity_name,
+            "activity_log_sha256": payload["sha256"],
+            "activity_log_payload_key": payload_key,
+            "activity_log_payload_sha256": payload["file_sha256"],
+            "activity_log_payload_local": payload["local_path"],
+            "pipeline_script": "exp_multi_agent_pipeline.py",
+            "task_suffix": task_suffix,
+            "task_name": task_name,
+            "worker_run_dir": worker_run_dir,
+            "bucket": bucket,
+            "region": cfg["aws_region"],
+            "instance_type": cfg["aws_instance_type"],
+            "funding": cfg.get("aws_funding"),
+            "hourly_price_usd": hourly_price,
+            "root_volume_gb": ROOT_VOLUME_GB,
+            "source_key": f"campaigns/{campaign_id}/source/source.tar.gz",
+            "source_sha256": source["sha256"],
+            "source_bytes": source["bytes"],
+            "job_key": f"{cell_prefix}/job.json",
+            "result_key": f"{cell_prefix}/result.tar.gz",
+            "complete_key": f"{cell_prefix}/complete.json",
+            "failure_key": f"{cell_prefix}/failure.json",
+            "pipeline_args": args,
+            "allowed_secret_names": list(
+                cfg.get("worker_allowed_secret_names") or []
+            ),
+            "status": "planned",
+        })
+    return cells
+
+
 def _upload_prefix_payloads(clients: dict, cells: list[dict]) -> None:
     """Upload each unique prefix payload once, verifying local bytes first."""
 
@@ -1388,12 +1625,48 @@ def _upload_prefix_payloads(clients: dict, cells: list[dict]) -> None:
         uploaded.add(key)
 
 
+def _upload_activity_log_payloads(clients: dict, cells: list[dict]) -> None:
+    """Upload each unique activity-log payload once with byte verification."""
+
+    uploaded: set[str] = set()
+    for cell in cells:
+        key = cell.get("activity_log_payload_key")
+        if not key or key in uploaded:
+            continue
+        local = Path(cell["activity_log_payload_local"])
+        if not local.is_file():
+            raise AwsTrajectoryError(
+                f"activity-log payload is missing locally: {local}"
+            )
+        digest = _sha256_file(local)
+        if digest != cell["activity_log_payload_sha256"]:
+            raise AwsTrajectoryError(
+                f"activity-log payload {local} changed since planning "
+                f"({digest[:12]} != "
+                f"{cell['activity_log_payload_sha256'][:12]})"
+            )
+        clients["s3"].upload_file(
+            str(local), cell["bucket"], key,
+            ExtraArgs={"ServerSideEncryption": "AES256"},
+        )
+        uploaded.add(key)
+
+
 def _campaign_id(cfg: dict) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     nonce = uuid.uuid4().hex[:8]
     if cfg.get("continuation"):
         label = _safe_slug(cfg["continuation"]["treatment"])
         return f"continuation-aws-{label}-{cfg['epochs']}ep-{stamp}-{nonce}"
+    if cfg.get("multi_agent"):
+        label = _safe_slug(cfg["multi_agent"]["treatment"])
+        return f"multi-agent-aws-{label}-{cfg['epochs']}ep-{stamp}-{nonce}"
+    if cfg.get("prefix_only") is True:
+        label = _safe_slug(cfg["name"])
+        namespace = _safe_slug(
+            str(cfg.get("prefix_campaign_namespace") or "ml-prefix")
+        )
+        return f"{namespace}-aws-{label}-{cfg['epochs']}ep-{stamp}-{nonce}"
     label = cfg["targets"][0] if len(cfg["targets"]) == 1 else f"{len(cfg['targets'])}targets"
     return (
         f"real-v2-aws-{_safe_slug(label)}-{cfg['condition']}-"
@@ -1589,21 +1862,42 @@ def _launch_cell(clients: dict, *, template_id: str, cell: dict) -> str:
         Bucket=cell["bucket"], Key=cell["job_key"], Body=_json_bytes(cell),
         ServerSideEncryption="AES256",
     )
-    response = clients["ec2"].run_instances(
-        LaunchTemplate={"LaunchTemplateId": template_id, "Version": "$Default"},
-        MinCount=1,
-        MaxCount=1,
-        ClientToken=hashlib.sha256(
+    run_args = {
+        "LaunchTemplate": {
+            "LaunchTemplateId": template_id,
+            "Version": "$Default",
+        },
+        "MinCount": 1,
+        "MaxCount": 1,
+        "ClientToken": hashlib.sha256(
             f"{cell['campaign_id']}:{cell['cell_id']}".encode()
         ).hexdigest(),
-        UserData=_worker_user_data(cell),
-        TagSpecifications=[{"ResourceType": "instance", "Tags": [
+        "UserData": _worker_user_data(cell),
+        "TagSpecifications": [{"ResourceType": "instance", "Tags": [
             {"Key": "Name", "Value": f"{STACK_NAME}-{cell['cell_id']}"},
             {"Key": "Project", "Value": STACK_NAME},
             {"Key": "Campaign", "Value": cell["campaign_id"]},
             {"Key": "Cell", "Value": cell["cell_id"]},
         ]}],
-    )
+    }
+    for attempt in range(1, EC2_LAUNCH_MAX_ATTEMPTS + 1):
+        try:
+            response = clients["ec2"].run_instances(**run_args)
+            break
+        except Exception as error:
+            code = _client_error_code(error)
+            if code not in EC2_LAUNCH_THROTTLE_CODES or attempt >= EC2_LAUNCH_MAX_ATTEMPTS:
+                raise
+            backoff_cap = min(
+                EC2_LAUNCH_BACKOFF_CAP_SECONDS,
+                float(2 ** (attempt - 1)),
+            )
+            delay = random.uniform(0.5, backoff_cap)
+            print(
+                f"  {cell['cell_id']}: EC2 launch throttled ({code}); "
+                f"retry {attempt + 1}/{EC2_LAUNCH_MAX_ATTEMPTS} in {delay:.1f}s"
+            )
+            time.sleep(delay)
     return response["Instances"][0]["InstanceId"]
 
 
@@ -1718,18 +2012,16 @@ def _monitor_campaign_unchecked(state: dict, data_root: Path, clients: dict,
         records = _instance_records(
             clients["ec2"], [cell["instance_id"] for cell in active]
         )
-        missing_finishing_ids = {
+        missing_active_ids = {
             cell["instance_id"]
             for cell in active
-            if cell["status"] == "finishing"
-            and cell.get("terminal")
-            and cell["instance_id"] not in records
+            if cell["instance_id"] not in records
         }
         nonterminal_ids = (
             _nonterminal_campaign_instance_ids(
                 clients["ec2"], state["campaign_id"]
             )
-            if missing_finishing_ids
+            if missing_active_ids
             else set()
         )
         changed = False
@@ -1745,16 +2037,32 @@ def _monitor_campaign_unchecked(state: dict, data_root: Path, clients: dict,
                 changed = True
             if marker and not cell.get("terminal"):
                 status, terminal = marker
+                instance_is_terminal = (
+                    instance_state == "terminated"
+                    or (
+                        cell["instance_id"] in missing_active_ids
+                        and cell["instance_id"] not in nonterminal_ids
+                    )
+                )
                 cell["terminal"] = terminal
                 cell["completed_at"] = terminal.get("completed_at") or _utc_now()
                 cell["terminal_status"] = status
-                cell["status"] = status if instance_state == "terminated" else "finishing"
-                if instance_state == "terminated":
-                    cell["instance_state"] = instance_state
+                cell["status"] = status if instance_is_terminal else "finishing"
+                if instance_is_terminal:
+                    cell.pop("terminal_status", None)
+                    cell["instance_state"] = "terminated"
                     cell["terminated_at"] = _utc_now()
+                    if instance_state != "terminated":
+                        cell["terminated_at_is_upper_bound"] = True
+                        cell["termination_resolution"] = (
+                            "absent_from_all_nonterminal_campaign_instances"
+                        )
                 changed = True
-                if instance_state == "terminated":
-                    print(f"  {cell['cell_id']}: {status}; VM already terminated")
+                if instance_is_terminal:
+                    print(
+                        f"  {cell['cell_id']}: {status}; "
+                        "VM already terminated or no longer present"
+                    )
                 else:
                     print(f"  {cell['cell_id']}: result uploaded; waiting for VM termination")
             elif cell["status"] == "finishing" and instance_state == "terminated":
@@ -1766,7 +2074,7 @@ def _monitor_campaign_unchecked(state: dict, data_root: Path, clients: dict,
             elif (
                 cell["status"] == "finishing"
                 and cell.get("terminal")
-                and cell["instance_id"] in missing_finishing_ids
+                and cell["instance_id"] in missing_active_ids
                 and cell["instance_id"] not in nonterminal_ids
             ):
                 observed_at = _utc_now()
@@ -1781,6 +2089,29 @@ def _monitor_campaign_unchecked(state: dict, data_root: Path, clients: dict,
                 print(
                     f"  {cell['cell_id']}: {cell['status']}; "
                     "VM no longer present in any non-terminal state"
+                )
+            elif (
+                cell["instance_id"] in missing_active_ids
+                and cell["instance_id"] not in nonterminal_ids
+            ):
+                observed_at = _utc_now()
+                cell["status"] = "infrastructure_failure"
+                cell["instance_state"] = "terminated"
+                cell["completed_at"] = observed_at
+                cell["terminated_at"] = observed_at
+                cell["terminated_at_is_upper_bound"] = True
+                cell["termination_resolution"] = (
+                    "absent_from_all_nonterminal_campaign_instances"
+                )
+                cell["terminal"] = {
+                    "reason": (
+                        "instance no longer present and no completion/failure marker exists"
+                    ),
+                }
+                changed = True
+                print(
+                    f"  {cell['cell_id']}: infrastructure failure; "
+                    "VM no longer present and no marker exists"
                 )
             elif instance_state == "terminated":
                 cell["status"] = "infrastructure_failure"
@@ -2105,6 +2436,13 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             f"{AGENT_TIME_LIMIT_SECONDS}s; use --compute=local for a longer run"
         )
     continuation = cfg.get("continuation")
+    multi_agent = cfg.get("multi_agent")
+    prefix_only = cfg.get("prefix_only") is True
+    if sum(bool(mode) for mode in (continuation, multi_agent, prefix_only)) > 1:
+        raise AwsTrajectoryError(
+            "a campaign cannot combine continuation, multi-agent, and prefix-only "
+            "generation modes"
+        )
     selected_cells = cfg.get("_cell_selections")
     if selected_cells:
         planned_cells = len(selected_cells)
@@ -2112,20 +2450,25 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
         planned_cells = (
             len(continuation["payloads"]) * len(cfg["seeds"]) * int(cfg["epochs"])
         )
+    elif multi_agent:
+        planned_cells = (
+            len(multi_agent["payloads"]) * len(cfg["seeds"]) * int(cfg["epochs"])
+        )
     else:
         planned_cells = len(cfg["targets"]) * len(cfg["seeds"]) * int(cfg["epochs"])
     if planned_cells < 1:
         raise AwsTrajectoryError("AWS campaign has no trajectory cells to run")
     # Quota and scheduling should reflect the work that can actually run. In
-    # particular, an n=1 test must not require the default 75-worker quota.
+    # particular, an n=1 test must not require the default 250-worker quota.
     cfg = {
         **cfg,
         "vm_concurrency": min(int(cfg["vm_concurrency"]), planned_cells),
     }
-    if continuation:
+    if continuation or multi_agent:
+        conditioned_payloads = (continuation or multi_agent)["payloads"]
         target_specs = [
             (payload["target"], payload["target_model"], payload.get("reasoning"))
-            for payload in continuation["payloads"]
+            for payload in conditioned_payloads
         ]
     else:
         target_specs = [
@@ -2134,8 +2477,8 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                 cfg["targets"], cfg["target_models"], strict=True
             )
         ]
-    # A target can occur in multiple continuation prefixes. Preserve one copy while
-    # rejecting inconsistent payload metadata before any preflight or spend.
+    # A target can occur in multiple conditioned payloads. Preserve one copy while
+    # rejecting inconsistent metadata before any preflight or spend.
     unique_target_specs: dict[str, tuple[str, bool | None]] = {}
     for target, model, reasoning in target_specs:
         prior = unique_target_specs.get(target)
@@ -2143,7 +2486,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
         if prior is not None and prior != current:
             raise AwsTrajectoryError(
                 f"target {target!r} has inconsistent model/reasoning metadata across "
-                "continuation prefixes"
+                "conditioned payloads"
             )
         unique_target_specs[target] = current
 
@@ -2182,13 +2525,12 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                     subscription_alternatives.append(alternatives)
     with tempfile.TemporaryDirectory(prefix="mats-aws-source-") as tmp:
         source = build_source_bundle(environments_root, Path(tmp))
+        model_slugs = list(api_target_models)
+        if not prefix_only:
+            model_slugs.extend([cfg["judge_resolved"], cfg["gate_model"]])
         preflight = preflight_aws(
             cfg, environments_root,
-            model_slugs=[
-                *api_target_models,
-                cfg["judge_resolved"],
-                cfg["gate_model"],
-            ],
+            model_slugs=model_slugs,
             required_secrets=subscription_required,
             required_secret_alternatives=subscription_alternatives,
         )
@@ -2198,7 +2540,14 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             "aws_funding": preflight["funding"],
             "worker_allowed_secret_names": preflight["stored_secret_names"],
         }
-        cell_builder = build_continuation_cells if continuation else build_cells
+        if continuation:
+            cell_builder = build_continuation_cells
+        elif multi_agent:
+            cell_builder = build_multi_agent_cells
+        elif prefix_only:
+            cell_builder = build_prefix_generation_cells
+        else:
+            cell_builder = build_cells
         cells = cell_builder(
             worker_cfg, campaign_id=campaign_id, source=source,
             bucket=preflight["bucket"], hourly_price=preflight["hourly_price_usd"],
@@ -2244,6 +2593,7 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
             ExtraArgs={"ServerSideEncryption": "AES256"},
         )
         _upload_prefix_payloads(preflight["clients"], cells)
+        _upload_activity_log_payloads(preflight["clients"], cells)
         state = {
             "schema_version": AWS_SCHEMA_VERSION,
             "campaign_id": campaign_id,
@@ -2266,8 +2616,40 @@ def run_campaign(cfg: dict, environments_root: Path, data_root: Path,
                     "harness", "condition", "judge_resolved", "gate_model", "time_limit",
                     "target_models", "pressure", "aws_secret_env",
                 )
-            } | ({"continuation": continuation, "seed_dir": cfg.get("seed_dir")}
-                 if continuation else {}),
+            } | (
+                {
+                    "continuation": continuation,
+                    "seed_dir": cfg.get("seed_dir"),
+                    "allow_incomplete_prefixes": bool(
+                        cfg.get("allow_incomplete_prefixes")
+                    ),
+                }
+                if continuation
+                else (
+                    {
+                        "multi_agent": multi_agent,
+                        "seed_dir": cfg.get("seed_dir"),
+                    }
+                    if multi_agent
+                    else
+                    {
+                        "prefix_only": True,
+                        "name": cfg["name"],
+                        "seed_dir": cfg.get("seed_dir"),
+                        "prefix_pipeline_script": cfg.get(
+                            "prefix_pipeline_script", "prefixes/exp_ml_prefix.py"
+                        ),
+                        "prefix_task_namespace": cfg.get(
+                            "prefix_task_namespace", "ml_prefix_only"
+                        ),
+                        "prefix_campaign_namespace": cfg.get(
+                            "prefix_campaign_namespace", "ml-prefix"
+                        ),
+                    }
+                    if prefix_only
+                    else {}
+                )
+            ),
             "cells": cells,
         }
         _save_campaign(state, data_root, preflight["clients"])
@@ -2324,16 +2706,42 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
                  campaign_id: str, *, dry_run: bool = False) -> dict:
     clients, bucket, local_state = _campaign_connection(cfg, data_root, campaign_id)
     old = local_state or load_campaign(campaign_id, data_root, clients, bucket)
-    failed = [
-        cell for cell in old["cells"]
-        if cell["status"] in {"infrastructure_failure", "not_launched"}
-    ]
-    if not failed:
-        raise AwsTrajectoryError(f"campaign {campaign_id} has no infrastructure failures")
     original_cfg = old.get("pipeline_config")
     if not isinstance(original_cfg, dict):
         raise AwsTrajectoryError(
             "campaign predates stored retry configuration; retry cannot safely guess"
+        )
+    prefix_only_retry = original_cfg.get("prefix_only") is True
+    include_pipeline_failures = bool(cfg.get("retry_pipeline_failures"))
+
+    def retryable(cell: dict) -> bool:
+        if cell.get("status") in {"infrastructure_failure", "not_launched"}:
+            return True
+        if (
+            not (prefix_only_retry or include_pipeline_failures)
+            or cell.get("status") != "completed"
+        ):
+            return False
+        exit_code = (cell.get("terminal") or {}).get("pipeline_exit_code")
+        try:
+            return int(exit_code) != 0
+        except (TypeError, ValueError):
+            return True
+
+    failed = [
+        cell for cell in old["cells"]
+        if retryable(cell)
+    ]
+    if not failed:
+        raise AwsTrajectoryError(
+            f"campaign {campaign_id} has no retryable infrastructure failures"
+            + (
+                " or failed prefix-generation cells"
+                if prefix_only_retry
+                else " or completed pipeline failures"
+                if include_pipeline_failures
+                else ""
+            )
         )
     original_harness = str(original_cfg.get("harness") or "simple")
     requested_harness = cfg.get("harness")
@@ -2354,8 +2762,10 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
         if not cfg.get(f"{config_key}_explicit") and old.get(state_key) is not None:
             retry_cfg[config_key] = old[state_key]
     continuation_retry = bool(original_cfg.get("continuation"))
+    multi_agent_retry = bool(original_cfg.get("multi_agent"))
+    conditioned_retry = continuation_retry or multi_agent_retry
     retry_targets = list(dict.fromkeys(cell["target"] for cell in failed))
-    if not continuation_retry:
+    if not conditioned_retry:
         try:
             original_target_models = dict(zip(
                 original_cfg["targets"],
@@ -2373,10 +2783,16 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
     retry_cfg.update({
         "targets": retry_targets,
         "seeds": list(dict.fromkeys(cell["seed"] for cell in failed)),
-        # Continuation cells are keyed by prefix, plain cells by agent.
+        # Conditioned cells are keyed by their payload, plain cells by agent.
         "_cell_selections": [
             (
-                cell["prefix_name"] if continuation_retry else cell["target"],
+                (
+                    cell["prefix_name"]
+                    if continuation_retry
+                    else cell["activity_log_name"]
+                    if multi_agent_retry
+                    else cell["target"]
+                ),
                 cell["seed"],
                 cell["original_epoch"],
             )
@@ -2388,7 +2804,7 @@ def retry_failed(cfg: dict, environments_root: Path, data_root: Path,
         ),
         "retry_parent": campaign_id,
     })
-    if not continuation_retry:
+    if not conditioned_retry:
         retry_cfg["target_models"] = retry_target_models
     result = run_campaign(retry_cfg, environments_root, data_root, dry_run=dry_run)
     result["retry_parent"] = campaign_id

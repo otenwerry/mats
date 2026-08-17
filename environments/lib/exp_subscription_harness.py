@@ -158,6 +158,22 @@ def _codex_mcp_server_config(mcp: Any) -> dict[str, Any]:
     return config
 
 
+def _codex_exec_transport(
+    binary: str,
+    common: list[str],
+    session_id: str | None,
+    prompt: str,
+) -> tuple[list[str], str]:
+    """Keep the prompt off argv and send it through Codex's documented stdin path."""
+
+    command = (
+        [binary, "exec", *common, "-"]
+        if session_id is None
+        else [binary, "exec", "resume", *common, session_id, "-"]
+    )
+    return command, prompt
+
+
 @dataclass
 class NativeSessionRef:
     """Mutable native state filled by subscription CLI invocations."""
@@ -1376,14 +1392,16 @@ def build_subscription_agent(
                         "--model",
                         subscription_model,
                     ]
-                    cmd = (
-                        [binary, "exec", *common, prompt]
-                        if initial
-                        else [binary, "exec", "resume", *common, session_ref.value, prompt]
+                    cmd, prompt_input = _codex_exec_transport(
+                        binary,
+                        common,
+                        None if initial else session_ref.value,
+                        prompt,
                     )
                     result = await sbox.exec_remote(
                         cmd=cmd,
                         options=ExecRemoteAwaitableOptions(
+                            input=prompt_input,
                             cwd="/workspace",
                             env=_subscription_env_base() | {"CODEX_HOME": "/root/.codex"},
                             concurrency=False,

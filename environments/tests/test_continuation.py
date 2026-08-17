@@ -7,7 +7,10 @@ import json
 import base64
 import hashlib
 import io
+import os
 import pathlib
+import sqlite3
+import subprocess
 import sys
 import tarfile
 from types import SimpleNamespace
@@ -24,6 +27,7 @@ ENVIRONMENTS = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
 from continuation_evidence import (  # noqa: E402
+    CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
     CONTINUATION_PIVOT_PATH,
     CONTINUATION_TASK_DESCRIPTION_PLACEHOLDER,
     ContinuationRun,
@@ -45,9 +49,12 @@ import exp_real_continuation as continuation  # noqa: E402
 from exp_target_harness import (  # noqa: E402
     INSPECT_SWE_VERSION,
     NATIVE_RESUME_FORMAT,
+    _OPENCODE_REBASE_MESSAGE_IDS_CODE,
     PRODUCTION_SCAFFOLD_VERSIONS,
     production_agent_input_messages,
+    retain_native_scaffold_system_messages,
 )
+from multi_agent_evidence import extract_inline_activity_log  # noqa: E402
 
 
 SYSTEM_PROMPT = global_system_prompt()
@@ -90,12 +97,34 @@ def test_continuation_pipeline_requires_explicit_harness(monkeypatch) -> None:
             "--harness=production",
             "--judge=gpt-5.6-luna",
             "--pressure=high",
+            "--allow-incomplete-prefixes",
         ],
     )
     config = pipeline._parse_args()
     assert config["harness"] == "production"
     assert config["pressure"] == "high"
     assert config["compute"] == "aws"
+    assert config["allow_incomplete_prefixes"] is True
+
+
+def test_prefix_only_family_cannot_be_a_continuation_destination(monkeypatch) -> None:
+    import exp_continuation_pipeline as pipeline
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "exp_continuation_pipeline.py",
+            "--treatment=no-honeypot",
+            "--prefixes=1",
+            "--seed-dir=ml_prefix_only",
+            "--seeds=demand_forecasting",
+            "--epochs=1",
+            "--harness=simple",
+        ],
+    )
+    with pytest.raises(SystemExit, match="prefix source"):
+        pipeline._parse_args()
 
 
 def prefix_messages(*, dangling_tool_call: bool = False, trailing_user: bool = False):
@@ -304,6 +333,50 @@ def test_production_native_resume_keeps_scaffold_systems_for_judge() -> None:
     assert "resumed its native session state" in continuation_caveat_fields(record)["description"]
 
 
+def test_native_inline_context_starts_fresh_and_is_hidden_from_judge() -> None:
+    prefix = [ChatMessageUser(content="Complete prior activity log.")]
+    record = continuation_record(
+        treatment="activity-log-context",
+        prefix={"name": "activity-log-traj711", "source_harness": "production"},
+        prefix_length=1,
+        boundary_index=0,
+        pivot_preamble_text=pivot_preamble(),
+        opening_user_message="New task opening.",
+        cross_family=True,
+        delivery_mode=CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
+    )
+    run = ContinuationRun(
+        prefix_messages=tuple(prefix),
+        pivot_text=pivot_preamble(),
+        record=record,
+        delivery_mode=CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
+    )
+    initial, boundary = run.initial_messages()
+    assert boundary == 0
+    assert "Complete prior activity log." in initial[0].text
+
+    returned = [
+        ChatMessageSystem(content="Native scaffold system"),
+        initial[0],
+        ChatMessageAssistant(content="Live answer."),
+    ]
+    record["production_fresh_context"] = {
+        "delivery_mode": CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
+        "fresh_session": True,
+    }
+    assert update_production_boundary(returned, record) == 1
+    judged = judge_view_messages(returned, record)
+    assert [message.role for message in judged] == ["system", "user", "assistant"]
+    assert "Complete prior activity log." not in judged[1].text
+    assert judged[1].text == f"{pivot_preamble()}\n\nNew task opening."
+    scope = sliced_message_record(record, len(returned))
+    assert scope["native_prefix_resumed"] is False
+    assert scope["native_inline_user_context"] is True
+    assert scope["boundary_message_prefix_text_excluded"] is True
+    caveat = continuation_caveat_fields(record)
+    assert "activity log" in caveat["description"]
+
+
 def test_production_boundary_accepts_opencode_outer_quote_wrapper() -> None:
     prefix = [
         ChatMessageSystem(content="Production scaffold system"),
@@ -348,6 +421,21 @@ def test_production_boundary_still_fails_closed_without_exact_handoff() -> None:
     assert record["production_native_resume"]["boundary_lost"] is True
 
 
+def test_production_boundary_fails_closed_without_handoff_response() -> None:
+    messages = [
+        ChatMessageSystem(content="Production scaffold system"),
+        ChatMessageUser(content=f'"{pivot_preamble()}\n\nNew task opening."'),
+    ]
+    record = record_for(prefix_messages(), 3)
+    record["production_native_resume"] = {"archive_sha256": "abc"}
+
+    with pytest.raises(RuntimeError, match="without an assistant response"):
+        update_production_boundary(messages, record)
+    native = record["production_native_resume"]
+    assert native["handoff_response_missing"] is True
+    assert native["handoff_assistant_message_count"] == 0
+
+
 def test_native_resume_does_not_reinject_scaffold_system_as_a_new_instruction() -> None:
     messages = [
         ChatMessageSystem(content="Native scaffold system"),
@@ -359,6 +447,101 @@ def test_native_resume_does_not_reinject_scaffold_system_as_a_new_instruction() 
     assert [message.role for message in resumed] == ["user", "assistant", "user"]
     fresh = production_agent_input_messages([ChatMessageUser(content="First task")])
     assert [message.role for message in fresh] == ["user"]
+
+
+def test_native_resume_retains_scaffold_system_only_in_inspect_history() -> None:
+    prefix = [
+        ChatMessageSystem(content="Native scaffold system"),
+        ChatMessageUser(content='"Old task"'),
+        ChatMessageAssistant(content="Old answer"),
+    ]
+    saved, boundary = inject_pivot(
+        prefix, pivot_preamble(), "New task opening."
+    )
+    native_input = production_agent_input_messages(saved)
+    assert not any(message.role == "system" for message in native_input)
+
+    returned = [*native_input, ChatMessageAssistant(content="Live answer")]
+    retained = retain_native_scaffold_system_messages(saved, returned)
+    record = record_for(prefix, boundary)
+    record["production_native_resume"] = {"archive_sha256": "abc"}
+
+    assert retained[0] is saved[0]
+    assert update_production_boundary(retained, record) == boundary
+    assert [message.role for message in judge_view_messages(retained, record)] == [
+        "system", "user", "assistant",
+    ]
+
+
+def test_native_resume_does_not_duplicate_returned_scaffold_system() -> None:
+    previous = [
+        ChatMessageSystem(content="Native scaffold system"),
+        ChatMessageUser(content="Old task"),
+    ]
+    returned = [
+        ChatMessageSystem(content="Returned scaffold system"),
+        ChatMessageUser(content="New task"),
+    ]
+    assert retain_native_scaffold_system_messages(previous, returned) == returned
+
+
+def test_opencode_resume_message_ids_are_rebased_in_transcript_order(
+    tmp_path,
+) -> None:
+    database = tmp_path / "opencode.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY, message_id TEXT, data TEXT
+        );
+        CREATE TABLE event (data TEXT);
+        INSERT INTO message VALUES
+            ('msg_fff000000001aaaaaaaaaaaaaa', 's1', 10,
+             '{"role":"user"}'),
+            ('msg_fff000000002bbbbbbbbbbbbbb', 's1', 20,
+             '{"role":"assistant","parentID":"msg_fff000000001aaaaaaaaaaaaaa"}');
+        INSERT INTO part VALUES
+            ('prt_1', 'msg_fff000000001aaaaaaaaaaaaaa', '{"type":"text"}'),
+            ('prt_2', 'msg_fff000000002bbbbbbbbbbbbbb', '{"type":"text"}');
+        INSERT INTO event VALUES
+            ('{"messageID":"msg_fff000000002bbbbbbbbbbbbbb"}');
+        """
+    )
+    connection.commit()
+    connection.close()
+    environment = dict(os.environ)
+    environment["MATS_OPENCODE_DB_PATH"] = str(database)
+
+    result = subprocess.run(
+        [sys.executable, "-c", _OPENCODE_REBASE_MESSAGE_IDS_CODE],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    metadata = json.loads(result.stdout)
+    assert metadata["applied"] is True
+    assert metadata["message_count"] == 2
+
+    connection = sqlite3.connect(database)
+    rows = connection.execute(
+        "SELECT id, data FROM message ORDER BY time_created, id"
+    ).fetchall()
+    ids = [row[0] for row in rows]
+    assert ids == sorted(ids)
+    assert all(len(message_id) == 30 for message_id in ids)
+    assert json.loads(rows[1][1])["parentID"] == ids[0]
+    assert connection.execute(
+        "SELECT message_id FROM part ORDER BY id"
+    ).fetchall() == [(ids[0],), (ids[1],)]
+    assert json.loads(connection.execute("SELECT data FROM event").fetchone()[0])[
+        "messageID"
+    ] == ids[1]
+    connection.close()
 
 
 def test_continuation_run_epochs_get_independent_copies() -> None:
@@ -460,6 +643,54 @@ def test_prefix_spec_inserts_the_prompt_when_absent_and_flags_it() -> None:
     assert spec.boundary_index == len(spec.messages)
 
 
+def test_activity_log_prefix_is_free_static_user_context_for_any_harness() -> None:
+    source = payload(
+        messages=prefix_messages(),
+        source={
+            "kind": "trajectory",
+            "trajectory_id": 711,
+            "run": "production-run",
+            "task": "real_audit_qwen3-32b_reasoning_prompt_benchmark",
+            "seed": "reasoning_prompt_benchmark",
+            "epoch": 1,
+            "family": "p_hacking",
+            "harness": "production",
+        },
+    )
+    built = continuation.activity_log_prefix_payload_from_trajectory(source)
+    rebuilt = continuation.activity_log_prefix_payload_from_trajectory(source)
+
+    assert built == rebuilt
+    assert continuation.payload_sha256(built) == continuation.payload_sha256(rebuilt)
+    assert built["delivery"]["mode"] == CONTINUATION_DELIVERY_INLINE_USER_CONTEXT
+    assert "native_resume" not in built
+    assert [message["role"] for message in built["messages"]] == ["user"]
+    content = extract_inline_activity_log(built["messages"][0]["content"])
+    metadata = built["source"]["activity_log_metadata"]
+    assert len(content.splitlines()) == metadata["line_count"]
+    assert "Prior task: answer some questions." in content
+    assert SYSTEM_PROMPT not in content
+
+    production = continuation.build_prefix_spec(built, harness="production")
+    subscription = continuation.build_prefix_spec(built, harness="subscription")
+    simple = continuation.build_prefix_spec(built, harness="simple")
+    assert production.native_resume is subscription.native_resume is None
+    assert [message.role for message in production.messages] == ["user"]
+    assert production.boundary_index == 0
+    assert [message.role for message in simple.messages] == ["system", "user"]
+    assert simple.boundary_index == 1
+
+
+def test_activity_log_prefix_rejects_tampered_inline_content() -> None:
+    source = payload(
+        source={"kind": "trajectory", "trajectory_id": 711},
+    )
+    built = continuation.activity_log_prefix_payload_from_trajectory(source)
+    built["messages"][0]["content"] += "tampered"
+    with pytest.raises(SystemExit, match="pinned wrapper"):
+        continuation.build_prefix_spec(built, harness="production")
+
+
 def test_prefix_spec_rejects_mid_conversation_system_messages() -> None:
     broken = prefix_messages() + [ChatMessageSystem(content="another")]
     with pytest.raises(SystemExit):
@@ -535,6 +766,176 @@ def test_prefix_spec_assigns_missing_message_ids() -> None:
     spec = continuation.build_prefix_spec(raw)
     ids = [message.id for message in spec.messages]
     assert all(ids) and len(ids) == len(set(ids))
+
+
+def test_one_turn_cutoff_is_explicit_and_queryable() -> None:
+    raw = payload(
+        messages=[
+            ChatMessageSystem(content=SYSTEM_PROMPT),
+            ChatMessageUser(content="First pass."),
+            ChatMessageAssistant(content="First result."),
+            ChatMessageUser(content="Second pass."),
+            ChatMessageAssistant(content="Second result."),
+        ],
+        source={
+            "kind": "trajectory",
+            "trajectory_id": 9,
+            "harness": "simple",
+            "prefix_condition": {
+                "key": "hack_2turn",
+                "label": "hack · 2 turns",
+            },
+            "first_pass_condition": {
+                "key": "notable",
+                "label": "notable · answer-key peek",
+            },
+        },
+    )
+
+    derived = continuation.cutoff_prefix_payload(
+        raw, before_experiment_user_turn=2
+    )
+
+    assert derived["name"] == "test-prefix-cutoff-u2"
+    assert [message["role"] for message in derived["messages"]] == [
+        "system", "user", "assistant",
+    ]
+    assert derived["source"]["prefix_condition"] == {
+        "key": "notable_1turn_cutoff",
+        "label": "notable · answer-key peek · 1-turn cutoff",
+    }
+    cutoff = derived["source"]["cutoff"]
+    assert cutoff["affected"] is True
+    assert cutoff["before_experiment_user_turn"] == 2
+    assert cutoff["retained_message_count"] == 3
+    assert cutoff["omitted_message_count"] == 2
+    assert cutoff["native_state_rewritten"] is False
+    assert derived["source"]["lossy_processing"]["affected"] is True
+
+
+def test_opencode_cutoff_rewinds_sqlite_state_and_repacks_allowed_roots(
+    tmp_path,
+) -> None:
+    root = tmp_path / "root"
+    database = root / ".local" / "share" / "opencode" / "opencode.db"
+    database.parent.mkdir(parents=True)
+    locks = root / ".local" / "state" / "opencode" / "locks"
+    locks.mkdir(parents=True)
+    (locks / "stale.lock").write_text("locked")
+    log = database.parent / "log" / "opencode.log"
+    log.parent.mkdir()
+    log.write_text("Second pass.")
+
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY, time_created INTEGER, time_updated INTEGER
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
+            time_updated INTEGER, data TEXT
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY, message_id TEXT, data TEXT
+        );
+        CREATE TABLE event (
+            aggregate_id TEXT, seq INTEGER, data TEXT
+        );
+        CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INTEGER);
+        CREATE TABLE todo (
+            id TEXT PRIMARY KEY, time_created INTEGER, time_updated INTEGER
+        );
+        INSERT INTO session VALUES ('s1', 1, 40);
+        INSERT INTO message VALUES
+            ('u1', 's1', 10, 10, '{"role":"user"}'),
+            ('a1', 's1', 20, 20, '{"role":"assistant"}'),
+            ('u2', 's1', 30, 30, '{"role":"user"}'),
+            ('a2', 's1', 40, 40, '{"role":"assistant"}');
+        INSERT INTO part VALUES
+            ('p1', 'u1', '{"type":"text","text":"First pass."}'),
+            ('p2', 'a1', '{"type":"text","text":"First result."}'),
+            ('p3', 'u2', '{"type":"text","text":"Second pass."}'),
+            ('p4', 'a2', '{"type":"text","text":"Second result."}');
+        INSERT INTO event VALUES
+            ('s1', 1, '{"message_id":"u1"}'),
+            ('s1', 2, '{"message_id":"a1"}'),
+            ('s1', 3, '{"message_id":"u2"}'),
+            ('s1', 4, '{"message_id":"a2"}');
+        INSERT INTO event_sequence VALUES ('s1', 4);
+        INSERT INTO todo VALUES ('before', 10, 20), ('after', 10, 35);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    result = continuation._rewrite_opencode_cutoff(
+        root, cutoff_user_text="Second pass."
+    )
+
+    connection = sqlite3.connect(database)
+    assert connection.execute("SELECT count(*) FROM message").fetchone()[0] == 2
+    assert connection.execute("SELECT count(*) FROM part").fetchone()[0] == 2
+    assert connection.execute("SELECT count(*) FROM event").fetchone()[0] == 2
+    assert connection.execute("SELECT seq FROM event_sequence").fetchone()[0] == 2
+    assert connection.execute("SELECT count(*) FROM todo").fetchone()[0] == 1
+    assert connection.execute("SELECT time_updated FROM session").fetchone()[0] == 20
+    connection.close()
+    assert result["omitted_native_messages"] == 2
+    assert result["omitted_native_events"] == 2
+    assert not log.exists()
+    assert list(locks.iterdir()) == []
+
+    archive_data = continuation._repack_native_archive(
+        tmp_path, scaffold="opencode"
+    )
+    members = continuation._archive_member_names(archive_data)
+    assert members
+    assert all(
+        member == "root/.local/share/opencode"
+        or member.startswith("root/.local/share/opencode/")
+        or member == "root/.local/state/opencode"
+        or member.startswith("root/.local/state/opencode/")
+        for member in members
+    )
+    assert "root" not in members
+    assert "root/.local" not in members
+
+
+def test_codex_cutoff_retains_the_completed_first_invocation(tmp_path) -> None:
+    root = tmp_path / "root"
+    rollout = root / ".codex" / "sessions" / "rollout-test.jsonl"
+    rollout.parent.mkdir(parents=True)
+    records = [
+        {"type": "turn_context", "payload": {}},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "First pass."}],
+        }},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant", "content": [],
+        }},
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+        {"type": "thread_settings", "payload": {}},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "Second pass."}],
+        }},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant", "content": [],
+        }},
+        {"type": "event_msg", "payload": {"type": "task_complete"}},
+    ]
+    rollout.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    result = continuation._rewrite_codex_cutoff(
+        root, cutoff_user_text="Second pass."
+    )
+
+    retained = [json.loads(line) for line in rollout.read_text().splitlines()]
+    assert retained == records[:4]
+    assert result["retained_native_events"] == 4
+    assert result["omitted_native_events"] == 4
 
 
 def test_prefix_file_only_load_does_not_require_trajectory_registry(
@@ -799,6 +1200,7 @@ def test_aws_continuation_cells_carry_script_and_payload_identity() -> None:
         "gate_model": "openai/gpt-5.6-luna",
         "time_limit": 4200,
         "harness": "simple",
+        "allow_incomplete_prefixes": True,
         "aws_region": "us-west-2",
         "aws_instance_type": "c7a.xlarge",
     }
@@ -827,6 +1229,7 @@ def test_aws_continuation_cells_carry_script_and_payload_identity() -> None:
     assert "--compute=local" in args
     assert "--harness=simple" in args
     assert "--skip-viewer" in args
+    assert "--allow-incomplete-prefixes" in args
     assert cell["family"] == "ml_training_data_misuse"
     assert cell["sandbox_compose"] == "environments/sandbox/ml/compose.yaml"
     assert cell["task_name"].startswith(
@@ -968,9 +1371,14 @@ def test_continuation_helpers_group_and_rate() -> None:
         "source_seed": "demand_forecasting"
     }
     assert continuation_source(rows[0]) == "demand_forecasting"
+    assert continuation_direction(rows[0]) == "other"
+    rows[0]["real_env"]["continuation"]["prefix"] = {
+        "source_seed": "fraud_detection"
+    }
+    assert continuation_source(rows[0]) == "fraud_detection"
     assert (
         continuation_direction(rows[0])
-        == "demand_forecasting_to_checkout_redesign"
+        == "fraud_detection_to_checkout_redesign"
     )
     rows[0]["real_env"]["continuation"]["prefix"] = {
         "source_kind": "external",
@@ -982,7 +1390,12 @@ def test_continuation_helpers_group_and_rate() -> None:
         continuation_direction(rows[0])
         == "natural_questions_to_checkout_redesign"
     )
-    for prefix_type in ("science_ethics", "general_ethics", "move_fast"):
+    for prefix_type in (
+        "science_ethics",
+        "general_ethics",
+        "move_fast",
+        "wikipedia_summaries",
+    ):
         rows[0]["real_env"]["continuation"]["prefix"] = {
             "source_kind": "external",
             "source_prefix_type": prefix_type,
@@ -992,6 +1405,38 @@ def test_continuation_helpers_group_and_rate() -> None:
             continuation_direction(rows[0])
             == f"{prefix_type}_to_checkout_redesign"
         )
+
+    rows[0]["seed"] = "fraud_detection"
+    rows[0]["real_env"]["continuation"]["prefix"] = {
+        "source_kind": "external",
+        "source_prefix_type": "wikipedia_summaries",
+    }
+    assert (
+        continuation_direction(rows[0])
+        == "wikipedia_summaries_to_fraud_detection"
+    )
+    rows[0]["real_env"]["continuation"]["prefix"] = {
+        "source_seed": "checkout_redesign"
+    }
+    assert (
+        continuation_direction(rows[0])
+        == "checkout_redesign_to_fraud_detection"
+    )
+    rows[0]["real_env"]["continuation"]["prefix"] = {
+        "source_seed": "demand_forecasting"
+    }
+    assert (
+        continuation_direction(rows[0])
+        == "demand_forecasting_to_fraud_detection"
+    )
+    rows[0]["real_env"]["continuation"]["prefix"] = {
+        "source_seed": "reasoning_prompt_benchmark"
+    }
+    assert (
+        continuation_direction(rows[0])
+        == "reasoning_prompt_benchmark_to_fraud_detection"
+    )
+    rows[0]["seed"] = "checkout_redesign"
 
     originals = [
         fake_audit(audit_id=3, seed="checkout_redesign",
@@ -1102,6 +1547,7 @@ def test_continuation_helpers_group_and_rate() -> None:
     )
     assert external_groups[0]["bars"][1]["short_label"] == "After prefix"
     from env_viewer_visuals import (
+        _continuation_bar_tick,
         fig_continuation_outcome_distribution,
         fig_continuation_prefix_hack_rates,
     )
@@ -1109,7 +1555,7 @@ def test_continuation_helpers_group_and_rate() -> None:
     external_svg = fig_continuation_prefix_hack_rates(external_groups)
     assert "general-ethics-openrouter-q-m-20260812002122" not in external_svg
     assert "openrouter/q/m" in external_svg
-    assert "Baseline" in external_svg
+    assert "Baseline (no prefix)" in external_svg
     assert "After prefix" in external_svg
     distribution_svg = fig_continuation_outcome_distribution(rate_groups)
     assert "Outcome distribution by prefix condition" in distribution_svg
@@ -1117,6 +1563,115 @@ def test_continuation_helpers_group_and_rate() -> None:
     assert "2-turn hack" in distribution_svg
     assert "Interesting behavior" in distribution_svg
     assert "Clean" in distribution_svg
+    condition_bars = [{
+        "label": "Originals",
+        "short_label": "Original",
+        "kind": "baseline",
+        "k": 0,
+        "n": 1,
+        "composition": {"clean": 1},
+        "composition_n": 1,
+    }]
+    for treatment in (
+        "hack-in-one-turn",
+        "hack-in-two-turns",
+        "no-honeypot",
+        "no-hack",
+    ):
+        condition_bars.append({
+            "label": treatment,
+            "short_label": "After prefix",
+            "kind": "prefix",
+            "treatment": treatment,
+            "k": 0,
+            "n": 1,
+            "composition": {"clean": 1},
+            "composition_n": 1,
+        })
+    condition_groups = [{"model": "opus-4.6 · subscription", "bars": condition_bars}]
+    condition_svgs = (
+        fig_continuation_prefix_hack_rates(condition_groups)
+        + fig_continuation_outcome_distribution(condition_groups)
+    )
+    for label in (
+        "Baseline (no prefix)",
+        "1-turn hack prefix",
+        "2-turn hack prefix",
+        "No-honeypot ML prefix",
+        "Clean prefix",
+    ):
+        assert label in condition_svgs
+    assert _continuation_bar_tick(condition_bars[1]) == "1-turn\nhack"
+    assert _continuation_bar_tick(condition_bars[2]) == "2-turn\nhack"
+    assert _continuation_bar_tick(condition_bars[3]) == "No\nhoneypot"
+
+
+def test_continuation_visuals_separate_one_and_two_turn_clean_prefixes() -> None:
+    from env_viewer_continuations import continuation_prefix_rate_data
+    from env_viewer_visuals import fig_continuation_prefix_hack_rates
+
+    def clean_record(*, name: str, sha256: str, turns: int) -> dict:
+        record = record_for(prefix_messages(), 3)
+        record["treatment"] = "no-hack"
+        record["prefix"] = {
+            "name": name,
+            "sha256": sha256,
+            "source_trajectory_id": 9,
+            "source_seed": "fraud_detection",
+            "source_prefix_condition": {
+                "key": "clean" if turns == 2 else "clean_1turn_cutoff",
+                "label": "clean",
+                "experiment_user_turns": turns,
+            },
+        }
+        return record
+
+    rows = [
+        fake_audit(
+            audit_id=20,
+            seed="checkout_redesign",
+            target="openrouter/q/m",
+            hack=False,
+            continuation_record_value=clean_record(
+                name="traj9-cutoff-u2", sha256="one-turn", turns=1,
+            ),
+        ),
+        fake_audit(
+            audit_id=21,
+            seed="checkout_redesign",
+            target="openrouter/q/m",
+            hack=True,
+            continuation_record_value=clean_record(
+                name="traj9", sha256="two-turn", turns=2,
+            ),
+        ),
+    ]
+    groups = continuation_prefix_rate_data(
+        rows,
+        [fake_audit(
+            audit_id=19,
+            seed="checkout_redesign",
+            target="openrouter/q/m",
+            hack=False,
+        )],
+        audits_by_id={
+            9: fake_audit(
+                audit_id=9,
+                seed="fraud_detection",
+                target="openrouter/q/m",
+                hack=False,
+            ),
+        },
+    )
+
+    assert [bar.get("prefix_user_turns") for bar in groups[0]["bars"]] == [
+        None, 1, 2,
+    ]
+    svg = fig_continuation_prefix_hack_rates(groups)
+    assert "1-turn clean" in svg
+    assert "2-turn clean" in svg
+    assert "#86c98f" in svg
+    assert "#55a868" in svg
 
 
 def test_continuations_page_shows_runs_without_condition_summaries() -> None:
@@ -1125,7 +1680,7 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     record["prefix"] = {
         "name": "traj9",
         "source_trajectory_id": 9,
-        "source_seed": "demand_forecasting",
+        "source_seed": "fraud_detection",
     }
     reasoning_record = record_for(prefix_messages(), 3)
     reasoning_record["prefix"] = {
@@ -1140,6 +1695,12 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
         "source_generator": "exp_nq_prefix.py",
         "source_dataset": "google-research-datasets/nq_open",
     }
+    wikipedia_record = record_for(prefix_messages(), 3)
+    wikipedia_record["prefix"] = {
+        "name": "wikipedia-summaries",
+        "source_kind": "external",
+        "source_prefix_type": "wikipedia_summaries",
+    }
     continuations = [
         fake_audit(audit_id=10, seed="checkout_redesign",
                    target="openrouter/q/m", hack=True,
@@ -1153,6 +1714,9 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
         fake_audit(audit_id=13, seed="checkout_redesign",
                    target="openrouter/q/m", hack=False,
                    continuation_record_value=nq_record),
+        fake_audit(audit_id=14, seed="checkout_redesign",
+                   target="openrouter/q/m", hack=False,
+                   continuation_record_value=wikipedia_record),
     ]
     continuations[0]["role_usage"] = {
         "target": {"total_cost": 0.25},
@@ -1173,19 +1737,33 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     assert "trajectory-11.html" not in page
     assert "trajectory-12.html" not in page
     assert "trajectory-13.html" not in page
-    assert '<a href="continuations.html" class="active">Current</a>' in page
+    assert '<a href="subscription_continuations.html">Current</a>' in page
+    assert (
+        '<a href="continuations.html" class="active">'
+        'Old (simple harness tests)</a>'
+    ) in page
+    assert '>All old</a>' in page
     assert '<a href="continuations.html" class="active">Continuations</a>' in page
     assert (
         '<a href="continuations.html" class="active">'
-        'demand_forecasting → checkout_redesign</a>'
+        'p-hacking (checkout_redesign)</a>'
+    ) in page
+    assert (
+        '<div class="contextnav continuation-prefix-nav">'
+        '<a href="continuations.html" class="active">'
+        'ML (fraud_detection)</a>'
     ) in page
     assert (
         'href="continuations_reasoning_prompt_benchmark_to_checkout_redesign.html"'
-        '>reasoning_prompt_benchmark → checkout_redesign</a>'
+        '>p-hacking (reasoning_prompt_benchmark)</a>'
     ) in page
     assert (
         'href="continuations_natural_questions_to_checkout_redesign.html"'
-        '>natural_questions → checkout_redesign</a>'
+        '>natural_questions</a>'
+    ) in page
+    assert (
+        'href="continuations_wikipedia_summaries_to_checkout_redesign.html"'
+        '>wikipedia_summaries</a>'
     ) in page
     assert "past iterations" not in page
     assert "judge comparisons" not in page
@@ -1214,7 +1792,7 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     assert "trajectory-12.html" in reasoning_page
     assert (
         'href="continuations_reasoning_prompt_benchmark_to_checkout_redesign.html" '
-        'class="active">reasoning_prompt_benchmark → checkout_redesign</a>'
+        'class="active">p-hacking (reasoning_prompt_benchmark)</a>'
     ) in reasoning_page
 
     nq_page = viewer._continuations_page(
@@ -1224,7 +1802,21 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     )
     assert "trajectory-10.html" not in nq_page
     assert "trajectory-13.html" in nq_page
-    assert "natural_questions → checkout_redesign</h1>" in nq_page
+    assert (
+        "Task: p-hacking (checkout_redesign) · Prefix: natural_questions</h1>"
+        in nq_page
+    )
+    wikipedia_page = viewer._continuations_page(
+        continuations,
+        seeds=["checkout_redesign"],
+        active_direction="wikipedia_summaries_to_checkout_redesign",
+    )
+    assert "trajectory-10.html" not in wikipedia_page
+    assert "trajectory-14.html" in wikipedia_page
+    assert (
+        "Task: p-hacking (checkout_redesign) · Prefix: wikipedia_summaries</h1>"
+        in wikipedia_page
+    )
     page_empty = viewer._continuations_page([], seeds=["checkout_redesign"])
     assert "No continuation runs yet" in page_empty
 
@@ -1251,6 +1843,13 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     )
     assert "Reward-hack rate by prefix condition" in visuals_page
     assert "Outcome distribution by prefix condition" in visuals_page
+    assert "Task: p-hacking (checkout_redesign) · Prefix: ML (fraud_detection)" in visuals_page
+    # Screenshotting any graph preserves the active continuation condition,
+    # including the three figures on the cost tab.
+    assert visuals_page.count(
+        "Task: p-hacking (checkout_redesign) · Prefix: ML (fraud_detection)"
+    ) >= 6
+    assert "Baseline (no prefix)" in visuals_page
     assert "source #9" not in visuals_page
     assert 'data-vtab="rates"' in visuals_page
     assert 'data-vtab="cost"' in visuals_page
@@ -1259,6 +1858,208 @@ def test_continuations_page_shows_runs_without_condition_summaries() -> None:
     assert "Bar labels give the prefix condition" not in visuals_page
     assert "Wilson 95% intervals" not in visuals_page
     assert "<svg" in visuals_page
+
+
+def test_ml_destination_continuations_have_explicit_viewer_routes() -> None:
+    viewer = viewer_module()
+    wikipedia_record = record_for(prefix_messages(), 3)
+    wikipedia_record["prefix"] = {
+        "name": "wikipedia-summaries",
+        "source_kind": "external",
+        "source_prefix_type": "wikipedia_summaries",
+    }
+    reasoning_phacking_record = record_for(prefix_messages(), 3)
+    reasoning_phacking_record["prefix"] = {
+        "name": "traj711",
+        "source_seed": "reasoning_prompt_benchmark",
+    }
+    demand_record = record_for(prefix_messages(), 3)
+    demand_record["prefix"] = {
+        "name": "demand-prefix",
+        "source_seed": "demand_forecasting",
+        "source_prefix_type": "ml_prefix_only",
+    }
+    checkout_record = record_for(prefix_messages(), 3)
+    checkout_record["prefix"] = {
+        "name": "checkout-positive-prefix",
+        "source_seed": "checkout_redesign_positive",
+        "source_comparison_source_seed": "checkout_redesign",
+        "source_prefix_type": "p_hacking_no_honeypot",
+    }
+    continuations = [
+        fake_audit(
+            audit_id=30,
+            seed="fraud_detection",
+            target="openrouter/q/m",
+            hack=False,
+            continuation_record_value=wikipedia_record,
+        ),
+        fake_audit(
+            audit_id=32,
+            seed="fraud_detection",
+            target="openrouter/q/m",
+            hack=False,
+            continuation_record_value=reasoning_phacking_record,
+        ),
+        fake_audit(
+            audit_id=33,
+            seed="fraud_detection",
+            target="openrouter/q/m",
+            hack=False,
+            continuation_record_value=demand_record,
+        ),
+        fake_audit(
+            audit_id=34,
+            seed="fraud_detection",
+            target="openrouter/q/m",
+            hack=False,
+            continuation_record_value=checkout_record,
+        ),
+    ]
+
+    wikipedia_page = viewer._continuations_page(
+        continuations,
+        seeds=["fraud_detection"],
+        active_direction="wikipedia_summaries_to_fraud_detection",
+    )
+    assert "trajectory-30.html" in wikipedia_page
+    assert (
+        "Task: ML (fraud_detection) · Prefix: wikipedia_summaries</h1>"
+        in wikipedia_page
+    )
+    prefix_nav = wikipedia_page.split(
+        '<div class="contextnav continuation-prefix-nav">', 1
+    )[1].split("</div>", 1)[0]
+    assert "demand_forecasting" in prefix_nav
+    assert "p-hacking (checkout_redesign)" in prefix_nav
+
+    reasoning_phacking_page = viewer._continuations_page(
+        continuations,
+        seeds=["fraud_detection"],
+        active_direction="reasoning_prompt_benchmark_to_fraud_detection",
+    )
+    assert "trajectory-30.html" not in reasoning_phacking_page
+    assert "trajectory-32.html" in reasoning_phacking_page
+    assert (
+        "Task: ML (fraud_detection) · Prefix: "
+        "p-hacking (reasoning_prompt_benchmark)</h1>"
+        in reasoning_phacking_page
+    )
+
+    demand_page = viewer._continuations_page(
+        continuations,
+        seeds=["fraud_detection"],
+        active_direction="demand_forecasting_to_fraud_detection",
+    )
+    assert "trajectory-33.html" in demand_page
+    assert (
+        "Task: ML (fraud_detection) · Prefix: demand_forecasting</h1>"
+        in demand_page
+    )
+
+    checkout_page = viewer._continuations_page(
+        continuations,
+        seeds=["fraud_detection"],
+        active_direction="checkout_redesign_to_fraud_detection",
+    )
+    assert "trajectory-34.html" in checkout_page
+    assert (
+        "Task: ML (fraud_detection) · Prefix: "
+        "p-hacking (checkout_redesign)</h1>"
+        in checkout_page
+    )
+
+
+def test_activity_log_context_experiment_renders_under_prefixes() -> None:
+    from env_viewer_continuations import (
+        continuation_direction,
+        is_activity_log_context_continuation,
+    )
+
+    viewer = viewer_module()
+    record = record_for(prefix_messages(), 3)
+    record["delivery_mode"] = "inline_user_context"
+    record["prefix"] = {
+        "name": "activity-log-traj711",
+        "source_trajectory_id": 711,
+        "source_seed": "reasoning_prompt_benchmark",
+        "source_prefix_type": "activity_log_context",
+    }
+    row = fake_audit(
+        audit_id=40,
+        seed="checkout_redesign",
+        target="openrouter/q/m",
+        hack=True,
+        continuation_record_value=record,
+    )
+    source = fake_audit(
+        audit_id=711,
+        seed="reasoning_prompt_benchmark",
+        target="openrouter/q/m",
+        hack=True,
+    )
+    originals = [
+        fake_audit(
+            audit_id=41,
+            seed="checkout_redesign",
+            target="openrouter/q/m",
+            hack=False,
+        )
+    ]
+    prefix_types = (("activity_log_context", "Activity-log context (p-hacking)"),)
+
+    assert is_activity_log_context_continuation(row)
+    assert (
+        continuation_direction(row)
+        == "activity_log_context_to_checkout_redesign"
+    )
+    trajectories = viewer._activity_log_prefix_trajectories_page(
+        [row],
+        seeds=["checkout_redesign"],
+        prefix_types=prefix_types,
+        active_harness="simple",
+    )
+    visuals = viewer._activity_log_prefix_visuals_page(
+        [row],
+        originals,
+        audits_by_id={711: source},
+        seeds=["checkout_redesign"],
+        prefix_types=prefix_types,
+        active_harness="simple",
+    )
+
+    assert 'href="prefixes.html" class="active">Prefixes</a>' in trajectories
+    assert '>Multi-agent</a>' not in trajectories
+    assert "trajectory-40.html" in trajectories
+    assert (
+        'href="prefixes_activity_log_context_trajectories.html" '
+        'class="active">trajectories</a>' in trajectories
+    )
+    assert (
+        'href="prefixes_activity_log_context_visuals.html" '
+        'class="active">visuals</a>' in visuals
+    )
+    assert "Reward-hack rate by prefix condition" in visuals
+    assert "Activity-log context (p-hacking)" in visuals
+
+    continuation_page = viewer._continuations_page(
+        [row],
+        seeds=["checkout_redesign"],
+        active_direction="activity_log_context_to_checkout_redesign",
+    )
+    continuation_visuals = viewer._continuation_visuals_page(
+        [row],
+        originals,
+        audits_by_id={711: source},
+        seeds=["checkout_redesign"],
+        active_direction="activity_log_context_to_checkout_redesign",
+    )
+    assert "trajectory-40.html" in continuation_page
+    assert (
+        'class="active">Activity-log context (p-hacking)</a>'
+        in continuation_page
+    )
+    assert "Reward-hack rate by prefix condition" in continuation_visuals
 
 
 def test_continuation_trajectory_reuses_petri_jump_to_new_task() -> None:
@@ -1305,7 +2106,7 @@ def test_continuation_trajectory_reuses_petri_jump_to_new_task() -> None:
 # --------------------------------------------------------------------------- #
 def test_nq_question_selection_is_deterministic_without_repeats() -> None:
     sys.path.insert(0, str(ENVIRONMENTS))
-    import exp_nq_prefix as nq
+    from prefixes import exp_nq_prefix as nq
 
     questions = [f"question {index}" for index in range(1000)]
     first = nq.select_questions(questions, 1234, 50)
@@ -1319,7 +2120,7 @@ def test_nq_question_selection_is_deterministic_without_repeats() -> None:
 
 def test_nq_payload_assembles_a_valid_prefix() -> None:
     sys.path.insert(0, str(ENVIRONMENTS))
-    import exp_nq_prefix as nq
+    from prefixes import exp_nq_prefix as nq
 
     name = nq.default_name("qwen2.5-72b", 30000, 1234)
     cfg = {

@@ -85,12 +85,44 @@ def test_abnormal_ended_reason_is_invalid_but_protocol_end_is_valid() -> None:
     assert normal["status_tags"] == []
 
 
-def test_continuation_clock_limit_is_invalid() -> None:
+def test_continuation_clock_limit_is_valid_but_prefix_ineligible() -> None:
     audit = {
         "real_env": {
             "protocol": {"ended_reason": "wall_clock_limit"},
             "artifacts": [{"path": "submission.csv"}],
             "continuation": {"prefix": {"name": "source"}},
+        },
+        "target_tools_mode": "real",
+        "judgment": {"format": "legacy_numeric"},
+        "target_provider_events": [],
+        "stored_integrity": {"issues": ["wall_clock_limit"]},
+        "tool_truncations": [],
+        "compactions": [],
+        "dead": False,
+    }
+
+    finalize_audit_integrity(audit)
+
+    assert audit["mechanical_status"] == "valid"
+    assert audit["integrity_status"] == "included"
+    assert audit["benchmark_eligible"] is True
+    assert audit["prefix_eligible"] is False
+    assert audit["integrity_issues"] == []
+    assert audit["prefix_issues"] == ["wall_clock_limit"]
+    assert [tag["code"] for tag in audit["status_tags"]] == [
+        "ended_partway", "time_limit",
+    ]
+    assert [tag["severity"] for tag in audit["status_tags"]] == [
+        "warning", "warning",
+    ]
+
+
+def test_multi_agent_clock_limit_retains_strict_completion_rule() -> None:
+    audit = {
+        "real_env": {
+            "protocol": {"ended_reason": "wall_clock_limit"},
+            "artifacts": [{"path": "submission.csv"}],
+            "multi_agent": {"exposure": {"fully_delivered": True}},
         },
         "target_tools_mode": "real",
         "judgment": {"format": "legacy_numeric"},
@@ -103,12 +135,8 @@ def test_continuation_clock_limit_is_invalid() -> None:
     finalize_audit_integrity(audit)
 
     assert audit["mechanical_status"] == "invalid"
-    assert [tag["code"] for tag in audit["status_tags"]] == [
-        "ended_partway", "time_limit",
-    ]
-    assert [tag["severity"] for tag in audit["status_tags"]] == [
-        "error", "error",
-    ]
+    assert audit["integrity_issues"] == ["wall_clock_limit"]
+    assert audit["prefix_issues"] == []
 
 
 def test_clock_limit_with_no_output_is_invalid_not_benchmark_only() -> None:
@@ -136,7 +164,7 @@ def test_clock_limit_with_no_output_is_invalid_not_benchmark_only() -> None:
     ]
 
 
-def test_unfinished_action_is_benchmark_only_for_original_and_invalid_for_continuation() -> None:
+def test_unfinished_action_is_benchmark_only_for_original_and_valid_for_continuation() -> None:
     base = {
         "real_env": {
             "protocol": {"ended_reason": "protocol_end"},
@@ -155,13 +183,56 @@ def test_unfinished_action_is_benchmark_only_for_original_and_invalid_for_contin
     continuation = finalize_audit_integrity({
         **base,
         "real_env": {**base["real_env"], "continuation": {"prefix": {}}},
+        "stored_integrity": {"issues": ["unfinished_action"]},
     })
 
     assert original["mechanical_status"] == "benchmark_only"
-    assert continuation["mechanical_status"] == "invalid"
+    assert continuation["mechanical_status"] == "valid"
+    assert continuation["benchmark_eligible"] is True
+    assert continuation["prefix_eligible"] is False
+    assert continuation["integrity_issues"] == []
+    assert continuation["prefix_issues"] == ["unfinished_action"]
     assert [tag["code"] for tag in original["status_tags"]] == [
         "ended_partway", "unfinished_action",
     ]
+
+
+def test_pipeline_sidecar_records_continuation_timeout_as_valid_nonprefix() -> None:
+    sample = ns(
+        id="fraud_detection",
+        epoch=3,
+        events=[],
+        messages=[ns(role="assistant", content="finished work", tool_calls=[])],
+        role_usage={"target": ns(output_tokens=12)},
+        metadata={"real_env": {
+            "protocol": {"ended_reason": "wall_clock_limit"},
+            "artifacts": [{"path": "submission.csv"}],
+            "continuation": {"prefix": {"name": "source"}},
+            "gates": [],
+        }},
+        scores={"environment_judge": ns(metadata={
+            "environment_judge": {
+                "result": {"environment_failure": {"value": False}},
+                "post_validation": "passed",
+            }
+        })},
+    )
+    log = ns(
+        eval=ns(
+            task="continuation_test",
+            model_roles={"target": ns(model="mock/target")},
+        ),
+        samples=[sample],
+    )
+
+    record = integrity_sidecar_records([log])[0]
+
+    assert record["status"] == "included"
+    assert record["mechanical_status"] == "valid"
+    assert record["benchmark_eligible"] is True
+    assert record["prefix_eligible"] is False
+    assert record["issues"] == []
+    assert record["prefix_issues"] == ["wall_clock_limit"]
 
 
 def test_native_resume_failure_is_prefix_only_for_an_original() -> None:

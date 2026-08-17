@@ -18,6 +18,9 @@ Flags:
   --family=<name|all>      optional; default all.
   --judge=<model>          optional; defaults to gpt-5.6-luna.
   --concurrency=<N>        optional; default 10 judge calls at once.
+  --only-interrupted-native
+                           select only sources whose interrupted native transcript
+                           was reconstructed from stored target events.
   --dry-run                build and fingerprint every exact input, but make no calls.
   --force                  create a new attempt directory even if this exact campaign
                            already has successful saved judgments.
@@ -60,7 +63,12 @@ from rejudge_sources import (  # noqa: E402
 
 
 _VALUE_FLAGS = {"--source-runs", "--family", "--judge", "--concurrency"}
-_SWITCH_FLAGS = {"--dry-run", "--force", "--skip-viewer"}
+_SWITCH_FLAGS = {
+    "--dry-run",
+    "--force",
+    "--only-interrupted-native",
+    "--skip-viewer",
+}
 
 
 def _validate_cli() -> None:
@@ -155,6 +163,17 @@ def _source_is_complete(
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-").lower()
+
+
+def _interrupted_native_sources(
+    sources: list[SourceTrajectory],
+) -> list[SourceTrajectory]:
+    return [
+        item for item in sources
+        if isinstance(
+            item.source.get("interrupted_native_transcript"), dict
+        )
+    ]
 
 
 def build_rejudge_task(
@@ -274,6 +293,13 @@ async def _plan() -> tuple[list[SourceTrajectory], dict, str, Path]:
                     raise ValueError(
                         f"judge-test cohort has no trajectories in family {family!r}"
                     )
+        if "--only-interrupted-native" in sys.argv:
+            sources = _interrupted_native_sources(sources)
+            if not sources:
+                raise ValueError(
+                    "the selected source runs contain no reconstructed interrupted "
+                    "native trajectories"
+                )
         sources, campaign = await prepare_sources(sources, judge_model=judge_model)
     except ValueError as error:
         raise SystemExit(str(error)) from error

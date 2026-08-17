@@ -326,17 +326,25 @@ _CONTINUATION_RATE_COLORS = {
     "baseline": "#8C8C8C",
     "hack-in-one-turn": OUTCOME_COLORS["hack_1turn"],
     "hack-in-two-turns": OUTCOME_COLORS["hack_2turn"],
+    "no-honeypot": "#4C72B0",
+    "p-hacking-no-honeypot": "#4C72B0",
     "no-hack": OUTCOME_COLORS["clean"],
+    "no-hack-1turn": "#86C98F",
+    "no-hack-2turn": OUTCOME_COLORS["clean"],
     "hack_prefix": OUTCOME_COLORS["hack_1turn"],
     "nonhack_prefix": OUTCOME_COLORS["clean"],
     "prefix": OUTCOME_COLORS["notable"],
 }
 
 _CONTINUATION_RATE_LABELS = {
-    "baseline": "Baseline",
-    "hack-in-one-turn": "After 1-turn hack",
-    "hack-in-two-turns": "After 2-turn hack",
-    "no-hack": "After no-hack prefix",
+    "baseline": "Baseline (no prefix)",
+    "hack-in-one-turn": "1-turn hack prefix",
+    "hack-in-two-turns": "2-turn hack prefix",
+    "no-honeypot": "No-honeypot ML prefix",
+    "p-hacking-no-honeypot": "No-honeypot p-hacking prefix",
+    "no-hack": "Clean prefix",
+    "no-hack-1turn": "1-turn clean prefix",
+    "no-hack-2turn": "2-turn clean prefix",
     "hack_prefix": "After hack prefix",
     "nonhack_prefix": "After non-hack prefix",
     "prefix": "After prefix",
@@ -345,17 +353,30 @@ _CONTINUATION_RATE_LABELS = {
 
 def _continuation_bar_style(bar: dict) -> str:
     treatment = str(bar.get("treatment") or "")
+    prefix_user_turns = bar.get("prefix_user_turns")
+    if (
+        treatment == "no-honeypot"
+        and bar.get("prefix_type") == "p_hacking_no_honeypot"
+    ):
+        return "p-hacking-no-honeypot"
+    if treatment == "no-hack" and prefix_user_turns in {1, 2}:
+        return f"no-hack-{prefix_user_turns}turn"
     return treatment if treatment in _CONTINUATION_RATE_COLORS else bar["kind"]
 
 
 def _continuation_bar_tick(bar: dict) -> str:
-    """Compact one-line condition label for one continuation-rate bar."""
+    """Compact condition label, wrapped where crowded repeated labels need it."""
 
     if bar["kind"] == "baseline":
         return "Baseline"
+    if str(bar.get("treatment") or "") == "no-hack":
+        prefix_user_turns = bar.get("prefix_user_turns")
+        if prefix_user_turns in {1, 2}:
+            return f"{prefix_user_turns}-turn\nclean"
     treatment_labels = {
-        "hack-in-one-turn": "1-turn hack",
-        "hack-in-two-turns": "2-turn hack",
+        "hack-in-one-turn": "1-turn\nhack",
+        "hack-in-two-turns": "2-turn\nhack",
+        "no-honeypot": "No\nhoneypot",
         "no-hack": "No hack",
     }
     condition = treatment_labels.get(str(bar.get("treatment") or ""))
@@ -364,7 +385,15 @@ def _continuation_bar_tick(bar: dict) -> str:
     return str(bar.get("short_label") or "After prefix").removeprefix("After ")
 
 
-def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
+def _figure_title(title: str, context: str = "") -> str:
+    """Add screenshot-safe experiment context without changing ordinary figures."""
+
+    return f"{title}\n{context}" if context else title
+
+
+def fig_continuation_prefix_hack_rates(
+    groups: list[dict], *, context: str = ""
+) -> str:
     """Matched rates with per-bar conditions and a second, model-level axis."""
 
     model_order = {
@@ -451,7 +480,7 @@ def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
             label,
             (center, 0),
             xycoords=("data", "axes fraction"),
-            xytext=(0, -42),
+            xytext=(0, -52),
             textcoords="offset points",
             ha="center",
             va="top",
@@ -474,7 +503,9 @@ def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
         if style not in styles:
             styles.append(style)
     legend_order = (
-        "baseline", "hack-in-one-turn", "hack-in-two-turns", "no-hack",
+        "baseline", "hack-in-one-turn", "hack-in-two-turns", "no-honeypot",
+        "p-hacking-no-honeypot",
+        "no-hack-1turn", "no-hack-2turn", "no-hack",
         "hack_prefix", "nonhack_prefix", "prefix",
     )
     legend_styles = [style for style in legend_order if style in styles]
@@ -486,7 +517,7 @@ def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
         for style in legend_styles
     ]
     fig.suptitle(
-        "Reward-hack rate by prefix condition",
+        _figure_title("Reward-hack rate by prefix condition", context),
         y=0.985,
         fontsize=13,
         fontweight="bold",
@@ -496,12 +527,17 @@ def fig_continuation_prefix_hack_rates(groups: list[dict]) -> str:
         frameon=False,
         fontsize=9,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.935),
+        bbox_to_anchor=(0.5, 0.895 if context else 0.935),
         ncol=min(4, len(legend)),
         columnspacing=1.5,
         handlelength=1.4,
     )
-    fig.subplots_adjust(top=0.80, bottom=0.23, left=0.07, right=0.99)
+    fig.subplots_adjust(
+        top=0.76 if context else 0.80,
+        bottom=0.25,
+        left=0.07,
+        right=0.99,
+    )
     return _fig_to_svg(fig)
 
 
@@ -513,7 +549,9 @@ _CONTINUATION_COMPOSITION = (
 )
 
 
-def fig_continuation_outcome_distribution(groups: list[dict]) -> str:
+def fig_continuation_outcome_distribution(
+    groups: list[dict], *, context: str = ""
+) -> str:
     """100%-stacked usable outcomes for every matched continuation condition."""
 
     model_order = {
@@ -619,7 +657,7 @@ def fig_continuation_outcome_distribution(groups: list[dict]) -> str:
             label,
             (center, 0),
             xycoords=("data", "axes fraction"),
-            xytext=(0, -42),
+            xytext=(0, -52),
             textcoords="offset points",
             ha="center",
             va="top",
@@ -636,7 +674,7 @@ def fig_continuation_outcome_distribution(groups: list[dict]) -> str:
     ax.margins(x=0.02)
 
     fig.suptitle(
-        "Outcome distribution by prefix condition",
+        _figure_title("Outcome distribution by prefix condition", context),
         y=0.985,
         fontsize=13,
         fontweight="bold",
@@ -649,28 +687,35 @@ def fig_continuation_outcome_distribution(groups: list[dict]) -> str:
         frameon=False,
         fontsize=9,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.935),
+        bbox_to_anchor=(0.5, 0.895 if context else 0.935),
         ncol=4,
         columnspacing=1.5,
         handlelength=1.4,
     )
-    fig.subplots_adjust(top=0.80, bottom=0.23, left=0.07, right=0.99)
+    fig.subplots_adjust(
+        top=0.76 if context else 0.80,
+        bottom=0.25,
+        left=0.07,
+        right=0.99,
+    )
     return _fig_to_svg(fig)
 
 
-def render_continuation_visuals(groups: list[dict], audits: list[dict]) -> str:
+def render_continuation_visuals(
+    groups: list[dict], audits: list[dict], *, context: str = ""
+) -> str:
     """Continuation rates and recorded experiment spend in two compact tabs."""
 
     rates = (
         '<div class="figgrid">'
-        + _figure(fig_continuation_prefix_hack_rates(groups))
+        + _figure(fig_continuation_prefix_hack_rates(groups, context=context))
         + '</div><div class="figgrid">'
-        + _figure(fig_continuation_outcome_distribution(groups))
+        + _figure(fig_continuation_outcome_distribution(groups, context=context))
         + "</div>"
     )
     return _tab_layout([
         ("rates", "rates", rates),
-        ("cost", "cost", _cost_section(audits)),
+        ("cost", "cost", _cost_section(audits, context=context)),
     ])
 
 
@@ -843,7 +888,7 @@ def _component_label(key: str) -> str:
     return "VM estimate" if key == VM_KEY else ROLE_LABEL.get(key, key)
 
 
-def fig_all_in_cost_by_model(cost: dict) -> str:
+def fig_all_in_cost_by_model(cost: dict, *, context: str = "") -> str:
     """Average all-in trajectory cost by agent model, stacked by recorded component."""
     rows = [r for r in cost.get("by_model", []) if r.get("n")]
     if not rows:
@@ -870,7 +915,7 @@ def fig_all_in_cost_by_model(cost: dict) -> str:
                   rotation=20, ha="right", fontsize=8.5)
     ax.set_ylabel("Average all-in cost per trajectory ($)")
     ax.set_ylim(0, max(r["mean"] for r in rows) * 1.20)
-    ax.set_title("All-in cost per trajectory by model")
+    ax.set_title(_figure_title("All-in cost per trajectory by model", context))
     if len(components) > 1:
         ax.legend(frameon=False, fontsize=8.5)
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
@@ -878,7 +923,9 @@ def fig_all_in_cost_by_model(cost: dict) -> str:
     return _fig_to_svg(fig)
 
 
-def fig_cost_by_role(summary: dict, roles: list[str]) -> str:
+def fig_cost_by_role(
+    summary: dict, roles: list[str], *, context: str = ""
+) -> str:
     """Total recorded spend split into the stored roles plus the VM estimate."""
     by_component = {
         role: float(summary.get("by_role", {}).get(role, 0.0)) for role in roles
@@ -903,13 +950,15 @@ def fig_cost_by_role(summary: dict, roles: list[str]) -> str:
     ax.set_xticks(xs, [_component_label(key) for key in components], fontsize=9)
     ax.set_ylabel("Total spend ($)")
     ax.set_ylim(0, max(vals) * 1.20)
-    ax.set_title(f"Where the budget goes — {_usd(total)} total")
+    ax.set_title(_figure_title(
+        f"Where the budget goes — {_usd(total)} total", context
+    ))
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
 
 
-def fig_cost_distribution(cost: dict) -> str:
+def fig_cost_distribution(cost: dict, *, context: str = "") -> str:
     """Box + jittered strip of the TOTAL cost of each individual trajectory, grouped by
     agent model — shows the spread (a few long runs cost far more than the median)."""
     groups: dict[str, list] = {}
@@ -933,13 +982,13 @@ def fig_cost_distribution(cost: dict) -> str:
                   rotation=20, ha="right", fontsize=8.5)
     ax.set_ylabel("Cost per trajectory ($)")
     ax.set_ylim(0, max(max(d) for d in data) * 1.12)
-    ax.set_title("Per-trajectory cost spread")
+    ax.set_title(_figure_title("Per-trajectory cost spread", context))
     ax.yaxis.grid(True, color="#e6e6ee", lw=0.8)
     ax.set_axisbelow(True)
     return _fig_to_svg(fig)
 
 
-def _cost_section(audits: list[dict]) -> str:
+def _cost_section(audits: list[dict], *, context: str = "") -> str:
     """The 'Cost' tab: total-spend headline, visible gaps, and the three cost figures."""
     summary = recorded_cost_summary(audits)
     cost = cost_data(audits)
@@ -971,9 +1020,9 @@ def _cost_section(audits: list[dict]) -> str:
         + headline
         + gaps
         + _stack(
-            fig_all_in_cost_by_model(cost),
-            fig_cost_by_role(summary, cost["roles"]),
-            fig_cost_distribution(cost),
+            fig_all_in_cost_by_model(cost, context=context),
+            fig_cost_by_role(summary, cost["roles"], context=context),
+            fig_cost_distribution(cost, context=context),
         )
     )
 

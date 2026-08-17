@@ -18,8 +18,8 @@ import exp_continuation_prefix_batch as batch  # noqa: E402
 def default_cfg() -> dict:
     return {
         "epochs": 40,
-        "vm_concurrency": 75,
-        "subscription_vm_concurrency": 75,
+        "vm_concurrency": 250,
+        "subscription_vm_concurrency": 250,
         "infrastructure_retries": 1,
         "treatment": "purpose-built-prefix",
         "aws_region": "us-west-2",
@@ -80,7 +80,7 @@ def test_default_stages_are_ordered_and_cover_1600_trajectories(
     assert [stage.key for stage in stages] == list(batch.STAGE_ORDER)
     assert [len(stage.prefix_files) for stage in stages] == [20, 12, 8]
     assert [stage.trajectories for stage in stages] == [800, 480, 320]
-    assert [stage.vm_concurrency for stage in stages] == [75, 75, 75]
+    assert [stage.vm_concurrency for stage in stages] == [250, 250, 250]
     assert sum(stage.trajectories for stage in stages) == 1_600
 
 
@@ -161,7 +161,7 @@ def test_campaign_cells_rotate_prefixes_before_advancing_epoch() -> None:
         key="subscription",
         harness="subscription",
         prefix_files=(Path("/opus.json"), Path("/gpt.json")),
-        vm_concurrency=75,
+        vm_concurrency=250,
         epochs=2,
     )
     specs = [Spec("opus-prefix", "opus-4.6"), Spec("gpt-prefix", "gpt-5.5")]

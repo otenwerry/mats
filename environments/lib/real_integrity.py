@@ -35,6 +35,7 @@ TECHNICAL_FAILURE_ISSUES = frozenset({
     "ended_early",
     "production_prefix_boundary_lost",
     "native_resume_bundle_unavailable",
+    "activity_log_not_fully_delivered",
     *JUDGMENT_FAILURE_ISSUES,
 })
 
@@ -453,11 +454,31 @@ def _status_tags(
     return tags
 
 
+PREFIX_ONLY_COMPLETION_ISSUES = frozenset({
+    "wall_clock_limit",
+    "unfinished_action",
+})
+
+
+def _issue_is_prefix_only(code: str, *, multi_agent: bool) -> bool:
+    """Whether an issue preserves the benchmark outcome but blocks reuse.
+
+    Originals and continuations share the same benchmark-eligibility rule.  Their
+    display differs: originals call this state ``benchmark_only`` while continuations
+    collapse it to ``valid``.  Multi-agent activity-log transfer retains its stricter
+    completion contract independently.
+    """
+
+    return code == "native_resume_bundle_unavailable" or (
+        not multi_agent and code in PREFIX_ONLY_COMPLETION_ISSUES
+    )
+
+
 def mechanical_status_record(
     *,
     issues: list[str],
     prefix_issues: list[str],
-    continuation: bool,
+    show_benchmark_only: bool,
     ended_reason: str | None,
     has_output: bool,
     unfinished_action: bool,
@@ -469,7 +490,7 @@ def mechanical_status_record(
     prefix_issues = list(dict.fromkeys(str(code) for code in prefix_issues))
     if issues:
         status = "invalid"
-    elif prefix_issues and not continuation:
+    elif prefix_issues and show_benchmark_only:
         status = "benchmark_only"
     else:
         status = "valid"
@@ -509,6 +530,9 @@ def finalize_audit_integrity(audit: dict) -> dict:
     integrity: list[str] = []
     prefix_issues: list[str] = []
     continuation = bool(real_env.get("continuation"))
+    multi_agent = real_env.get("multi_agent") or {}
+    conditioned = continuation or bool(multi_agent)
+    multi_agent_run = bool(multi_agent)
 
     def add(code: str, label: str, *, severity: str, detail: str,
             excludes: bool = False, prefix_only: bool = False) -> None:
@@ -527,6 +551,23 @@ def finalize_audit_integrity(audit: dict) -> dict:
     if audit.get("target_tools_mode") == "real" and not real_env.get("artifacts"):
         add("missing_final_artifact_record", "missing artifacts", severity="error",
             detail="The final artifact snapshot record is missing.", excludes=True)
+    if multi_agent:
+        exposure = multi_agent.get("exposure") or {}
+        if exposure.get("fully_delivered") is not True:
+            status = str(exposure.get("status") or "unknown")
+            add(
+                "activity_log_not_fully_delivered",
+                f"activity log: {status.replace('_', ' ')}",
+                severity="error",
+                detail=(
+                    "The complete numbered ACTIVITY_LOG.md was not mechanically "
+                    "verified in a successful target-model input "
+                    f"(status={status}, covered="
+                    f"{exposure.get('covered_line_count', 0)}/"
+                    f"{exposure.get('total_line_count', '?')})."
+                ),
+                excludes=True,
+            )
 
     gate_errors = [
         gate for gate in real_env.get("gates", [])
@@ -606,13 +647,16 @@ def finalize_audit_integrity(audit: dict) -> dict:
             ))
     ended_reason = protocol.get("ended_reason") or audit.get("real_ended_reason")
     if ended_reason == "wall_clock_limit":
+        prefix_only = _issue_is_prefix_only(
+            "wall_clock_limit", multi_agent=multi_agent_run
+        )
         add(
             "wall_clock_limit",
             "clock limit",
-            severity="error" if continuation else "warning",
+            severity="warning" if prefix_only else "error",
             detail="The trajectory ended at its wall-clock limit.",
-            excludes=continuation,
-            prefix_only=not continuation,
+            excludes=not prefix_only,
+            prefix_only=prefix_only,
         )
     elif ended_reason not in (None, "protocol_end", "gate_error_end"):
         # protocol_end is the one normal ending; gate_error_end is already an
@@ -624,13 +668,16 @@ def finalize_audit_integrity(audit: dict) -> dict:
                    f"(ended_reason: {ended_reason}).", excludes=True)
     unfinished_action = has_unfinished_action(audit.get("messages"))
     if unfinished_action:
+        prefix_only = _issue_is_prefix_only(
+            "unfinished_action", multi_agent=multi_agent_run
+        )
         add(
             "unfinished_action",
             "unfinished action",
-            severity="error" if continuation else "warning",
+            severity="warning" if prefix_only else "error",
             detail="The final assistant tool call has no stored result.",
-            excludes=continuation,
-            prefix_only=not continuation,
+            excludes=not prefix_only,
+            prefix_only=prefix_only,
         )
     truncations = audit.get("tool_truncations") or []
     if truncations:
@@ -653,6 +700,8 @@ def finalize_audit_integrity(audit: dict) -> dict:
     native_prefix = (
         continuation_record.get("production_native_resume")
         or continuation_record.get("subscription_native_resume")
+        or continuation_record.get("production_fresh_context")
+        or continuation_record.get("subscription_fresh_context")
         or {}
     )
     if native_prefix.get("boundary_lost"):
@@ -787,7 +836,7 @@ def finalize_audit_integrity(audit: dict) -> dict:
         code = str(code)
         if code.startswith("target_provider_") and code not in current_provider_issues:
             continue
-        if code == "native_resume_bundle_unavailable":
+        if _issue_is_prefix_only(code, multi_agent=multi_agent_run):
             if code not in prefix_issues:
                 prefix_issues.append(code)
             continue
@@ -823,7 +872,7 @@ def finalize_audit_integrity(audit: dict) -> dict:
     status = mechanical_status_record(
         issues=integrity,
         prefix_issues=prefix_issues,
-        continuation=continuation,
+        show_benchmark_only=not conditioned,
         ended_reason=ended_reason,
         has_output=not audit.get("dead"),
         unfinished_action=unfinished_action,
@@ -844,6 +893,9 @@ def sample_integrity_record(
     real_env = (getattr(sample, "metadata", None) or {}).get("real_env") or {}
     protocol = real_env.get("protocol") or {}
     continuation = bool(real_env.get("continuation"))
+    multi_agent = real_env.get("multi_agent") or {}
+    conditioned = continuation or bool(multi_agent)
+    multi_agent_run = bool(multi_agent)
     target_usage = (getattr(sample, "role_usage", None) or {}).get("target")
     output_tokens = getattr(target_usage, "output_tokens", 0) or 0
     has_output = sample_has_target_output(sample) or output_tokens > 0
@@ -861,6 +913,10 @@ def sample_integrity_record(
         issues.append("missing_final_artifact_record")
     if real_env.get("finalize_error"):
         issues.append("finalize_error")
+    if multi_agent:
+        exposure = multi_agent.get("exposure") or {}
+        if exposure.get("fully_delivered") is not True:
+            issues.append("activity_log_not_fully_delivered")
     if (
         (real_env.get("harness") or {}).get("mode") in {"production", "subscription"}
         and (real_env.get("native_resume_bundle") or {}).get("available") is not True
@@ -889,11 +945,25 @@ def sample_integrity_record(
 
     ended_reason = protocol.get("ended_reason")
     if ended_reason == "wall_clock_limit":
-        (issues if continuation else prefix_issues).append("wall_clock_limit")
+        destination = (
+            prefix_issues
+            if _issue_is_prefix_only(
+                "wall_clock_limit", multi_agent=multi_agent_run
+            )
+            else issues
+        )
+        destination.append("wall_clock_limit")
     elif ended_reason not in (None, "protocol_end", "gate_error_end"):
         issues.append("ended_early")
     if unfinished_action:
-        (issues if continuation else prefix_issues).append("unfinished_action")
+        destination = (
+            prefix_issues
+            if _issue_is_prefix_only(
+                "unfinished_action", multi_agent=multi_agent_run
+            )
+            else issues
+        )
+        destination.append("unfinished_action")
 
     # Old sidecars remain useful for failures that cannot be reconstructed from
     # the sample. Reinterpret the former native-resume exclusion as prefix-only.
@@ -901,7 +971,11 @@ def sample_integrity_record(
         code = str(code)
         if code.startswith("target_provider_") and code not in current_provider_issues:
             continue
-        destination = prefix_issues if code == "native_resume_bundle_unavailable" else issues
+        destination = (
+            prefix_issues
+            if _issue_is_prefix_only(code, multi_agent=multi_agent_run)
+            else issues
+        )
         destination.append(code)
     prefix_issues.extend(
         str(code) for code in (stored_record or {}).get("prefix_issues") or []
@@ -910,7 +984,7 @@ def sample_integrity_record(
     status = mechanical_status_record(
         issues=issues,
         prefix_issues=prefix_issues,
-        continuation=continuation,
+        show_benchmark_only=not conditioned,
         ended_reason=ended_reason,
         has_output=has_output,
         unfinished_action=unfinished_action,
@@ -975,7 +1049,7 @@ def mark_ineligible_prefix_source(audit: dict, source: dict) -> dict:
     status = mechanical_status_record(
         issues=issues,
         prefix_issues=prefix_issues,
-        continuation=True,
+        show_benchmark_only=False,
         ended_reason=ended_reason,
         has_output=not audit.get("dead"),
         unfinished_action=has_unfinished_action(audit.get("messages")),

@@ -11,8 +11,10 @@ from pathlib import Path, PurePosixPath
 
 
 FAMILY_SANDBOX = {
+    "ml_prefix_only": "ml",
     "ml_training_data_misuse": "ml",
     "p_hacking": "p_hacking",
+    "p_hacking_prefix_only": "p_hacking",
 }
 
 COMPOSE_FILE = "compose.yaml"

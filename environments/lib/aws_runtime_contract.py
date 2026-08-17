@@ -1,16 +1,20 @@
 """Shared constants for the AWS controller and on-instance worker runtime."""
 
 AWS_SCHEMA_VERSION = "mats-real-aws-v1"
-WORKER_VERSION = "mats-real-worker-v2-all-sandboxes"
+WORKER_VERSION = "mats-real-worker-v3-p-hacking-prefix"
 FAILURE_PACKAGE_SECONDS = 4 * 3600 + 15 * 60
 SSM_PARAMETER_NAME = "/mats/environments/api-keys"
 
 WORKER_PIPELINE_SCRIPTS = frozenset({
     "exp_real_audit_pipeline.py",
     "exp_continuation_pipeline.py",
+    "exp_multi_agent_pipeline.py",
+    "prefixes/exp_ml_prefix.py",
+    "prefixes/exp_p_hacking_prefix.py",
 })
 DEFAULT_WORKER_PIPELINE_SCRIPT = "exp_real_audit_pipeline.py"
 WORKER_PREFIX_PAYLOAD_PATH = "/var/lib/mats-worker/prefix.json"
+WORKER_ACTIVITY_LOG_PAYLOAD_PATH = "/var/lib/mats-worker/activity-log.json"
 
 DEFAULT_SECRET_NAMES = (
     "OPENROUTER_API_KEY",

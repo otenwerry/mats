@@ -28,6 +28,8 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any, Sequence
 from unittest.mock import patch
 
+from exp_opencode_transport import install_inspect_swe_opencode_stdin_transport
+
 
 HARNESS_CHOICES = ("simple", "production", "subscription")
 NATIVE_HARNESS_MODES = frozenset({"production", "subscription"})
@@ -38,6 +40,156 @@ PRODUCTION_SCAFFOLD_VERSIONS = {
     "opencode": "1.18.14",
 }
 NATIVE_RESUME_FORMAT = "environments-production-native-resume-v1"
+
+# OpenCode 1.18.14 encodes ``Date.now() * 0x1000 + counter`` into only six
+# bytes.  The timestamp portion consequently wraps every 2**36 milliseconds.
+# Its resume loop finds the latest user/assistant messages by lexicographic ID,
+# so an archive captured immediately before a wrap can make a newly appended
+# user prompt look older than the prefix's final assistant message.  Rebase only
+# the restored copy's internal message IDs into the current millisecond, using
+# counter zero for all historical rows and the suffix to preserve order.  A new
+# OpenCode message created in the same millisecond starts at counter one, and a
+# later message is also greater (until the next ~795-day wrap).
+_OPENCODE_REBASE_MESSAGE_IDS_CODE = r'''
+import json
+import os
+import pathlib
+import sqlite3
+import time
+
+database = pathlib.Path(os.environ.get(
+    "MATS_OPENCODE_DB_PATH",
+    "/root/.local/share/opencode/opencode.db",
+))
+if not database.is_file():
+    raise SystemExit(f"restored OpenCode state has no database: {database}")
+
+connection = sqlite3.connect(database)
+connection.row_factory = sqlite3.Row
+try:
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection.execute("PRAGMA journal_mode=DELETE")
+    rows = connection.execute(
+        "SELECT id, time_created FROM message ORDER BY time_created, id"
+    ).fetchall()
+    if not rows:
+        raise RuntimeError("restored OpenCode database has no messages")
+
+    base_milliseconds = int(time.time() * 1000)
+    encoded_time = (base_milliseconds * 0x1000) & ((1 << 48) - 1)
+    old_ids = [str(row["id"]) for row in rows]
+    new_ids = [
+        f"msg_{encoded_time:012x}{index:014x}"
+        for index in range(1, len(rows) + 1)
+    ]
+    mapping = dict(zip(old_ids, new_ids, strict=True))
+    temporary = {
+        old_id: f"mats_tmp_message_{index:014x}"
+        for index, old_id in enumerate(old_ids, start=1)
+    }
+
+    def quote_identifier(value):
+        return '"' + value.replace('"', '""') + '"'
+
+    tables = [
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+        if not str(row[0]).startswith("sqlite_")
+    ]
+    reference_columns = []
+    json_tables = []
+    for table in tables:
+        columns = [
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_info({quote_identifier(table)})"
+            )
+        ]
+        reference_columns.extend(
+            (table, column)
+            for column in columns
+            if column.lower() in {"message_id", "messageid"}
+        )
+        if "data" in columns:
+            json_tables.append(table)
+
+    for old_id, temporary_id in temporary.items():
+        for table, column in reference_columns:
+            connection.execute(
+                f"UPDATE {quote_identifier(table)} "
+                f"SET {quote_identifier(column)} = ? "
+                f"WHERE {quote_identifier(column)} = ?",
+                (temporary_id, old_id),
+            )
+        connection.execute(
+            "UPDATE message SET id = ? WHERE id = ?", (temporary_id, old_id)
+        )
+    for old_id, new_id in mapping.items():
+        temporary_id = temporary[old_id]
+        connection.execute(
+            "UPDATE message SET id = ? WHERE id = ?", (new_id, temporary_id)
+        )
+        for table, column in reference_columns:
+            connection.execute(
+                f"UPDATE {quote_identifier(table)} "
+                f"SET {quote_identifier(column)} = ? "
+                f"WHERE {quote_identifier(column)} = ?",
+                (new_id, temporary_id),
+            )
+
+    def replace_ids(value):
+        if isinstance(value, str):
+            return mapping.get(value, value)
+        if isinstance(value, list):
+            return [replace_ids(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace_ids(item) for key, item in value.items()}
+        return value
+
+    for table in json_tables:
+        quoted_table = quote_identifier(table)
+        for row in connection.execute(
+            f"SELECT rowid, data FROM {quoted_table} WHERE data IS NOT NULL"
+        ).fetchall():
+            try:
+                value = json.loads(row["data"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            replaced = replace_ids(value)
+            if replaced != value:
+                connection.execute(
+                    f"UPDATE {quoted_table} SET data = ? WHERE rowid = ?",
+                    (json.dumps(replaced, separators=(",", ":")), row["rowid"]),
+                )
+
+    connection.commit()
+    normalized = [
+        str(row[0])
+        for row in connection.execute(
+            "SELECT id FROM message ORDER BY time_created, id"
+        )
+    ]
+    if normalized != new_ids:
+        raise RuntimeError("OpenCode message-ID normalization changed transcript order")
+    connection.execute("PRAGMA journal_mode=WAL")
+finally:
+    connection.close()
+
+print(json.dumps({
+    "applied": True,
+    "method": "opencode_message_id_rebase_v1",
+    "reason": "avoid_48_bit_timestamp_rollover_resume_misordering",
+    "message_count": len(old_ids),
+    "original_first_id": old_ids[0],
+    "original_last_id": old_ids[-1],
+    "normalized_first_id": new_ids[0],
+    "normalized_last_id": new_ids[-1],
+    "base_milliseconds": base_milliseconds,
+}, sort_keys=True))
+'''
 
 # OpenCode's public Go catalog is intentionally explicit here. A target not in this
 # table keeps the established API-backed subscription fallback rather than silently
@@ -218,6 +370,17 @@ def production_harness_metadata(target_name: str, routed_slug: str) -> dict:
         },
         "context_compactions": [],
         "native_loss_events": [],
+        **(
+            {
+                "prompt_transport": {
+                    "method": "stdin",
+                    "format": "opencode_1.18.14_positional_message_v1",
+                    "argv_contains_prompt": False,
+                }
+            }
+            if scaffold == "opencode"
+            else {}
+        ),
     }
 
 
@@ -407,6 +570,7 @@ def build_production_agent(
         # This is a non-secret placeholder: the request is redirected to Inspect's
         # localhost bridge, whose host-side model owns the real Go credential.
         opencode_env["OPENCODE_API_KEY"] = "sk-none"
+    install_inspect_swe_opencode_stdin_transport()
     return (
         opencode(
             opencode_model=opencode_model,
@@ -435,6 +599,28 @@ def production_agent_input_messages(messages: Sequence[Any]) -> list[Any]:
             if getattr(message, "role", None) != "system"
         ]
     return list(messages)
+
+
+def retain_native_scaffold_system_messages(
+    previous_messages: Sequence[Any], returned_messages: Sequence[Any]
+) -> list[Any]:
+    """Keep active scaffold prompts in Inspect history after a native resume.
+
+    Native resume inputs deliberately omit system messages because the CLI reloads
+    them from its saved session. Some bridges, including OpenCode, also omit those
+    messages from the returned Inspect history. Reattach the exact prior records in
+    that case so continuation boundaries and judge evidence remain explicit without
+    reinjecting the prompts into the native CLI.
+    """
+
+    returned = list(returned_messages)
+    if any(getattr(message, "role", None) == "system" for message in returned):
+        return returned
+    scaffold_systems = [
+        message for message in previous_messages
+        if getattr(message, "role", None) == "system"
+    ]
+    return [*scaffold_systems, *returned]
 
 
 def _validate_archive_members(data: bytes, scaffold: str) -> list[str]:
@@ -596,7 +782,7 @@ async def restore_native_resume_bundle(
         raise RuntimeError(
             "failed to restore production native session: " + result.stderr.strip()
         )
-    return {
+    restored = {
         "format": bundle["format"],
         "archive_sha256": bundle["archive_sha256"],
         "archive_bytes": bundle["archive_bytes"],
@@ -606,6 +792,27 @@ async def restore_native_resume_bundle(
         "workspace_restored": False,
         "restored": True,
     }
+    if bundle["scaffold"] == "opencode":
+        result = await sbox.exec([
+            "python", "-c", _OPENCODE_REBASE_MESSAGE_IDS_CODE,
+        ])
+        if not result.success:
+            raise RuntimeError(
+                "failed to normalize restored OpenCode message IDs: "
+                + result.stderr.strip()
+            )
+        try:
+            normalization = json.loads(result.stdout.strip())
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "OpenCode message-ID normalization returned invalid metadata"
+            ) from error
+        if not isinstance(normalization, dict) or not normalization.get("applied"):
+            raise RuntimeError(
+                "OpenCode message-ID normalization did not confirm application"
+            )
+        restored["message_id_normalization"] = normalization
+    return restored
 
 
 def native_resume_record(bundle: dict) -> dict:

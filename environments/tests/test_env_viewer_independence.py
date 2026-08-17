@@ -683,6 +683,63 @@ class JudgmentNormalizerTests(unittest.TestCase):
             audits[1]["messages"][0]["timestamp_source"], "model_output_event"
         )
 
+    def test_selected_rejudge_replaces_source_judgment_and_preserves_provenance(self):
+        old_judgment = {
+            "format": "structured",
+            "envelope": {"result": {"summary": "old"}, "post_validation": "passed"},
+        }
+        new_judgment = {
+            "format": "structured",
+            "envelope": {
+                "result": {"summary": "new"},
+                "post_validation": "passed",
+                "judge_method_sha256": "current-method",
+            },
+        }
+        message = {
+            "source_id": "source-message", "role": "assistant", "text": "done",
+        }
+        original = {
+            "id": 4, "mode": "real-v1-source", "task": "source-task",
+            "seed": "seed", "epoch": 2, "retrospective_rejudge": None,
+            "judge": "old/judge", "judgment_role": "official",
+            "judgment": old_judgment, "messages": [message],
+            "judgment_transcript_coverage": {
+                "stored_judgment_predates_reconstruction": True,
+                "recovered_messages_not_seen_by_stored_judgment": 1,
+            },
+            "load_issues": [{
+                "kind": "stored_judgment_missing_recovered_messages",
+            }],
+            "real_env": {"protocol": {"ended_reason": "protocol_end"}},
+        }
+        rejudge = {
+            "id": 9, "mode": "rejudge-current", "task": "rejudge-task",
+            "seed": "seed", "epoch": 2, "judge": "new/judge",
+            "judgment_role": "retrospective_rejudge",
+            "retrospective_rejudge": {
+                "source_run": "real-v1-source", "source_task": "source-task",
+                "seed": "seed", "epoch": 2, "source_key": "source-key",
+            },
+            "judgment": new_judgment, "messages": [message],
+        }
+        audits = [original, rejudge]
+        loader.link_rejudge_sources(audits)
+
+        count = loader.promote_rejudge_judgments(audits, {"rejudge-current"})
+
+        self.assertEqual(count, 1)
+        self.assertEqual(original["judge"], "new/judge")
+        self.assertEqual(original["judgment"], new_judgment)
+        self.assertEqual(
+            original["superseded_judgment"]["audit_fields"]["judgment"],
+            old_judgment,
+        )
+        self.assertTrue(original["judgment_transcript_coverage"]["complete"])
+        self.assertNotIn("judge_missing_recovered_messages", original["integrity_issues"])
+        self.assertEqual(original["load_issues"], [])
+        self.assertIsNone(original.get("retrospective_rejudge"))
+
     def test_remote_campaign_sidecar_adds_final_vm_cost(self):
         import json
 

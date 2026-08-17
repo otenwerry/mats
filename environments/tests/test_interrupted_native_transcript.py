@@ -6,13 +6,17 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
 
 from interrupted_native_transcript import (  # noqa: E402
+    DEADLINE_RECOVERY_FORMAT,
     RECOVERY_FORMAT,
     recover_interrupted_opencode_messages,
+    recover_predeadline_opencode_submission,
 )
 from env_viewer_load import sample_to_audit  # noqa: E402
 
@@ -31,9 +35,20 @@ def model_event(input_messages: list, output_message: object) -> SimpleNamespace
         role="target",
         model="mock/glm",
         input=input_messages,
-        output=ns(message=output_message, choices=[]),
+        output=ns(
+            message=output_message,
+            choices=[],
+            stop_reason="stop",
+            time=2.0,
+            error=None,
+        ),
         id="event-final",
         timestamp="2026-08-13T12:00:00Z",
+        working_start=10.0,
+        working_time=None,
+        pending=None,
+        error=None,
+        retries=None,
     )
 
 
@@ -89,6 +104,63 @@ def test_omits_truly_empty_terminal_output_but_keeps_recorded_history() -> None:
     assert record["terminal_output_included"] is False
 
 
+def test_collapses_only_exact_duplicate_inspect_message_ids() -> None:
+    followup = message("user", "continue", message_id="u2")
+    native_followup = message("user", '"continue"', message_id="native-u2")
+    reasoning = message("assistant", "working", message_id="duplicate")
+
+    recovered, record = recover_interrupted_opencode_messages(
+        [followup],
+        [model_event([native_followup, reasoning, reasoning], None)],
+        applied_before_judging=True,
+    )
+
+    assert recovered == [followup, reasoning]
+    assert record is not None
+    assert record["message_id_normalization"] == {
+        "policy": "collapse_exact_duplicate_inspect_message_ids",
+        "exact_duplicate_messages_omitted": 1,
+        "duplicate_message_ids": ["duplicate"],
+        "conflicting_duplicate_ids": [],
+    }
+
+
+def test_rejects_conflicting_duplicate_inspect_message_ids() -> None:
+    followup = message("user", "continue", message_id="u2")
+    native_followup = message("user", '"continue"', message_id="native-u2")
+    first = message("assistant", "first", message_id="duplicate")
+    second = message("assistant", "second", message_id="duplicate")
+
+    with pytest.raises(ValueError, match="non-identical messages"):
+        recover_interrupted_opencode_messages(
+            [followup],
+            [model_event([native_followup, first, second], None)],
+            applied_before_judging=True,
+        )
+
+
+def test_attachment_and_resolved_content_are_the_same_duplicate_message() -> None:
+    followup = message("user", "continue", message_id="u2")
+    resolved = message("assistant", "full output", message_id="duplicate")
+    again = message("user", "again", message_id="u3")
+    attached = message(
+        "assistant", "attachment://aabbcc", message_id="duplicate"
+    )
+
+    recovered, record = recover_interrupted_opencode_messages(
+        [followup, resolved, again],
+        [model_event([
+            message("user", '"again"', message_id="native-u3"),
+            attached,
+        ], None)],
+        applied_before_judging=True,
+        attachments={"aabbcc": "full output"},
+    )
+
+    assert recovered == [followup, resolved, again]
+    assert record is None
+
+
 def test_fails_closed_when_boundary_is_ambiguous_or_not_final_user() -> None:
     followup = message("user", "continue", message_id="u2")
     duplicate_a = message("user", '"continue"', message_id="native-a")
@@ -110,6 +182,82 @@ def test_fails_closed_when_boundary_is_ambiguous_or_not_final_user() -> None:
     assert ambiguous_record is None
     assert complete == [followup, output]
     assert complete_record is None
+
+
+def test_accepts_terminal_response_completed_before_deadline() -> None:
+    followup = message("user", "continue", message_id="u2")
+    native_followup = message("user", '"continue"', message_id="native-u2")
+    final = message("assistant", "Finished.", message_id="a2")
+    event = model_event([native_followup], final)
+
+    recovered, transcript_record, deadline_record = (
+        recover_predeadline_opencode_submission(
+            [followup],
+            [event],
+            deadline_seconds_from_start=12.5,
+            target_model="mock/glm",
+            applied_before_judging=False,
+        )
+    )
+
+    assert recovered == [followup, final]
+    assert transcript_record is not None
+    assert deadline_record == {
+        "format": DEADLINE_RECOVERY_FORMAT,
+        "accepted_as_submission": True,
+        "rule": "terminal_model_response_completed_before_advertised_deadline",
+        "scaffold": "opencode",
+        "terminal_event_index": 0,
+        "terminal_event_id": "event-final",
+        "terminal_event_timestamp": "2026-08-13T12:00:00Z",
+        "stop_reason": "stop",
+        "response_characters": 9,
+        "working_start_seconds": 10.0,
+        "successful_model_call_seconds": 2.0,
+        "response_completed_seconds_from_start": 12.0,
+        "deadline_seconds_from_start": 12.5,
+        "margin_before_deadline_seconds": 0.5,
+        "timing_source": "event.working_start + output.time",
+        "cli_exit_required_before_deadline": False,
+    }
+
+
+def test_rejects_terminal_response_that_completed_after_deadline() -> None:
+    followup = message("user", "continue", message_id="u2")
+    native_followup = message("user", '"continue"', message_id="native-u2")
+    final = message("assistant", "Finished.", message_id="a2")
+
+    _, transcript_record, deadline_record = recover_predeadline_opencode_submission(
+        [followup],
+        [model_event([native_followup], final)],
+        deadline_seconds_from_start=11.9,
+        applied_before_judging=False,
+    )
+
+    assert transcript_record is not None
+    assert deadline_record is None
+
+
+def test_rejects_pending_or_tool_call_terminal_output() -> None:
+    followup = message("user", "continue", message_id="u2")
+    native_followup = message("user", '"continue"', message_id="native-u2")
+    final = message("assistant", "Finished.", message_id="a2")
+    pending = model_event([native_followup], final)
+    pending.pending = True
+    tool_call = model_event([native_followup], final)
+    final.tool_calls = [ns(function="keep_working")]
+
+    for event in (pending, tool_call):
+        _, transcript_record, deadline_record = (
+            recover_predeadline_opencode_submission(
+                [followup],
+                [event],
+                deadline_seconds_from_start=20.0,
+                applied_before_judging=False,
+            )
+        )
+        assert transcript_record is not None
+        assert deadline_record is None
 
 
 def test_viewer_marks_historical_judgment_that_missed_recovered_messages() -> None:

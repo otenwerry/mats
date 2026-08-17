@@ -16,8 +16,8 @@ different prefixes (the model's answers vary), each written to its own
 content-addressed file.
 
 Usage (from mats/environments/):
-  uv run exp_nq_prefix.py --model=qwen3-32b --tokens=30000 --harness=simple
-  uv run exp_nq_prefix.py --model=qwen3-32b --tokens=30000 \
+  uv run prefixes/exp_nq_prefix.py --model=qwen3-32b --tokens=30000 --harness=simple
+  uv run prefixes/exp_nq_prefix.py --model=qwen3-32b --tokens=30000 \
       --harness=production --dry-run   # FREE
 
 Flags:
@@ -59,7 +59,7 @@ import tempfile
 from datetime import datetime
 from typing import Sequence
 
-_ENVIRONMENTS = pathlib.Path(__file__).resolve().parent
+_ENVIRONMENTS = pathlib.Path(__file__).resolve().parents[1]
 for _p in (str(_ENVIRONMENTS / "lib"),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -213,6 +213,14 @@ def question_prompt(question: str, position: int) -> str:
     return question
 
 
+def conversation_prompt(cfg: dict, question: str, position: int) -> str:
+    """Render one selected item as the exact user turn sent to the agent."""
+
+    if cfg.get("questions_are_complete_user_turns") is True:
+        return question
+    return question_prompt(question, position)
+
+
 def _usage_record(usage) -> dict:
     def value(*names: str) -> float:
         for name in names:
@@ -270,7 +278,9 @@ async def run_conversation(cfg: dict, selected: list[tuple[int, str]]) -> dict:
     reached = False
 
     for position, (index, question) in enumerate(selected):
-        messages.append(ChatMessageUser(content=question_prompt(question, position)))
+        messages.append(
+            ChatMessageUser(content=conversation_prompt(cfg, question, position))
+        )
         output = await model.generate(input=messages)
         messages.append(output.message)
         usage = getattr(output, "usage", None)
@@ -395,9 +405,9 @@ async def run_production_conversation(
 
             for position, (index, question) in enumerate(selected):
                 if position > 0:
-                    state.messages.append(
-                        ChatMessageUser(content=question_prompt(question, position))
-                    )
+                    state.messages.append(ChatMessageUser(
+                        content=conversation_prompt(cfg, question, position)
+                    ))
                 events_before = len(transcript().events)
                 agent_state = await native_agent(
                     AgentState(
@@ -513,8 +523,13 @@ async def run_production_conversation(
     generator = str(cfg.get("generator") or "exp_nq_prefix.py")
     task = Task(
         dataset=MemoryDataset(
-            [Sample(id="nq-prefix", input=question_prompt(first_question, 0))],
-            name="nq-prefix",
+            [
+                Sample(
+                    id=f"{prefix_type}-prefix",
+                    input=conversation_prompt(cfg, first_question, 0),
+                )
+            ],
+            name=f"{prefix_type}-prefix",
         ),
         solver=conversation_solver(),
         sandbox=(

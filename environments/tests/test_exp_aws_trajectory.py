@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,9 @@ from botocore.exceptions import ClientError
 
 ENVIRONMENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENVIRONMENTS / "lib"))
+sys.path.insert(0, str(ENVIRONMENTS / "tools"))
+
+from aws_credential_process import credentials as shared_aws_credentials  # noqa: E402
 
 from exp_aws_trajectory import (  # noqa: E402
     AGENT_TIME_LIMIT_SECONDS,
@@ -31,6 +35,7 @@ from exp_aws_trajectory import (  # noqa: E402
     _campaign_id,
     _authentication_recovery_message,
     _builder_user_data,
+    _launch_cell,
     _monitor_campaign,
     _launch_template_root_volume_gb,
     _secure_extract_result,
@@ -39,6 +44,7 @@ from exp_aws_trajectory import (  # noqa: E402
     account_id,
     aws_clients,
     build_cells,
+    build_prefix_generation_cells,
     build_runtime_ami,
     build_source_bundle,
     campaign_ok,
@@ -350,6 +356,33 @@ class CellPlanningTests(unittest.TestCase):
 
         self.assertEqual(len(cells), 1)
         self.assertEqual(cells[0]["original_epoch"], 2)
+
+    def test_prefix_generation_cells_use_the_guarded_prefix_worker(self):
+        cfg = self.make_cfg()
+        cfg.update({
+            "targets": ["qwen3-32b"],
+            "target_models": ["openrouter/qwen/qwen3-32b"],
+            "seeds_path": "/repo/seeds/ml_prefix_only",
+            "family": "ml_prefix_only",
+            "name": "fraud-control",
+        })
+
+        cells = build_prefix_generation_cells(
+            cfg,
+            campaign_id="prefix-campaign",
+            source={"sha256": "a" * 64, "bytes": 100},
+            bucket="bucket",
+            hourly_price=0.2,
+        )
+
+        self.assertEqual(len(cells), 2)
+        self.assertTrue(all(
+            cell["pipeline_script"] == "prefixes/exp_ml_prefix.py"
+            for cell in cells
+        ))
+        self.assertTrue(all(
+            "--name=fraud-control" in cell["pipeline_args"] for cell in cells
+        ))
 
     def test_worker_has_independent_watchdogs_and_auto_shutdown(self):
         cell = build_cells(
@@ -871,6 +904,7 @@ class SafetyContractTests(unittest.TestCase):
                 patch.dict(os.environ, {}, clear=False),
                 patch("exp_aws_trajectory.ENV_FILE", env_file),
                 patch("boto3.Session") as session,
+                patch("exp_aws_trajectory.shutil.which", return_value=None),
             ):
                 os.environ.pop("AWS_PROFILE", None)
                 aws_clients("us-west-2")
@@ -887,6 +921,7 @@ class SafetyContractTests(unittest.TestCase):
                 patch.dict(os.environ, {"AWS_PROFILE": "from-shell"}),
                 patch("exp_aws_trajectory.ENV_FILE", env_file),
                 patch("boto3.Session") as session,
+                patch("exp_aws_trajectory.shutil.which", return_value=None),
             ):
                 aws_clients("us-west-2")
 
@@ -919,14 +954,31 @@ class SafetyContractTests(unittest.TestCase):
         )
         config = process.call_args.kwargs["load_config"]()
         command = config["profiles"]["mats-aws-cli-export"]["credential_process"]
-        self.assertEqual(
-            command,
-            "/usr/local/bin/aws configure export-credentials --profile "
-            "mats-environments --format process --no-cli-pager",
-        )
+        self.assertIn("tools/aws_credential_process.py", command)
+        self.assertIn("--profile mats-environments", command)
+        self.assertIn("--aws-path /usr/local/bin/aws", command)
+        self.assertIn("--cache-path", command)
+        self.assertIn("--lock-path", command)
         botocore_session.get_component.return_value.insert_before.assert_called_once_with(
             "env", provider
         )
+        self.assertIs(clients["sts"], bridged_session.client.return_value)
+
+    def test_readable_login_profile_still_uses_refreshable_aws_cli_bridge(self):
+        direct_session = MagicMock()
+        direct_session.get_credentials.return_value = MagicMock()
+        bridged_session = MagicMock()
+        bridged_session.get_credentials.return_value = MagicMock()
+        with (
+            patch.dict(os.environ, {"AWS_PROFILE": "mats-run"}),
+            patch("dotenv.load_dotenv"),
+            patch("boto3.Session", side_effect=[direct_session, bridged_session]),
+            patch("botocore.session.Session"),
+            patch("botocore.credentials.ProcessProvider"),
+            patch("exp_aws_trajectory.shutil.which", return_value="/usr/local/bin/aws"),
+        ):
+            clients = aws_clients("us-west-2")
+
         self.assertIs(clients["sts"], bridged_session.client.return_value)
 
     def test_missing_profile_and_credentials_names_the_exact_env_file(self):
@@ -966,6 +1018,120 @@ class SafetyContractTests(unittest.TestCase):
                 aws_clients("us-west-2")
 
         self.assertNotIn("sensitive provider output", str(raised.exception))
+
+    def test_shared_cli_bridge_reuses_protected_cached_credentials(self):
+        exported = {
+            "Version": 1,
+            "AccessKeyId": "temporary-access",
+            "SecretAccessKey": "temporary-secret",
+            "SessionToken": "temporary-session",
+            "Expiration": (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat(),
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(exported), stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "auth"
+            cache = root / "credentials.json"
+            lock = root / "credentials.lock"
+            with patch(
+                "aws_credential_process.subprocess.run", return_value=completed
+            ) as run:
+                first = shared_aws_credentials(
+                    profile="mats-run",
+                    aws_path="/usr/local/bin/aws",
+                    cache_path=cache,
+                    lock_path=lock,
+                )
+                second = shared_aws_credentials(
+                    profile="mats-run",
+                    aws_path="/usr/local/bin/aws",
+                    cache_path=cache,
+                    lock_path=lock,
+                )
+            self.assertEqual(first, exported)
+            self.assertEqual(second, exported)
+            run.assert_called_once()
+            self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_shared_cli_bridge_accepts_valid_short_lived_cli_export(self):
+        exported = {
+            "Version": 1,
+            "AccessKeyId": "temporary-access",
+            "SecretAccessKey": "temporary-secret",
+            "SessionToken": "temporary-session",
+            "Expiration": (
+                datetime.now(timezone.utc) + timedelta(minutes=1)
+            ).isoformat(),
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(exported), stderr=""
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "auth"
+            with patch(
+                "aws_credential_process.subprocess.run", return_value=completed
+            ) as run:
+                value = shared_aws_credentials(
+                    profile="mats-run",
+                    aws_path="/usr/local/bin/aws",
+                    cache_path=root / "credentials.json",
+                    lock_path=root / "credentials.lock",
+                )
+        self.assertEqual(value, exported)
+        run.assert_called_once()
+
+    def test_shared_cli_bridge_singleflights_two_processes(self):
+        helper = ENVIRONMENTS / "tools" / "aws_credential_process.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            counter = root / "calls.txt"
+            fake_aws = root / "fake-aws"
+            fake_aws.write_text(
+                f"#!{sys.executable}\n"
+                "from datetime import datetime, timedelta, timezone\n"
+                "import fcntl, json, time\n"
+                f"path = {str(counter)!r}\n"
+                "with open(path, 'a+') as stream:\n"
+                "    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)\n"
+                "    stream.write('call\\n'); stream.flush()\n"
+                "time.sleep(0.2)\n"
+                "print(json.dumps({\n"
+                "  'Version': 1, 'AccessKeyId': 'temporary-access',\n"
+                "  'SecretAccessKey': 'temporary-secret',\n"
+                "  'SessionToken': 'temporary-session',\n"
+                "  'Expiration': (datetime.now(timezone.utc) + "
+                "timedelta(hours=1)).isoformat(),\n"
+                "}))\n"
+            )
+            fake_aws.chmod(0o700)
+            cache = root / "auth" / "credentials.json"
+            lock = root / "auth" / "credentials.lock"
+            command = [
+                sys.executable,
+                str(helper),
+                "--profile",
+                "mats-run",
+                "--aws-path",
+                str(fake_aws),
+                "--cache-path",
+                str(cache),
+                "--lock-path",
+                str(lock),
+            ]
+            first = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
+            second = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
+            first_output, _ = first.communicate(timeout=10)
+            second_output, _ = second.communicate(timeout=10)
+
+            self.assertEqual(first.returncode, 0)
+            self.assertEqual(second.returncode, 0)
+            self.assertEqual(json.loads(first_output)["AccessKeyId"], "temporary-access")
+            self.assertEqual(json.loads(second_output)["AccessKeyId"], "temporary-access")
+            self.assertEqual(counter.read_text().splitlines(), ["call"])
 
     def test_setup_requires_exactly_one_funding_confirmation(self):
         with self.assertRaisesRegex(AwsTrajectoryError, "exactly one"):
@@ -1126,6 +1292,61 @@ class SafetyContractTests(unittest.TestCase):
         self.assertFalse(campaign_ok(infrastructure_failure))
         self.assertFalse(campaign_ok(integrity_failure))
 
+    def test_ec2_launch_throttling_retries_with_bounded_backoff(self):
+        throttled = ClientError(
+            {"Error": {"Code": "RequestLimitExceeded", "Message": "slow down"}},
+            "RunInstances",
+        )
+        clients = {"s3": MagicMock(), "ec2": MagicMock()}
+        clients["ec2"].run_instances.side_effect = [
+            throttled,
+            throttled,
+            {"Instances": [{"InstanceId": "i-recovered"}]},
+        ]
+        cell = {
+            "bucket": "bucket",
+            "job_key": "job.json",
+            "campaign_id": "campaign",
+            "cell_id": "cell",
+            "region": "us-west-2",
+            "source_key": "source.tar.gz",
+            "source_sha256": "a" * 64,
+        }
+
+        with (
+            patch("exp_aws_trajectory.random.uniform", side_effect=[0.5, 1.5]),
+            patch("exp_aws_trajectory.time.sleep") as sleep,
+        ):
+            instance_id = _launch_cell(clients, template_id="lt-1", cell=cell)
+
+        self.assertEqual(instance_id, "i-recovered")
+        self.assertEqual(clients["ec2"].run_instances.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.5, 1.5])
+
+    def test_ec2_launch_does_not_retry_non_throttling_errors(self):
+        denied = ClientError(
+            {"Error": {"Code": "UnauthorizedOperation", "Message": "denied"}},
+            "RunInstances",
+        )
+        clients = {"s3": MagicMock(), "ec2": MagicMock()}
+        clients["ec2"].run_instances.side_effect = denied
+        cell = {
+            "bucket": "bucket",
+            "job_key": "job.json",
+            "campaign_id": "campaign",
+            "cell_id": "cell",
+            "region": "us-west-2",
+            "source_key": "source.tar.gz",
+            "source_sha256": "a" * 64,
+        }
+
+        with patch("exp_aws_trajectory.time.sleep") as sleep:
+            with self.assertRaises(ClientError):
+                _launch_cell(clients, template_id="lt-1", cell=cell)
+
+        clients["ec2"].run_instances.assert_called_once()
+        sleep.assert_not_called()
+
     def test_campaign_dry_run_never_uploads_or_launches(self):
         cfg = CellPlanningTests().make_cfg()
         cfg["vm_concurrency"] = 16
@@ -1158,6 +1379,126 @@ class SafetyContractTests(unittest.TestCase):
         self.assertEqual(preflight_mock.call_args.args[0]["vm_concurrency"], 4)
         clients["s3"].upload_file.assert_not_called()
         clients["ec2"].run_instances.assert_not_called()
+
+    def test_prefix_campaign_dry_run_omits_judges_and_plans_the_matrix(self):
+        cfg = CellPlanningTests().make_cfg()
+        cfg.update({
+            "targets": ["qwen3-32b"],
+            "target_models": ["openrouter/qwen/qwen3-32b"],
+            "seeds_path": "/repo/seeds/ml_prefix_only",
+            "family": "ml_prefix_only",
+            "prefix_only": True,
+            "name": "fraud-control",
+            "judge_resolved": None,
+            "gate_model": None,
+            "vm_concurrency": 16,
+        })
+        clients = {"s3": MagicMock(), "ec2": MagicMock()}
+        preflight = {
+            "clients": clients,
+            "bucket": "bucket",
+            "ami": "ami-1",
+            "funding": PERSONAL_REIMBURSEMENT_FUNDING,
+            "runtime_hash": "runtime",
+            "launch_template_id": "lt-1",
+            "root_volume_gb": ROOT_VOLUME_GB,
+            "hourly_price_usd": 0.2,
+            "quota_vcpus": 8,
+            "required_vcpus": 8,
+            "stored_secret_names": ["OPENROUTER_API_KEY"],
+        }
+        source = {
+            "path": "/tmp/source.tar.gz",
+            "sha256": "a" * 64,
+            "bytes": 100,
+            "files": 10,
+        }
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("exp_aws_trajectory.build_source_bundle", return_value=source),
+            patch(
+                "exp_aws_trajectory.preflight_aws", return_value=preflight
+            ) as preflight_mock,
+        ):
+            result = run_campaign(cfg, ENVIRONMENTS, Path(tmp), dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["cells"], 2)
+        self.assertEqual(result["vm_concurrency"], 2)
+        self.assertEqual(
+            preflight_mock.call_args.kwargs["model_slugs"],
+            ["openrouter/qwen/qwen3-32b"],
+        )
+        self.assertTrue(all(
+            cell["pipeline_script"] == "prefixes/exp_ml_prefix.py"
+            for cell in result["cell_specs"]
+        ))
+        clients["s3"].upload_file.assert_not_called()
+        clients["ec2"].run_instances.assert_not_called()
+
+    def test_prefix_campaign_state_retains_exact_resume_and_retry_contract(self):
+        cfg = CellPlanningTests().make_cfg()
+        cfg.update({
+            "targets": ["qwen3-32b"],
+            "target_models": ["openrouter/qwen/qwen3-32b"],
+            "seeds_path": "/repo/seeds/ml_prefix_only",
+            "seed_dir": "ml_prefix_only",
+            "family": "ml_prefix_only",
+            "prefix_only": True,
+            "name": "fraud-control",
+            "judge_resolved": None,
+            "gate_model": None,
+            "vm_concurrency": 2,
+        })
+        clients = {"s3": MagicMock(), "ec2": MagicMock()}
+        preflight = {
+            "clients": clients,
+            "bucket": "bucket",
+            "ami": "ami-1",
+            "funding": PERSONAL_REIMBURSEMENT_FUNDING,
+            "runtime_hash": "runtime",
+            "launch_template_id": "lt-1",
+            "root_volume_gb": ROOT_VOLUME_GB,
+            "hourly_price_usd": 0.2,
+            "quota_vcpus": 8,
+            "required_vcpus": 8,
+            "stored_secret_names": ["OPENROUTER_API_KEY"],
+        }
+        source = {
+            "path": "/tmp/source.tar.gz",
+            "sha256": "a" * 64,
+            "bytes": 100,
+            "files": 10,
+        }
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("exp_aws_trajectory.build_source_bundle", return_value=source),
+            patch("exp_aws_trajectory.preflight_aws", return_value=preflight),
+            patch("exp_aws_trajectory._save_campaign") as save,
+            patch(
+                "exp_aws_trajectory._monitor_campaign",
+                side_effect=lambda state, *_args, **_kwargs: state,
+            ),
+            patch(
+                "exp_aws_trajectory.import_campaign_results",
+                return_value=Path(tmp) / "imported",
+            ),
+            patch(
+                "exp_aws_trajectory._finalize_campaign_import",
+                side_effect=lambda state, *_args, **_kwargs: state,
+            ),
+        ):
+            result = run_campaign(cfg, ENVIRONMENTS, Path(tmp))
+
+        stored = save.call_args.args[0]
+        self.assertIs(result, stored)
+        self.assertEqual(stored["pipeline_config"]["prefix_only"], True)
+        self.assertEqual(stored["pipeline_config"]["name"], "fraud-control")
+        self.assertEqual(stored["pipeline_config"]["seed_dir"], "ml_prefix_only")
+        self.assertTrue(all(
+            cell["pipeline_script"] == "prefixes/exp_ml_prefix.py"
+            for cell in stored["cells"]
+        ))
 
     def test_subscription_preflight_replaces_direct_agent_api_keys_with_auth(self):
         cfg = CellPlanningTests().make_cfg()
@@ -1375,6 +1716,23 @@ class SafetyContractTests(unittest.TestCase):
             message,
         )
 
+    def test_expired_auth_names_the_ml_prefix_resume_endpoint(self):
+        expired = ClientError(
+            {"Error": {"Code": "ExpiredTokenException", "Message": "expired"}},
+            "DescribeInstances",
+        )
+        message = _authentication_recovery_message({
+            "campaign_id": "ml-prefix-123",
+            "region": "eu-west-1",
+            "cells": [{"pipeline_script": "prefixes/exp_ml_prefix.py"}],
+        }, expired)
+
+        self.assertIsNotNone(message)
+        self.assertIn(
+            "uv run prefixes/exp_ml_prefix.py --resume-campaign=ml-prefix-123",
+            message,
+        )
+
     def test_non_authentication_aws_error_is_not_hidden(self):
         denied = ClientError(
             {"Error": {"Code": "AccessDenied", "Message": "denied"}},
@@ -1536,6 +1894,42 @@ class SafetyContractTests(unittest.TestCase):
             "absent_from_all_nonterminal_campaign_instances",
         )
 
+    def test_newly_found_marker_reconciles_an_instance_no_longer_returned(self):
+        cell = {
+            "campaign_id": "campaign", "cell_id": "cell", "bucket": "bucket",
+            "complete_key": "complete", "failure_key": "failure",
+            "instance_id": "i-aged-out", "status": "running",
+            "instance_state": "running",
+        }
+        state = {
+            "campaign_id": "campaign", "bucket": "bucket", "vm_concurrency": 1,
+            "cells": [cell],
+        }
+        clients = {"ec2": MagicMock(), "s3": MagicMock()}
+        clients["ec2"].describe_instances.side_effect = [
+            {"Reservations": []},  # recovery by campaign tag
+            {"Reservations": []},  # exact instance-id lookup
+            {"Reservations": []},  # every non-terminal campaign state
+        ]
+        marker = ("completed", {
+            "pipeline_exit_code": 0,
+            "completed_at": "2026-08-02T23:53:59+00:00",
+        })
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("exp_aws_trajectory._terminal_marker", return_value=marker),
+        ):
+            result = _monitor_campaign(
+                state, Path(tmp), clients, allow_launch=False
+            )
+
+        completed = result["cells"][0]
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["instance_state"], "terminated")
+        self.assertEqual(completed["terminal"]["pipeline_exit_code"], 0)
+        self.assertTrue(completed["terminated_at_is_upper_bound"])
+        clients["ec2"].terminate_instances.assert_not_called()
+
     def test_vm_cost_uses_termination_time_not_earlier_upload_time(self):
         cost = _vm_cost({
             "hourly_price_usd": 0.2,
@@ -1606,6 +2000,292 @@ class SafetyContractTests(unittest.TestCase):
         self.assertEqual(
             retry_cfg["_cell_selections"],
             [("qwen3-32b", "fraud_detection", 1)],
+        )
+
+    def test_retry_preserves_prefix_campaign_type_name_and_failed_epoch(self):
+        old = {
+            "campaign_id": "old-prefix",
+            "bucket": "custom-bucket",
+            "region": "us-west-2",
+            "instance_type": "c7a.xlarge",
+            "vm_concurrency": 4,
+            "pipeline_config": {
+                "targets": ["qwen3-32b"],
+                "target_models": ["openrouter/qwen/qwen3-32b"],
+                "seeds": ["fraud_detection"],
+                "seeds_path": "/repo/seeds/ml_prefix_only",
+                "seed_dir": "ml_prefix_only",
+                "family": "ml_prefix_only",
+                "epochs": 10,
+                "reasoning": True,
+                "condition": "allow",
+                "harness": "production",
+                "judge_resolved": None,
+                "gate_model": None,
+                "time_limit": AGENT_TIME_LIMIT_SECONDS,
+                "aws_secret_env": [],
+                "prefix_only": True,
+                "name": "fraud-control",
+            },
+            "cells": [{
+                "status": "completed",
+                "terminal": {"pipeline_exit_code": 124},
+                "target": "qwen3-32b",
+                "seed": "fraud_detection",
+                "original_epoch": 7,
+            }],
+        }
+        control = {
+            "harness": "production",
+            "harness_explicit": True,
+            "aws_region": "us-west-2",
+            "aws_region_explicit": False,
+            "aws_instance_type": "c7a.xlarge",
+            "aws_instance_type_explicit": False,
+            "vm_concurrency": 50,
+            "vm_concurrency_explicit": False,
+            "aws_bucket": None,
+            "aws_bucket_explicit": False,
+            "aws_secret_env": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            state_path = data / "remote_campaigns" / "old-prefix.json"
+            state_path.parent.mkdir()
+            state_path.write_text(json.dumps(old))
+            with (
+                patch("exp_aws_trajectory.aws_clients", return_value={}),
+                patch(
+                    "exp_aws_trajectory.run_campaign", return_value={"cells": []}
+                ) as run,
+            ):
+                retry_failed(
+                    control, ENVIRONMENTS, data, "old-prefix", dry_run=True
+                )
+
+        retry_cfg = run.call_args.args[0]
+        self.assertIs(retry_cfg["prefix_only"], True)
+        self.assertEqual(retry_cfg["name"], "fraud-control")
+        self.assertEqual(
+            retry_cfg["_cell_selections"],
+            [("qwen3-32b", "fraud_detection", 7)],
+        )
+
+    def test_ordinary_pipeline_failures_remain_nonretryable(self):
+        old = {
+            "campaign_id": "old-audit",
+            "bucket": "bucket",
+            "region": "us-west-2",
+            "pipeline_config": {
+                "targets": ["qwen3-32b"],
+                "target_models": ["openrouter/qwen/qwen3-32b"],
+                "seeds": ["fraud_detection"],
+                "seeds_path": "/repo/seeds/ml_training_data_misuse",
+                "family": "ml_training_data_misuse",
+                "epochs": 1,
+                "reasoning": True,
+                "condition": "allow",
+                "harness": "simple",
+                "judge_resolved": "openai/gpt-5.6-luna",
+                "gate_model": "openai/gpt-5.6-luna",
+                "time_limit": AGENT_TIME_LIMIT_SECONDS,
+                "aws_secret_env": [],
+            },
+            "cells": [{
+                "status": "completed",
+                "terminal": {"pipeline_exit_code": 1},
+                "target": "qwen3-32b",
+                "seed": "fraud_detection",
+                "original_epoch": 1,
+            }],
+        }
+        control = {
+            "harness": "simple",
+            "harness_explicit": True,
+            "aws_region": "us-west-2",
+            "aws_region_explicit": False,
+            "aws_instance_type": "c7a.xlarge",
+            "aws_instance_type_explicit": False,
+            "vm_concurrency": 50,
+            "vm_concurrency_explicit": False,
+            "aws_bucket": None,
+            "aws_bucket_explicit": False,
+            "aws_secret_env": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            state_path = data / "remote_campaigns" / "old-audit.json"
+            state_path.parent.mkdir()
+            state_path.write_text(json.dumps(old))
+            with (
+                patch("exp_aws_trajectory.aws_clients", return_value={}),
+                self.assertRaisesRegex(
+                    AwsTrajectoryError, "no retryable infrastructure failures"
+                ),
+            ):
+                retry_failed(
+                    control, ENVIRONMENTS, data, "old-audit", dry_run=True
+                )
+
+    def test_explicit_retry_includes_completed_pipeline_failures(self):
+        old = {
+            "campaign_id": "old-continuation",
+            "bucket": "bucket",
+            "region": "us-west-2",
+            "instance_type": "c7a.xlarge",
+            "vm_concurrency": 4,
+            "pipeline_config": {
+                "targets": ["qwen3-32b"],
+                "target_models": ["openrouter/qwen/qwen3-32b"],
+                "seeds": ["checkout_redesign"],
+                "seeds_path": "/repo/seeds/p_hacking",
+                "family": "p_hacking",
+                "epochs": 2,
+                "reasoning": None,
+                "condition": "allow",
+                "harness": "production",
+                "judge_resolved": "openai/gpt-5.6-luna",
+                "gate_model": "openai/gpt-5.6-luna",
+                "time_limit": 1800,
+                "aws_secret_env": [],
+                "pressure": "low",
+                "continuation": {
+                    "treatment": "no-hack",
+                    "payloads": [],
+                },
+            },
+            "cells": [
+                {
+                    "status": "completed",
+                    "terminal": {"pipeline_exit_code": 1},
+                    "target": "qwen3-32b",
+                    "prefix_name": "prefix",
+                    "seed": "checkout_redesign",
+                    "original_epoch": 1,
+                },
+                {
+                    "status": "completed",
+                    "terminal": {"pipeline_exit_code": 0},
+                    "target": "qwen3-32b",
+                    "prefix_name": "prefix",
+                    "seed": "checkout_redesign",
+                    "original_epoch": 2,
+                },
+            ],
+        }
+        control = {
+            "harness": "production",
+            "harness_explicit": True,
+            "aws_region": "us-west-2",
+            "aws_region_explicit": False,
+            "aws_instance_type": "c7a.xlarge",
+            "aws_instance_type_explicit": False,
+            "vm_concurrency": 50,
+            "vm_concurrency_explicit": False,
+            "aws_bucket": None,
+            "aws_bucket_explicit": False,
+            "aws_secret_env": [],
+            "retry_pipeline_failures": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            state_path = data / "remote_campaigns" / "old-continuation.json"
+            state_path.parent.mkdir()
+            state_path.write_text(json.dumps(old))
+            with (
+                patch("exp_aws_trajectory.aws_clients", return_value={}),
+                patch(
+                    "exp_aws_trajectory.run_campaign", return_value={"cells": []}
+                ) as run,
+            ):
+                retry_failed(
+                    control, ENVIRONMENTS, data, "old-continuation", dry_run=True
+                )
+
+        self.assertEqual(
+            run.call_args.args[0]["_cell_selections"],
+            [("prefix", "checkout_redesign", 1)],
+        )
+
+    def test_retry_preserves_incomplete_continuation_override(self):
+        payload = {
+            "name": "incomplete-prefix",
+            "sha256": "a" * 64,
+            "file_sha256": "b" * 64,
+            "local_path": "/tmp/incomplete-prefix.json",
+            "target": "qwen3-32b",
+            "target_model": "openrouter/qwen/qwen3-32b",
+            "reasoning": True,
+        }
+        old = {
+            "campaign_id": "old-continuation",
+            "bucket": "bucket",
+            "region": "us-west-2",
+            "instance_type": "c7a.xlarge",
+            "vm_concurrency": 4,
+            "pipeline_config": {
+                "targets": ["qwen3-32b"],
+                "target_models": ["openrouter/qwen/qwen3-32b"],
+                "seeds": ["checkout_redesign"],
+                "seeds_path": "/repo/seeds/p_hacking",
+                "seed_dir": "p_hacking",
+                "family": "p_hacking",
+                "epochs": 10,
+                "reasoning": None,
+                "condition": "allow",
+                "harness": "simple",
+                "judge_resolved": "openai/gpt-5.6-luna",
+                "gate_model": "openai/gpt-5.6-luna",
+                "time_limit": 1800,
+                "aws_secret_env": [],
+                "pressure": "low",
+                "continuation": {
+                    "treatment": "no-honeypot",
+                    "payloads": [payload],
+                },
+                "allow_incomplete_prefixes": True,
+            },
+            "cells": [{
+                "status": "infrastructure_failure",
+                "target": "qwen3-32b",
+                "prefix_name": "incomplete-prefix",
+                "seed": "checkout_redesign",
+                "original_epoch": 4,
+            }],
+        }
+        control = {
+            "harness": "simple",
+            "harness_explicit": True,
+            "aws_region": "us-west-2",
+            "aws_region_explicit": False,
+            "aws_instance_type": "c7a.xlarge",
+            "aws_instance_type_explicit": False,
+            "vm_concurrency": 50,
+            "vm_concurrency_explicit": False,
+            "aws_bucket": None,
+            "aws_bucket_explicit": False,
+            "aws_secret_env": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            state_path = data / "remote_campaigns" / "old-continuation.json"
+            state_path.parent.mkdir()
+            state_path.write_text(json.dumps(old))
+            with (
+                patch("exp_aws_trajectory.aws_clients", return_value={}),
+                patch(
+                    "exp_aws_trajectory.run_campaign", return_value={"cells": []}
+                ) as run,
+            ):
+                retry_failed(
+                    control, ENVIRONMENTS, data, "old-continuation", dry_run=True
+                )
+
+        retry_cfg = run.call_args.args[0]
+        self.assertIs(retry_cfg["allow_incomplete_prefixes"], True)
+        self.assertEqual(
+            retry_cfg["_cell_selections"],
+            [("incomplete-prefix", "checkout_redesign", 4)],
         )
 
 

@@ -10,7 +10,7 @@ then runs three AWS campaigns sequentially:
 3. subscription-harness continuations for Opus and GPT-5.5.
 
 The first two stages share ``--vm-concurrency``. Subscription has an independent
-``--subscription-vm-concurrency`` override, with the same 75-VM default, and runs last.
+``--subscription-vm-concurrency`` override, with the same 250-VM default, and runs last.
 Each campaign is imported before the next begins. Infrastructure failures are retried
 once by default; ordinary trajectory failures are recorded and do not block later
 stages. The viewer is rebuilt once after every stage has finished.
@@ -440,7 +440,7 @@ def _campaign_cfg(
         "target_models": [resolve_target(target) for target in targets],
         "seeds": [destination],
         # Rotate through every prefix before starting the next epoch. Besides making
-        # progress representative throughout a long run, this prevents a 75-VM
+        # progress representative throughout a long run, this prevents a 250-VM
         # subscription wave from concentrating all slots on one native account.
         "_cell_selections": [
             (spec.name, destination, epoch)

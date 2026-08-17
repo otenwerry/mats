@@ -15,7 +15,7 @@ def test_default_plan_is_160_sequential_trajectories() -> None:
 
     commands = batch.build_commands(cfg, python="python-test")
     assert cfg["epochs"] == 40
-    assert cfg["vm_concurrency"] == 75
+    assert cfg["vm_concurrency"] == 250
     assert len(commands) == 2
     assert commands[0][0] == "python-test"
     assert "--targets=deepseek-v4-pro,glm-5.1,kimi-k2.6" in commands[0]

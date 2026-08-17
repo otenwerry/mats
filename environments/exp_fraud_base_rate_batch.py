@@ -16,7 +16,7 @@ Usage (from mats/environments/):
 
 Flags:
   --epochs=<N>            epochs per agent; default 40.
-  --vm-concurrency=<N>    max active AWS trajectory VMs; default 75.
+  --vm-concurrency=<N>    max active AWS trajectory VMs; default 250.
   --reasoning=yes|no      default yes.
   --judge=<model>         defaults through the child pipeline to gpt-5.6-luna.
   --aws-region=<region>   optional child-pipeline override.

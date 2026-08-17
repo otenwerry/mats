@@ -14,6 +14,8 @@ This is where I keep track of how each experiment runs. If you edit some code an
 
 uv run viewer.py
 
+[pre-launch prefix selections: mats-local/environments/prefix_selections.json]
+
 ## Auditing
 
 uv run exp_real_audit_pipeline.py
@@ -29,7 +31,7 @@ uv run exp_real_audit_pipeline.py
     [--gate-model=<judge>]
     [--concurrency=50]
     [--compute=aws/local]  # default aws for all seed families
-    [--vm-concurrency=75]
+    [--vm-concurrency=250]
     [--aws-region=us-west-2]
     [--aws-instance-type=c7a.xlarge]
     [--aws-bucket=<name>]
@@ -43,7 +45,7 @@ uv run exp_real_audit_pipeline.py
 
 uv run exp_fraud_base_rate_batch.py
     [--epochs=40]
-    [--vm-concurrency=75]
+    [--vm-concurrency=250]
     [--reasoning=yes/no]
     [--judge=gpt-5.6-luna]
     [--aws-region=us-west-2]
@@ -69,7 +71,7 @@ uv run exp_continuation_pipeline.py
     [--concurrency=50]
     [--sandbox-concurrency=8]
     [--compute=aws/local]  # default aws for all seed families
-    [--vm-concurrency=75]
+    [--vm-concurrency=250]
     [--aws-region=us-west-2]
     [--aws-instance-type=c7a.xlarge]
     [--aws-bucket=<name>]
@@ -77,12 +79,42 @@ uv run exp_continuation_pipeline.py
     [--time-limit=<sec>]  # ML 4200; p_hacking 1800
     [--resume-campaign=<id>]
     [--retry-failed=<id>]
+    [--retry-pipeline-failures]  # only with --retry-failed
+    [--allow-incomplete-prefixes]
+    [--dry-run]
+    [--skip-viewer]
+
+## Multi-agent activity-log transfer
+
+uv run exp_multi_agent_pipeline.py
+    --treatment=<slug>
+    --seed-dir=x
+    --seeds=x,y,z/all
+    --epochs=n
+    --harness=simple/production/subscription
+    --activity-logs=<viewer ids> and/or --activity-log-files=<paths>
+    [--condition=allow]
+    [--pressure=low/high]  # p_hacking only; default low
+    [--judge=gpt-5.6-luna]
+    [--gate-model=<judge>]
+    [--concurrency=50]
+    [--sandbox-concurrency=8]
+    [--compute=aws/local]  # default aws for all seed families
+    [--vm-concurrency=250]
+    [--aws-region=us-west-2]
+    [--aws-instance-type=c7a.xlarge]
+    [--aws-bucket=<name>]
+    [--aws-secret-env=NAME,...]
+    [--time-limit=<sec>]  # ML 4200; p_hacking 1800
+    [--resume-campaign=<id>]
+    [--retry-failed=<id>]
+    [--retry-pipeline-failures]  # only with --retry-failed
     [--dry-run]
     [--skip-viewer]
 
 ## Natural Questions prefix
 
-uv run exp_nq_prefix.py
+uv run prefixes/exp_nq_prefix.py
     --model=<target>
     --tokens=<n>
     --harness=simple/production/subscription
@@ -92,32 +124,126 @@ uv run exp_nq_prefix.py
     [--max-questions=500]
     [--dry-run]
 
+## Trajectory prefix export
+
+uv run prefixes/export_trajectory_prefixes.py
+    --prefixes=x,y,z
+    --prefix-type=<slug>
+    --prefix-type-label=<label>
+    [--cutoff-before-user-turn=2]
+    [--dry-run]
+
+## Activity-log continuation prefix export
+
+uv run prefixes/build_activity_log_prefixes.py
+    --trajectories=x,y,z
+    [--dry-run]
+
 ## Fixed-question prefixes
 
-uv run exp_science_ethics_prefix.py
+uv run prefixes/exp_science_ethics_prefix.py
     --model=<target>
     --harness=simple/production/subscription
     [--reasoning=yes/no]
     [--name=<slug>]
     [--dry-run]
 
-uv run exp_general_ethics_prefix.py
+uv run prefixes/exp_general_ethics_prefix.py
     --model=<target>
     --harness=simple/production/subscription
     [--reasoning=yes/no]
     [--name=<slug>]
     [--dry-run]
 
-uv run exp_move_fast_prefix.py
+uv run prefixes/exp_move_fast_prefix.py
     --model=<target>
     --harness=simple/production/subscription
     [--reasoning=yes/no]
     [--name=<slug>]
+    [--dry-run]
+
+## Wikipedia summary prefix
+
+uv run prefixes/exp_wikipedia_prefix.py
+    --model=<target>
+    --harness=simple/production/subscription
+    [--reasoning=yes/no]
+    [--name=<slug>]
+    [--refresh-articles]
+    [--dry-run]
+
+## ML prefix-only control
+
+uv run prefixes/exp_ml_prefix.py
+    --targets=x,y,z
+    --seeds=demand_forecasting/fraud_detection/all
+    --epochs=n
+    --harness=simple/production/subscription
+    [--reasoning=yes/no]
+    [--name=<base-slug>]
+    [--concurrency=50]
+    [--sandbox-concurrency=8]
+    [--time-limit=4200]
+    [--compute=aws/local]  # default aws
+    [--vm-concurrency=250]
+    [--aws-region=us-west-2]
+    [--aws-instance-type=c7a.xlarge]
+    [--aws-bucket=<name>]
+    [--aws-secret-env=NAME,...]
+    [--resume-campaign=<id>]
+    [--retry-failed=<id>]
+    [--skip-viewer]
+    [--dry-run]
+
+For this prefix-only endpoint, `--retry-failed` retries both infrastructure failures
+and cells whose AWS worker completed with a nonzero or missing pipeline exit (including
+agent timeouts). It does not broaden retry policy for ordinary audits or continuations.
+
+To recover a historical prefix whose terminal OpenCode response provably completed
+before the deadline but whose CLI handoff exited afterward (free; read-only unless
+`--apply`; original logs remain unchanged):
+
+uv run tools/maintenance/recover_ml_prefix_deadline.py <run-dir> [--apply]
+
+uv run exp_continuation_pipeline.py
+    --treatment=no-honeypot
+    --prefix-files=<ml-prefix-payload>
+    --seed-dir=p_hacking
+    --seeds=checkout_redesign
+    --epochs=n
+    --harness=simple/production/subscription
+    [--pressure=low/high]
+    [--judge=gpt-5.6-luna]
+    [--compute=aws/local]
+    [--dry-run]
+
+## P-hacking prefix-only controls
+
+uv run prefixes/exp_p_hacking_prefix.py
+    --targets=x,y,z
+    --seeds=checkout_redesign_positive/all
+    --epochs=n
+    --harness=simple/production/subscription
+    [--pressure=low/high]
+    [--reasoning=yes/no]
+    [--name=<base-slug>]
+    [--concurrency=50]
+    [--sandbox-concurrency=8]
+    [--time-limit=1800]
+    [--compute=aws/local]  # default aws
+    [--vm-concurrency=250]
+    [--aws-region=us-west-2]
+    [--aws-instance-type=c7a.xlarge]
+    [--aws-bucket=<name>]
+    [--aws-secret-env=NAME,...]
+    [--resume-campaign=<id>]
+    [--retry-failed=<id>]
+    [--skip-viewer]
     [--dry-run]
 
 ## Prefix batch
 
-uv run exp_prefix_batch.py
+uv run prefixes/exp_prefix_batch.py
     [--nq-tokens=2000]
     [--nq-seed=1234]
     [--reasoning=yes/no]
@@ -132,8 +258,8 @@ uv run exp_prefix_batch.py
 
 uv run exp_continuation_prefix_batch.py
     [--epochs=40]
-    [--vm-concurrency=75]
-    [--subscription-vm-concurrency=75]
+    [--vm-concurrency=250]
+    [--subscription-vm-concurrency=250]
     [--infrastructure-retries=1]
     [--treatment=purpose-built-prefix]
     [--native-only]
@@ -145,6 +271,14 @@ uv run exp_continuation_prefix_batch.py
     [--skip-viewer]
     [--dry-run]
 
+## Continuation push batch (2026-08-15)
+
+uv run exp_continuation_push_20260815.py [--plan]
+
+## Demand prefixes + p-hacking no-honeypot to ML batch (2026-08-16)
+
+uv run exp_demand_phacking_to_ml_20260816.py [--plan]
+
 ## Rejudge stored trajectories
 
 uv run exp_rejudge.py
@@ -152,9 +286,14 @@ uv run exp_rejudge.py
     [--family=all/ml_training_data_misuse/p_hacking]
     [--judge=gpt-5.6-luna]
     [--concurrency=10]
+    [--only-interrupted-native]
     [--dry-run]
     [--force]
     [--skip-viewer]
+
+Successful rejudges remain comparison-only unless their run directory is explicitly
+listed under `promoted_rejudge_run_directories` in `viewer_old_runs.json`. Promotion
+replaces the canonical judgment on the source row without modifying either raw log.
 
 ## Fixed judge-test cohort
 
@@ -192,6 +331,12 @@ uv run exp_real_audit_pipeline.py
 
 uv run exp_real_audit_pipeline.py --resume-campaign=<id>
 uv run exp_real_audit_pipeline.py --retry-failed=<id> --harness=simple/production/subscription
+uv run exp_real_audit_pipeline.py --retry-failed=<id> --retry-pipeline-failures \
+    --harness=simple/production/subscription
+
+Resume never launches planned cells. It reconciles uploaded terminal markers even when
+EC2 has already aged the terminated worker ID out of `DescribeInstances`, then imports
+the retained result and marks untouched planned cells `not_launched` for exact retry.
 
 ## Generate environment data
 
@@ -200,6 +345,7 @@ uv run envgen/gen_demand_forecasting.py
 uv run envgen/gen_rating_prediction.py
 uv run envgen/gen_reasoning_prompt_benchmark.py
 uv run envgen/gen_checkout_redesign.py
+uv run envgen/gen_checkout_redesign_no_honeypot.py
 uv run envgen/gen_retrieval_practice.py
 
 ## Calibrate ML environments

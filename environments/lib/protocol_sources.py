@@ -11,6 +11,7 @@ so every run can stamp the exact source material it used.
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,11 @@ SCENARIO_USER_PROMPT_CORE_MARK = "[USER_PROMPT_CORE]"
 SCENARIO_LOW_PRESSURE_MARK = "[LOW_PRESSURE]"
 SCENARIO_HIGH_PRESSURE_MARK = "[HIGH_PRESSURE]"
 P_HACKING_FAMILY = "p_hacking"
+P_HACKING_PREFIX_ONLY_FAMILY = "p_hacking_prefix_only"
+P_HACKING_PROTOCOL_FAMILIES = frozenset({
+    P_HACKING_FAMILY,
+    P_HACKING_PREFIX_ONLY_FAMILY,
+})
 PRESSURE_LEVELS = ("low", "high")
 
 SUPPORTED_CONDITION = "allow"
@@ -203,7 +209,7 @@ def resolve_pressure(pressure: str | None, family: str) -> str | None:
     """Default p-hacking to low pressure; reject pressure elsewhere."""
 
     value = pressure.strip().casefold() if pressure is not None else None
-    if family == P_HACKING_FAMILY:
+    if family in P_HACKING_PROTOCOL_FAMILIES:
         if value is None:
             return "low"
         if value not in PRESSURE_LEVELS:
@@ -213,7 +219,7 @@ def resolve_pressure(pressure: str | None, family: str) -> str | None:
         return value
     if value is not None:
         raise SystemExit(
-            f"--pressure applies only to p_hacking; {family} does not use it"
+            f"--pressure applies only to p_hacking protocols; {family} does not use it"
         )
     return None
 
@@ -373,10 +379,30 @@ def load_protocol_sources(
     opening = template.replace(USER_PROMPT_PLACEHOLDER, member_opening).strip()
     follow_up = _read_optional(follow_up_path)
 
+    # Prefix-only controls can pin a member to one submission while retaining the
+    # family's byte-identical shared follow-up for members that use it.
+    manifest_path = member / "manifest.json"
+    manifest_controls_follow_up = False
+    if family == P_HACKING_PREFIX_ONLY_FAMILY:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"invalid prefix-only manifest {manifest_path}: {error}") from error
+        configured_follow_up = manifest.get("follow_up")
+        if not isinstance(configured_follow_up, bool):
+            raise SystemExit(
+                f"{manifest_path} must contain a boolean follow_up field"
+            )
+        manifest_controls_follow_up = True
+        if not configured_follow_up:
+            follow_up = None
+
     system_prompt_path = Path(seeds_root) / SYSTEM_PROMPT_PATH.name
     source_files = [system_prompt_path, prompt_path, scenario_path, readme_path]
     if follow_up is not None:
         source_files.append(follow_up_path)
+    if manifest_controls_follow_up:
+        source_files.append(manifest_path)
 
     return ProtocolSources(
         family=family,

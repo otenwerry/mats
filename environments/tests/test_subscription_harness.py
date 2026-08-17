@@ -584,6 +584,28 @@ def test_codex_subscription_model_drops_the_unsupported_snapshot_date() -> None:
     assert "subscription_model_requested" not in claude
 
 
+@pytest.mark.parametrize("session_id", [None, "session-123"])
+def test_codex_large_prompt_uses_stdin_not_argv(session_id: str | None) -> None:
+    prompt = "activity log line\n" * 20_000
+    command, stdin = subscription._codex_exec_transport(
+        "/usr/bin/codex",
+        ["--json", "--model", "gpt-5.5"],
+        session_id,
+        prompt,
+    )
+
+    assert command[-1] == "-"
+    assert prompt not in command
+    assert sum(len(argument.encode()) + 1 for argument in command) < 1024
+    assert stdin == prompt
+    if session_id is None:
+        assert command[:2] == ["/usr/bin/codex", "exec"]
+        assert "resume" not in command
+    else:
+        assert command[:3] == ["/usr/bin/codex", "exec", "resume"]
+        assert command[-2] == session_id
+
+
 def test_codex_bridge_config_translates_inspect_mcp_schema() -> None:
     mcp = MCPServerConfigHTTP(
         name="environment",

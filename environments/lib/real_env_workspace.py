@@ -20,8 +20,10 @@ dropped)."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import posixpath
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from inspect_ai.util import sandbox
 
@@ -87,8 +89,17 @@ def workspace_files(seed_path: str | Path) -> dict[str, str]:
     """Sample.files mapping: absolute sandbox path -> absolute host path.
 
     .gitkeep placeholders are skipped (they exist only so git keeps empty dirs);
-    their parent dirs are reported by ensure_dirs() and created by the solver."""
-    ws = real_env_dir(seed_path) / "workspace"
+    their parent dirs are reported by ensure_dirs() and created by the solver.
+
+    A manifest may also declare ``workspace_imports``. These are hash-pinned files
+    elsewhere in the committed seed tree that land at named workspace-relative
+    destinations. Imports let a control seed reuse the exact train/validation bytes
+    of another seed without copying its test material. Sources must themselves live
+    below another seed's ``workspace/`` directory; host-only ``answers/`` trees can
+    never be imported.
+    """
+    member = real_env_dir(seed_path)
+    ws = member / "workspace"
     if not ws.is_dir():
         raise SystemExit(
             f"{seed_path} has no real_env/workspace/ tree; generate it with the "
@@ -102,6 +113,71 @@ def workspace_files(seed_path: str | Path) -> dict[str, str]:
         if f.is_file() and f.name != ".gitkeep" and f.suffix != ".pyc":
             rel = f.relative_to(ws)
             mapping[posixpath.join(WORKSPACE_DIR, rel.as_posix())] = str(f)
+    manifest_path = member / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"invalid seed manifest {manifest_path}: {error}") from error
+        imports = manifest.get("workspace_imports") or {}
+        if not isinstance(imports, dict):
+            raise SystemExit(f"{manifest_path}: workspace_imports must be an object")
+        seeds_root = ENVIRONMENTS_SEEDS.resolve()
+        for destination, record in sorted(imports.items()):
+            destination_path = PurePosixPath(str(destination))
+            if (
+                destination_path.is_absolute()
+                or not destination_path.parts
+                or ".." in destination_path.parts
+            ):
+                raise SystemExit(
+                    f"{manifest_path}: invalid workspace import destination "
+                    f"{destination!r}"
+                )
+            sandbox_path = posixpath.join(WORKSPACE_DIR, destination_path.as_posix())
+            if sandbox_path in mapping:
+                raise SystemExit(
+                    f"{manifest_path}: workspace import overwrites {sandbox_path}"
+                )
+            if not isinstance(record, dict):
+                raise SystemExit(
+                    f"{manifest_path}: workspace import {destination!r} must be an object"
+                )
+            source_value = record.get("source")
+            expected_sha = record.get("sha256")
+            if not isinstance(source_value, str) or not isinstance(expected_sha, str):
+                raise SystemExit(
+                    f"{manifest_path}: workspace import {destination!r} needs source "
+                    "and sha256 strings"
+                )
+            source = (seeds_root / source_value).resolve()
+            try:
+                source_relative = source.relative_to(seeds_root)
+            except ValueError as error:
+                raise SystemExit(
+                    f"{manifest_path}: workspace import source escapes the seed tree: "
+                    f"{source_value!r}"
+                ) from error
+            if (
+                len(source_relative.parts) < 4
+                or source_relative.parts[2] != "workspace"
+                or "answers" in source_relative.parts
+            ):
+                raise SystemExit(
+                    f"{manifest_path}: workspace import source must be under a seed's "
+                    f"workspace tree, not {source_value!r}"
+                )
+            if not source.is_file():
+                raise SystemExit(
+                    f"{manifest_path}: workspace import source is missing: {source}"
+                )
+            actual_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+            if actual_sha != expected_sha:
+                raise SystemExit(
+                    f"{manifest_path}: workspace import {destination!r} hash mismatch; "
+                    f"expected {expected_sha}, got {actual_sha}"
+                )
+            mapping[sandbox_path] = str(source)
     if not mapping:
         raise SystemExit(f"{ws} is empty")
     return mapping

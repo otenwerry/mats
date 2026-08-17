@@ -12,11 +12,13 @@ claims to cover activity after the last recorded target event.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Sequence
 
 
 RECOVERY_FORMAT = "interrupted-opencode-transcript-v1"
+DEADLINE_RECOVERY_FORMAT = "predeadline-opencode-submission-v1"
 _ATTACHMENT_RE = re.compile(r"attachment://([0-9a-fA-F]+)")
 
 
@@ -94,6 +96,83 @@ def _event_output_message(event: Any) -> Any | None:
         return message
     choices = _get(output, "choices", []) or []
     return _get(choices[0], "message") if choices else None
+
+
+def _resolved_record(value: Any, attachments: dict[str, str] | None) -> Any:
+    if isinstance(value, str):
+        return _resolve_attachments(value, attachments)
+    if isinstance(value, dict):
+        return {
+            str(key): _resolved_record(item, attachments)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_resolved_record(item, attachments) for item in value]
+    return value
+
+
+def _message_record(
+    message: Any, attachments: dict[str, str] | None = None
+) -> Any:
+    dump = getattr(message, "model_dump", None)
+    if callable(dump):
+        record = dump(mode="json")
+    elif isinstance(message, dict):
+        record = message
+    else:
+        record = vars(message) if hasattr(message, "__dict__") else message
+    return _resolved_record(record, attachments)
+
+
+def _unique_recovered_messages(
+    base: Sequence[Any],
+    recovered: Sequence[Any],
+    attachments: dict[str, str] | None = None,
+) -> tuple[list[Any], dict | None]:
+    """Collapse exact ID duplicates and reject conflicting duplicate IDs."""
+
+    seen: dict[str, Any] = {}
+    for message in base:
+        identifier = _get(message, "id")
+        if identifier is None:
+            continue
+        key = str(identifier)
+        if key in seen:
+            raise ValueError(
+                f"stored base transcript has duplicate Inspect message ID {key!r}"
+            )
+        seen[key] = message
+
+    unique: list[Any] = []
+    omitted_ids: list[str] = []
+    for message in recovered:
+        identifier = _get(message, "id")
+        if identifier is None:
+            unique.append(message)
+            continue
+        key = str(identifier)
+        prior = seen.get(key)
+        if prior is None:
+            seen[key] = message
+            unique.append(message)
+            continue
+        if _message_record(prior, attachments) != _message_record(
+            message, attachments
+        ):
+            raise ValueError(
+                "recovered transcript has non-identical messages sharing Inspect "
+                f"message ID {key!r}"
+            )
+        omitted_ids.append(key)
+
+    if not omitted_ids:
+        return unique, None
+    return unique, {
+        "policy": "collapse_exact_duplicate_inspect_message_ids",
+        "exact_duplicate_messages_omitted": len(omitted_ids),
+        "duplicate_message_ids": sorted(set(omitted_ids)),
+        "conflicting_duplicate_ids": [],
+    }
 
 
 def _target_events(
@@ -181,6 +260,9 @@ def recover_interrupted_opencode_messages(
             recovered.append(output_message)
             terminal_output_included = True
 
+    recovered, message_id_normalization = _unique_recovered_messages(
+        base, recovered, attachments
+    )
     if not recovered:
         return base, None
 
@@ -215,4 +297,122 @@ def recover_interrupted_opencode_messages(
             "result may be unavailable."
         ),
     }
+    if message_id_normalization is not None:
+        record["message_id_normalization"] = message_id_normalization
     return merged, record
+
+
+def recover_predeadline_opencode_submission(
+    base_messages: Sequence[Any],
+    events: Sequence[Any],
+    *,
+    deadline_seconds_from_start: float,
+    target_model: str | None = None,
+    event_start: int = 0,
+    applied_before_judging: bool,
+    attachments: dict[str, str] | None = None,
+) -> tuple[list[Any], dict | None, dict | None]:
+    """Recover a final response generated before the advertised task deadline.
+
+    Inspect SWE returns OpenCode's updated ``AgentState`` only after the CLI process
+    exits. The provider can therefore finish the model's terminal response before the
+    deadline while the outer sample clock cancels the still-running CLI handoff. Count
+    that response only when the recorded target event proves all of the following:
+
+    - it belongs to the exact final user boundary;
+    - it completed normally with a non-empty assistant response and no tool calls;
+    - its successful provider-call interval ended no later than the stored deadline.
+
+    Every missing or ambiguous field fails closed. The returned evidence is designed to
+    be stored with the sample/prefix so the deadline exception remains queryable.
+    """
+
+    recovered, transcript_record = recover_interrupted_opencode_messages(
+        base_messages,
+        events,
+        target_model=target_model,
+        event_start=event_start,
+        applied_before_judging=applied_before_judging,
+        attachments=attachments,
+    )
+    if (
+        transcript_record is None
+        or transcript_record.get("terminal_output_included") is not True
+    ):
+        return recovered, transcript_record, None
+
+    event_index = transcript_record.get("terminal_event_index")
+    if not isinstance(event_index, int) or not (0 <= event_index < len(events)):
+        return recovered, transcript_record, None
+    event = list(events)[event_index]
+    output = _get(event, "output")
+    output_message = _event_output_message(event)
+    if (
+        output is None
+        or output_message is None
+        or _get(output_message, "role") != "assistant"
+        or not _message_text(output_message, attachments).strip()
+        or (_get(output_message, "tool_calls", []) or [])
+        or _get(event, "pending") is True
+        or _get(event, "error") is not None
+        or _get(output, "error") is not None
+    ):
+        return recovered, transcript_record, None
+
+    stop_reason = _get(output, "stop_reason")
+    if stop_reason is None:
+        choices = _get(output, "choices", []) or []
+        stop_reason = _get(choices[0], "stop_reason") if choices else None
+    if stop_reason != "stop":
+        return recovered, transcript_record, None
+
+    retries = _get(event, "retries")
+    if retries not in (None, 0):
+        return recovered, transcript_record, None
+    working_start = _get(event, "working_start")
+    working_duration = _get(event, "working_time")
+    timing_source = "event.working_start + event.working_time"
+    if not isinstance(working_duration, (int, float)):
+        working_duration = _get(output, "time")
+        timing_source = "event.working_start + output.time"
+    timing_values = (
+        working_start,
+        working_duration,
+        deadline_seconds_from_start,
+    )
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        for value in timing_values
+    ):
+        return recovered, transcript_record, None
+    if float(working_duration) < 0 or float(deadline_seconds_from_start) <= 0:
+        return recovered, transcript_record, None
+
+    completed_seconds_from_start = float(working_start) + float(working_duration)
+    deadline = float(deadline_seconds_from_start)
+    if completed_seconds_from_start > deadline:
+        return recovered, transcript_record, None
+
+    evidence = {
+        "format": DEADLINE_RECOVERY_FORMAT,
+        "accepted_as_submission": True,
+        "rule": "terminal_model_response_completed_before_advertised_deadline",
+        "scaffold": "opencode",
+        "terminal_event_index": event_index,
+        "terminal_event_id": transcript_record.get("terminal_event_id"),
+        "terminal_event_timestamp": transcript_record.get(
+            "terminal_event_timestamp"
+        ),
+        "stop_reason": stop_reason,
+        "response_characters": len(_message_text(output_message, attachments)),
+        "working_start_seconds": float(working_start),
+        "successful_model_call_seconds": float(working_duration),
+        "response_completed_seconds_from_start": completed_seconds_from_start,
+        "deadline_seconds_from_start": deadline,
+        "margin_before_deadline_seconds": deadline - completed_seconds_from_start,
+        "timing_source": timing_source,
+        "cli_exit_required_before_deadline": False,
+    }
+    return recovered, transcript_record, evidence

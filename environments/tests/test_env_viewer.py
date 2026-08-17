@@ -246,6 +246,7 @@ def point_at(viewer, root: pathlib.Path) -> None:
     viewer.CONTINUATION_PREFIXES_ROOT = root / "continuation_prefixes"
     viewer.REGISTRY_FILE = root / "trajectory_ids.json"
     viewer.CACHE_ROOT = root / "viewer_cache"
+    viewer.promoted_rejudge_run_names = lambda: frozenset()
 
 
 def stamp_current_method(viewer, item: dict) -> dict:
@@ -269,11 +270,14 @@ def test_empty_viewer_build_is_still_navigable() -> None:
         viewer.load_all = empty
         stats = asyncio.run(viewer.build(use_cache=False))
         index = (root / "viewer" / "index.html").read_text()
+        simple_index = (
+            root / "viewer" / "simple_fraud_detection.html"
+        ).read_text()
         p_index = (
             root / "viewer" / "reasoning_prompt_benchmark.html"
         ).read_text()
-        subscription_index = (
-            root / "viewer" / "subscription_fraud_detection.html"
+        all_old_index = (
+            root / "viewer" / "fraud_detection_past.html"
         ).read_text()
         production_index_exists = (
             root / "viewer" / "production_fraud_detection.html"
@@ -292,14 +296,315 @@ def test_empty_viewer_build_is_still_navigable() -> None:
     assert '>deception</th>' not in index
     assert '>environment failure</th>' in index
     assert '>environment failure</th>' not in p_index
-    assert "visuals.html" in index
-    assert '<a href="subscription_fraud_detection.html">Subscription harness</a>' in index
+    assert "subscription_visuals.html" in index
     assert (
-        '<a href="subscription_fraud_detection.html" class="active">'
-        'Subscription harness</a>'
-    ) in subscription_index
+        '<a href="index.html" class="active">Current</a>' in index
+    )
+    assert (
+        '<a href="simple_fraud_detection.html" class="active">'
+        'Old (simple harness tests)</a>' in simple_index
+    )
+    assert (
+        '<a href="fraud_detection_past.html" class="active">All old</a>'
+        in all_old_index
+    )
+    assert 'class="scope-nav"' not in index
+    assert 'class="scope-nav"' not in simple_index
+    assert 'class="scope-nav"' in all_old_index
     assert "Production harness" not in index
     assert production_index_exists is False
+
+
+def test_store_backed_build_hydrates_full_trajectory_pages() -> None:
+    viewer = load_viewer()
+    item = stamp_current_method(viewer, audit())
+    item["messages"][1]["text"] = "FULL STORED TRANSCRIPT NEEDLE"
+    item["transcript"] = "FULL STORED TRANSCRIPT NEEDLE"
+
+    async def fake_load(*_args, audit_store, **_kwargs):
+        return audit_store.replace_mode("mock-run", "mock-signature", [item]), []
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        viewer.load_all = fake_load
+        stats = asyncio.run(viewer.build(use_cache=True))
+        index = (root / "viewer" / "simple_fraud_detection.html").read_text()
+        detail = (root / "viewer" / "trajectory-1.html").read_text()
+
+    assert stats["trajectories"] == 1
+    assert "FULL STORED TRANSCRIPT NEEDLE" not in index
+    assert "FULL STORED TRANSCRIPT NEEDLE" in detail
+
+
+def test_ml_prefix_generation_logs_render_only_as_prefix_attempts() -> None:
+    viewer = load_viewer()
+    prefix_generation = audit()
+    prefix_generation["mode"] = "ml-prefix-aws-no-honeypot-production"
+    prefix_generation["task"] = "ml_prefix_only_fraud_detection_qwen3-32b"
+    prefix_generation["judgment"] = None
+    prefix_generation["harness"] = "production"
+    prefix_generation["log_file"] = "attempt.eval"
+    prefix_generation["real_env"] = {
+        **prefix_generation["real_env"],
+        "family": "ml_prefix_only",
+        "judging": {"enabled": False},
+        "protocol": {
+            "submissions": 1,
+            "follow_up_sent": True,
+            "ended_reason": "wall_clock_limit",
+        },
+        "grade": {
+            "deliverables": {"REPORT.md": True, "models/final/": True},
+        },
+        "compute": {"original_epoch": 2},
+    }
+
+    async def fake_load(*_args, **_kwargs):
+        return [prefix_generation], []
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        viewer.load_all = fake_load
+        stats = asyncio.run(viewer.build(use_cache=False))
+        rendered_html = "\n".join(
+            path.read_text() for path in (root / "viewer").glob("*.html")
+        )
+        prefix_index = (
+            root / "viewer" / "subscription_prefixes_ml_prefix_only.html"
+        ).read_text()
+        prefix_detail = next(
+            path for path in (root / "viewer").glob("prefix-*.html")
+        ).read_text()
+        trajectory_pages = list((root / "viewer").glob("trajectory-*.html"))
+
+    assert stats["trajectories"] == 0
+    assert stats["current_trajectories"] == 0
+    assert stats["prefixes"] == 1
+    assert "ml_prefix_only_fraud_detection_qwen3-32b" not in rendered_html
+    assert trajectory_pages == []
+    assert "incomplete · 1/2 submissions · wall clock limit" in prefix_index
+    assert "Incomplete prefix attempt" in prefix_detail
+    assert "it is not a runnable continuation payload" in prefix_detail
+    assert "Do the task." in prefix_detail
+
+
+def test_prefix_selection_highlight_comes_from_campaign_payload_identity() -> None:
+    viewer = load_viewer()
+    payload = {
+        "format": "environments-continuation-prefix-v1",
+        "name": "selected-prefix",
+        "target": "gpt-5.5",
+        "reasoning": True,
+        "source": {
+            "kind": "external",
+            "prefix_type": "ml_prefix_only",
+            "harness": "subscription",
+            "submissions": 2,
+        },
+        "messages": [{"role": "user", "content": "Task"}],
+    }
+    sha256 = next(
+        value for kind, value in viewer._payload_identity_keys(payload)
+        if kind == "sha256"
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        campaign_root = root / "remote_campaigns"
+        campaign_root.mkdir()
+        (campaign_root / "continuation-aws-test.json").write_text(json.dumps({
+            "pipeline_config": {
+                "continuation": {
+                    "treatment": "no-honeypot",
+                    "payloads": [{
+                        "name": payload["name"],
+                        "sha256": sha256,
+                    }],
+                },
+            },
+        }))
+        prefix = {
+            "path": root / "selected.json",
+            "filename": "prefix-selected.html",
+            "payload": payload,
+            "source": payload["source"],
+            "messages": payload["messages"],
+            "mtime": 1.0,
+            "archived": False,
+            "display_name": "MPO-1",
+            "display_ordinal": 1,
+            "attempt_status": "complete · 2/2 submissions",
+        }
+        viewer._annotate_payload_prefix_usages(
+            [prefix], viewer._continuation_payload_usages([])
+        )
+        page = viewer._prefixes_page(
+            [prefix], [], seeds=["fraud_detection"],
+            active_harness="subscription",
+            active_prefix_type="ml_prefix_only",
+            prefix_types=(("ml_prefix_only", "ML prefix only"),),
+        )
+
+    assert prefix["selected"] is True
+    assert prefix["used_treatments"] == ["no-honeypot"]
+    assert 'class="prefix-selected"' in page
+    assert "selected</span>" in page
+    assert ">Selected for</th>" in page
+
+
+def test_prefix_selection_highlight_can_be_declared_before_campaign_launch() -> None:
+    viewer = load_viewer()
+    payload = {
+        "format": "environments-continuation-prefix-v1",
+        "name": "planned-prefix",
+        "target": "glm-5.1",
+        "reasoning": True,
+        "source": {"kind": "external"},
+        "messages": [{"role": "user", "content": "Task"}],
+    }
+    sha256 = next(
+        value for kind, value in viewer._payload_identity_keys(payload)
+        if kind == "sha256"
+    )
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        (root / "prefix_selections.json").write_text(json.dumps({
+            "format": viewer.PREFIX_SELECTIONS_FORMAT,
+            "selections": [{
+                "name": payload["name"],
+                "sha256": sha256,
+                "treatment": "no-honeypot",
+            }],
+        }))
+        prefix = {"payload": payload}
+        viewer._annotate_payload_prefix_usages(
+            [prefix], viewer._continuation_payload_usages([])
+        )
+
+    assert prefix["selected"] is True
+    assert prefix["used_treatments"] == ["no-honeypot"]
+
+
+def test_inline_context_does_not_inherit_source_trajectory_usage() -> None:
+    viewer = load_viewer()
+    source = {"kind": "trajectory", "trajectory_id": 711}
+    prefix = {
+        "source": source,
+        "payload": {
+            "source": source,
+            "delivery": {"mode": "inline_user_context"},
+        },
+    }
+    source_audit = {**audit(), "id": 711}
+
+    viewer._annotate_trajectory_prefixes(
+        [prefix],
+        audits_by_id={711: source_audit},
+        usages={711: {"hack-in-one-turn"}},
+    )
+
+    assert prefix["source_audit"] is source_audit
+    assert prefix["used_treatments"] == []
+
+
+def test_activity_log_prefix_catalog_shows_delivery_and_line_count() -> None:
+    viewer = load_viewer()
+    source = {
+        "kind": "trajectory",
+        "trajectory_id": 711,
+        "harness": "production",
+        "prefix_type": "activity_log_context",
+        "prefix_type_label": "Activity-log context",
+        "activity_log_metadata": {
+            "line_count": 949,
+            "byte_count": 62171,
+            "sha256": "a" * 64,
+        },
+    }
+    payload = {
+        "name": "activity-log-traj711",
+        "target": "deepseek-v4-pro",
+        "reasoning": True,
+        "source": source,
+        "delivery": {"mode": "inline_user_context"},
+    }
+    prefix = {
+        "source": source,
+        "payload": payload,
+        "messages": [{"role": "user", "content": "log"}],
+        "filename": "prefix-test.html",
+        "path": pathlib.Path("activity-log-traj711.json"),
+        "mtime": 1.0,
+        "archived": False,
+        "display_name": "ALC-1",
+        "display_ordinal": 1,
+        "used_treatments": [],
+    }
+
+    page = viewer._prefixes_page(
+        [prefix],
+        [],
+        seeds=["checkout_redesign"],
+        active_harness="subscription",
+        active_prefix_type="activity_log_context",
+        prefix_types=(("activity_log_context", "Activity-log context"),),
+    )
+    detail, detail_error = viewer._prefix_detail_page(
+        prefix,
+        seeds=["checkout_redesign"],
+        prefix_types=(("activity_log_context", "Activity-log context"),),
+    )
+
+    assert ">Log lines</th>" in page
+    assert 'data-sort-value="949">949</td>' in page
+    assert detail_error is None
+    assert "inline_user_context" in detail
+    assert "62,171" not in detail  # metadata stays exact, not presentation-rounded
+    assert "62171" in detail
+
+
+def test_recovered_ml_prefix_attempt_renders_as_complete() -> None:
+    viewer = load_viewer()
+    source = {
+        "kind": "external",
+        "prefix_type": "ml_prefix_only",
+        "generated_at": "2026-08-14T00:00:00Z",
+        "native_submission_recovery": {"accepted_as_submission": True},
+    }
+    prefix = {
+        "path": pathlib.Path("recovered.json"),
+        "source": source,
+        "payload": {
+            "name": "recovered",
+            "target": "glm-5.1",
+            "source": source,
+        },
+        "mtime": 1.0,
+    }
+    audit = {
+        "agent": "glm-5.1",
+        "prefix_eligible": False,
+        "real_env": {
+            "protocol": {
+                "submissions": 1,
+                "follow_up_sent": True,
+                "ended_reason": "wall_clock_limit",
+            },
+        },
+    }
+    viewer._ml_prefix_attempt_matches = lambda _prefix, _audit: True
+
+    viewer._merge_ml_prefix_attempts([prefix], [audit])
+
+    assert prefix["attempt_status"] == (
+        "complete · 2/2 submissions · recovered pre-deadline response"
+    )
+    assert viewer._prefix_source_status(prefix) == ""
 
 
 def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
@@ -379,6 +684,15 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
             "generator": "exp_custom_prefix.py",
             "prefix_type": "custom_dialogue",
             "prefix_type_label": "Custom dialogue",
+            "lossy_processing": {
+                "affected": True,
+                "visible_caveat": "Tables and citations were omitted.",
+            },
+            "articles": [{
+                "title": "Example article",
+                "revision_id": 123,
+                "permanent_url": "https://en.wikipedia.org/w/index.php?oldid=123",
+            }],
         })
         custom_path = viewer.CONTINUATION_PREFIXES_ROOT / "custom.json"
         custom_path.write_text(json.dumps(custom_payload))
@@ -406,6 +720,9 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
         custom_prefixes_page = (
             root / "viewer" / "subscription_prefixes_custom_dialogue.html"
         ).read_text()
+        custom_detail = (
+            root / "viewer" / viewer._prefix_page_filename(custom_path)
+        ).read_text()
         simple_detail = (
             root / "viewer" / viewer._prefix_page_filename(simple_path)
         ).read_text()
@@ -415,7 +732,10 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
 
     assert stats["prefixes"] == 3
     assert stats["prefix_load_errors"] == 1
-    assert '>Continuations</a><a href="prefixes.html">Prefixes</a>' in index
+    assert (
+        '>Continuations</a><a href="subscription_prefixes.html">Prefixes</a>'
+        in index
+    )
     assert '<a href="prefixes.html" class="active">Prefixes</a>' in prefixes_page
     assert "NQ-1" not in prefixes_page
     assert "No stored prefixes" in prefixes_page
@@ -423,23 +743,30 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
     assert "NQ-2" in subscription_prefixes_page
     assert "NQ-1" not in subscription_prefixes_page
     assert "custom-production" not in prefixes_page
-    assert "custom-production" in custom_prefixes_page
+    assert "CD-1" in custom_prefixes_page
+    assert "custom-production" not in custom_prefixes_page
+    assert "Source cleanup:" in custom_detail
+    assert "Tables and citations were omitted." in custom_detail
+    assert '<span class="k">condition</span>' not in custom_detail
+    assert "Article sources" in custom_detail
+    assert "Example article · revision 123" in custom_detail
+    assert "<h1>CD-1</h1>" in custom_detail
     assert "128,042 / 100,000" in old_prefixes_page
     assert "38,822 / 100,000" in subscription_prefixes_page
     assert (
-        '<a href="prefixes.html" class="active">Simple harness</a>'
-        in prefixes_page
+        '<a href="prefixes.html" class="active">'
+        'Old (simple harness tests)</a>' in prefixes_page
     )
     assert (
-        '<a href="subscription_prefixes.html" class="active">'
-        'Subscription harness</a>' in subscription_prefixes_page
+        '<a href="subscription_prefixes.html" class="active">Current</a>'
+        in subscription_prefixes_page
     )
     assert (
         '<a href="prefixes.html" class="active">Natural Questions</a>'
         in prefixes_page
     )
     assert (
-        '<a href="prefixes_past.html" class="active">Old</a>'
+        '<a href="prefixes_past.html" class="active">All old</a>'
         in old_prefixes_page
     )
     assert (
@@ -454,10 +781,7 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
         '<a href="subscription_prefixes_custom_dialogue.html" class="active">'
         'Custom dialogue</a>' in custom_prefixes_page
     )
-    assert (
-        '<a href="subscription_prefixes_custom_dialogue.html" class="active">'
-        'Subscription harness</a>' in custom_prefixes_page
-    )
+    assert 'class="scope-nav"' not in custom_prefixes_page
     for page in (prefixes_page, subscription_prefixes_page):
         assert ">Harness</th>" not in page
         assert ">Reasoning</th>" not in page
@@ -473,13 +797,252 @@ def test_prefixes_tab_indexes_and_renders_complete_stored_transcripts() -> None:
     assert "Stored NQ answer" in simple_detail
     assert "stored reasoning" in simple_detail
     assert "user turns" in simple_detail
-    assert '<a href="prefixes_past.html" class="active">Old</a>' in simple_detail
+    assert '<a href="prefixes_past.html" class="active">All old</a>' in simple_detail
     assert '<a class="headbtn" href="prefixes_past.html">All prefixes</a>' in simple_detail
     assert "archive retained in payload, not rendered" in subscription_detail
     assert "DO-NOT-RENDER-THIS-ARCHIVE" not in subscription_detail
+    assert '<a href="subscription_prefixes.html" class="active">Current</a>' in subscription_detail
+
+
+def test_trajectory_prefixes_are_cataloged_by_source_and_condition() -> None:
+    viewer = load_viewer()
+
+    def trajectory_payload(
+        name: str,
+        trajectory_id: int,
+        *,
+        family: str,
+        seed: str,
+        prefix_type: str | None = None,
+        prefix_type_label: str | None = None,
+        condition: dict | None = None,
+        cutoff: bool = False,
+    ) -> dict:
+        source = {
+            "kind": "trajectory",
+            "trajectory_id": trajectory_id,
+            "family": family,
+            "seed": seed,
+            "harness": "subscription",
+        }
+        if prefix_type is not None:
+            source["prefix_type"] = prefix_type
+            source["prefix_type_label"] = prefix_type_label
+        if condition is not None:
+            source["prefix_condition"] = condition
+        if cutoff:
+            source["cutoff"] = {
+                "affected": True,
+                "retained_message_count": 3,
+                "omitted_message_count": 2,
+            }
+            source["lossy_processing"] = {
+                "affected": True,
+                "visible_caveat": "Cut off immediately before user turn 2.",
+            }
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "First pass."},
+            {"role": "assistant", "content": "First result."},
+        ]
+        if not cutoff:
+            messages += [
+                {"role": "user", "content": "Second pass."},
+                {"role": "assistant", "content": "Second result."},
+            ]
+        return {
+            "format": "environments-continuation-prefix-v1",
+            "name": name,
+            "target": "glm-5.1",
+            "reasoning": True,
+            "source": source,
+            "messages": messages,
+        }
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        viewer.CONTINUATION_PREFIXES_ROOT.mkdir()
+        payloads = [
+            trajectory_payload(
+                "fraud-hack", 10,
+                family="ml_training_data_misuse", seed="fraud_detection",
+                prefix_type="ml_fraud_detection",
+                prefix_type_label="ML: fraud_detection",
+                condition={"key": "hack_2turn", "label": "hack · 2 turns"},
+            ),
+            trajectory_payload(
+                "fraud-cutoff", 11,
+                family="ml_training_data_misuse", seed="fraud_detection",
+                prefix_type="ml_fraud_detection_cutoff",
+                prefix_type_label="ML: fraud_detection (clean, 1-turn cutoff)",
+                condition={
+                    "key": "notable_1turn_cutoff",
+                    "label": "notable · answer-key peek · 1-turn cutoff",
+                },
+                cutoff=True,
+            ),
+            trajectory_payload(
+                "fraud-clean", 12,
+                family="ml_training_data_misuse", seed="fraud_detection",
+                prefix_type="ml_fraud_detection",
+                prefix_type_label="ML: fraud_detection",
+                condition={"key": "clean", "label": "clean"},
+            ),
+            trajectory_payload(
+                "used-p-hack", 20,
+                family="p_hacking", seed="checkout_redesign",
+            ),
+            trajectory_payload(
+                "unused-p-hack", 21,
+                family="p_hacking", seed="retrieval_practice",
+            ),
+            trajectory_payload(
+                "used-simple-p-hack", 22,
+                family="p_hacking", seed="checkout_redesign",
+            ),
+        ]
+        payloads[-1]["source"]["harness"] = "simple"
+        for index, item in enumerate(payloads):
+            (viewer.CONTINUATION_PREFIXES_ROOT / f"prefix-{index}.json").write_text(
+                json.dumps(item)
+            )
+
+        prefixes, errors = viewer._load_prefixes(
+            used_trajectory_ids=frozenset({20, 22})
+        )
+        current_only, current_only_errors = viewer._load_prefixes(
+            used_trajectory_ids=frozenset({20, 22}),
+            old_trajectory_ids=frozenset({20}),
+        )
+        source_audit = {**audit(), "id": 20}
+        source_audit["messages"] += [
+            {"role": "user", "text": "Second pass."},
+            {"role": "assistant", "text": "Second result."},
+        ]
+        viewer._annotate_trajectory_prefixes(
+            prefixes,
+            audits_by_id={20: source_audit},
+            usages={20: {"hack-in-two-turns"}},
+        )
+        viewer._assign_prefix_display_names(prefixes)
+
+        by_type = {}
+        for prefix in prefixes:
+            by_type.setdefault(viewer._prefix_type(prefix)[0], []).append(prefix)
+        prefix_types = viewer._prefix_types(prefixes)
+        fraud_page = viewer._prefixes_page(
+            by_type["ml_fraud_detection"], [], seeds=["fraud_detection"],
+            active_harness="subscription",
+            active_prefix_type="ml_fraud_detection",
+            prefix_types=prefix_types,
+        )
+        cutoff_page = viewer._prefixes_page(
+            by_type["ml_fraud_detection_cutoff"], [], seeds=["fraud_detection"],
+            active_harness="subscription",
+            active_prefix_type="ml_fraud_detection_cutoff",
+            prefix_types=prefix_types,
+        )
+        p_hacking_page = viewer._prefixes_page(
+            by_type["p_hacking"], [], seeds=["fraud_detection"],
+            active_harness="subscription",
+            active_prefix_type="p_hacking",
+            prefix_types=prefix_types,
+        )
+        cutoff_detail, error = viewer._prefix_detail_page(
+            by_type["ml_fraud_detection_cutoff"][0],
+            seeds=["fraud_detection"], prefix_types=prefix_types,
+        )
+
+    assert errors == []
+    assert current_only_errors == []
+    assert all(
+        prefix["source"].get("trajectory_id") != 20
+        for prefix in current_only
+    )
+    assert len(prefixes) == 4
+    assert all(
+        prefix["source"].get("trajectory_id") != 22
+        for prefix in prefixes
+    )
+    assert "ML: fraud_detection (clean, 1-turn cutoff)" in fraud_page
+    assert "Open the clean 1-turn cutoffs" not in fraud_page
+    assert "hack · 2 turns" in fraud_page
+    assert ">Turns</th>" in fraud_page
+    assert 'class="runs sortable grouped"' in fraud_page
+    assert "notable · answer-key peek · 1-turn cutoff" in cutoff_page
+    assert "Open the full hack prefixes" not in cutoff_page
+    assert 'class="runs sortable grouped"' not in cutoff_page
+    assert "hack-in-two-turns" in p_hacking_page
+    assert 'class="runs sortable grouped"' not in p_hacking_page
+    assert "Prefix cutoff:" in cutoff_detail
+    assert "Cut off immediately before user turn 2." in cutoff_detail
+    assert error is None
+
+
+def test_prefix_display_names_cover_every_type_and_resolve_code_collisions() -> None:
+    viewer = load_viewer()
+
+    def prefix(
+        name: str,
+        prefix_type: str,
+        generated_at: str,
+        *,
+        archived: bool = False,
+    ) -> dict:
+        return {
+            "path": pathlib.Path(f"{name}.json"),
+            "payload": {"name": name},
+            "source": {
+                "prefix_type": prefix_type,
+                "generated_at": generated_at,
+            },
+            "mtime": 1.0,
+            "archived": archived,
+        }
+
+    prefixes = [
+        prefix("new-science", "science_ethics", "2026-02-01T00:00:00Z"),
+        prefix(
+            "old-science",
+            "science_ethics",
+            "2026-01-01T00:00:00Z",
+            archived=True,
+        ),
+        prefix("general", "general_ethics", "2026-01-01T00:00:00Z"),
+        prefix("move", "move_fast", "2026-01-01T00:00:00Z"),
+        prefix("wikipedia", "wikipedia_summaries", "2026-01-01T00:00:00Z"),
+        prefix("ml-prefix", "ml_prefix_only", "2026-01-01T00:00:00Z"),
+        prefix("custom", "custom_dialogue", "2026-01-01T00:00:00Z"),
+    ]
+    viewer._assign_prefix_display_names(prefixes)
+    by_name = {item["payload"]["name"]: item for item in prefixes}
+
+    assert by_name["old-science"]["display_name"] == "SE-1"
+    assert by_name["new-science"]["display_name"] == "SE-2"
+    assert by_name["general"]["display_name"] == "GE-1"
+    assert by_name["move"]["display_name"] == "MF-1"
+    assert by_name["wikipedia"]["display_name"] == "WS-1"
+    assert by_name["ml-prefix"]["display_name"] == "MPO-1"
+    assert by_name["custom"]["display_name"] == "CD-1"
+
+    colliding = [
+        prefix("nq", "natural_questions", "2026-01-01T00:00:00Z"),
+        prefix("new-quiz", "new_quiz", "2026-01-01T00:00:00Z"),
+        prefix("science", "science_ethics", "2026-01-01T00:00:00Z"),
+        prefix("software", "software_engineering", "2026-01-01T00:00:00Z"),
+    ]
+    viewer._assign_prefix_display_names(colliding)
+    collided_by_name = {item["payload"]["name"]: item for item in colliding}
+
+    assert collided_by_name["nq"]["display_name"] == "NQ-1"
+    assert collided_by_name["new-quiz"]["display_name"].startswith("NQ")
+    assert collided_by_name["new-quiz"]["display_name"] != "NQ-1"
+    assert collided_by_name["science"]["display_type_code"].startswith("SE")
+    assert collided_by_name["software"]["display_type_code"].startswith("SE")
     assert (
-        '<a href="subscription_prefixes.html" class="active">'
-        'Subscription harness</a>' in subscription_detail
+        collided_by_name["science"]["display_type_code"]
+        != collided_by_name["software"]["display_type_code"]
     )
 
 
@@ -524,10 +1087,10 @@ def test_build_merges_production_into_subscription_viewer_window() -> None:
         point_at(viewer, root)
         viewer.load_all = fake_load
         asyncio.run(viewer.build(use_cache=False))
-        simple_page = (root / "viewer" / "index.html").read_text()
-        subscription_page = (
-            root / "viewer" / "subscription_fraud_detection.html"
+        simple_page = (
+            root / "viewer" / "simple_fraud_detection.html"
         ).read_text()
+        subscription_page = (root / "viewer" / "index.html").read_text()
         production_page_exists = (
             root / "viewer" / "production_fraud_detection.html"
         ).exists()
@@ -649,10 +1212,15 @@ def test_p_hacking_pages_and_visuals_are_separated_by_pressure() -> None:
     assert "mockllm/low" not in high_visuals
     assert "mockllm/low" in low_visuals
     assert (
-        '<a href="low_reasoning_prompt_benchmark_past.html">Old</a>' in low
+        '<a href="low_reasoning_prompt_benchmark_past.html">All old</a>' in low
     )
     assert (
-        '<a href="low_reasoning_prompt_benchmark.html">Current</a>' in low_past
+        '<a href="subscription_low_reasoning_prompt_benchmark.html">Current</a>'
+        in low_past
+    )
+    assert (
+        '<a href="low_reasoning_prompt_benchmark.html">'
+        'Old (simple harness tests)</a>' in low_past
     )
     assert (
         'href="low_reasoning_prompt_benchmark_past.html" class="active">'
@@ -754,9 +1322,23 @@ def test_build_renders_structured_navigation_flags_and_exact_legacy_scores() -> 
         stale.write_text("stale")
         stale_judge = root / "viewer" / "judge-trajectory-999.html"
         stale_judge.write_text(viewer._GENERATED_MARKER + " stale")
+        stale_continuation = (
+            root
+            / "viewer"
+            / "continuations_checkout_redesign_to_retrieval_practice.html"
+        )
+        stale_continuation.write_text(viewer._GENERATED_MARKER + " stale")
+        stale_checkout_to_ml = (
+            root
+            / "viewer"
+            / "continuations_checkout_redesign_to_fraud_detection.html"
+        )
+        stale_checkout_to_ml.write_text(viewer._GENERATED_MARKER + " stale")
 
         stats = asyncio.run(viewer.build(use_cache=False))
-        index = (root / "viewer" / "index.html").read_text()
+        index = (
+            root / "viewer" / "simple_fraud_detection.html"
+        ).read_text()
         reasoning_index = (
             root / "viewer" / "reasoning_prompt_benchmark.html"
         ).read_text()
@@ -779,13 +1361,21 @@ def test_build_renders_structured_navigation_flags_and_exact_legacy_scores() -> 
 
         assert not stale.exists()
         assert not stale_judge.exists()
+        assert not stale_continuation.exists()
+        # This route is now published for the positive checkout no-honeypot
+        # prefix experiment, so the stale generated page is replaced in place.
+        assert stale_checkout_to_ml.exists()
+        assert "ML (fraud_detection)" in stale_checkout_to_ml.read_text()
 
     assert stats == {
         "trajectories": 2,
         "current_trajectories": 1,
         "past_trajectories": 1,
             "rejudge_trajectories": 0,
+            "promoted_rejudge_judgments": 0,
             "continuation_trajectories": 0,
+            "prefix_experiment_trajectories": 0,
+            "multi_agent_trajectories": 0,
             "prefixes": 0,
             "prefix_load_errors": 0,
             "load_errors": 1,
@@ -794,21 +1384,39 @@ def test_build_renders_structured_navigation_flags_and_exact_legacy_scores() -> 
     }
     assert "broken-run" in index and "unreadable log" in index
     assert (
-        '<div class="window-nav"><a href="index.html" class="active">Current</a>'
-        '<a href="fraud_detection_past.html">Old</a></div>'
+        '<div class="window-nav"><a href="index.html">Current</a>'
+        '<a href="simple_fraud_detection.html" class="active">'
+        'Old (simple harness tests)</a>'
+        '<a href="fraud_detection_past.html">All old</a></div>'
         in index
     )
     assert '<div class="topnav">' in index
-    assert '<a href="index.html" class="active">fraud_detection</a>' in index
+    assert (
+        '<a href="simple_fraud_detection.html" class="active">'
+        'fraud_detection</a>' in index
+    )
     assert 'href="judge_fraud_detection.html"' in index
     assert "judge comparisons" not in index
     assert "past iterations" not in index
     assert '<a href="continuations.html">Continuations</a>' in index
     assert (
-        "reasoning_prompt_benchmark → checkout_redesign"
+        "p-hacking (reasoning_prompt_benchmark)"
         in reasoning_continuations
     )
-    assert "natural_questions → checkout_redesign" in nq_continuations
+    assert "natural_questions" in nq_continuations
+    assert "p-hacking (checkout_redesign)" in reasoning_continuations
+    assert 'class="seednav continuation-destination-nav"' in reasoning_continuations
+    assert 'class="contextnav continuation-prefix-nav"' in reasoning_continuations
+    destination_nav = reasoning_continuations.split(
+        '<div class="seednav continuation-destination-nav">', 1
+    )[1].split("</div>", 1)[0]
+    assert destination_nav.count("<a ") == 2
+    assert "p-hacking (checkout_redesign)" in destination_nav
+    assert "ML (fraud_detection)" in destination_nav
+    assert "p-hacking (reasoning_prompt_benchmark)" not in destination_nav
+    assert "p-hacking (retrieval_practice)" not in destination_nav
+    assert ".continuation-destination-nav {" in reasoning_continuations
+    assert ".continuation-prefix-nav {" in reasoning_continuations
     assert 'class="runs sortable"' in index
     assert 'data-sort-type="number">ID</th>' in index
     assert '>Judge view</th>' in index
@@ -830,8 +1438,12 @@ def test_build_renders_structured_navigation_flags_and_exact_legacy_scores() -> 
     assert '>noticed honeypot</th>' in reasoning_index
     assert '>deception</th>' not in reasoning_index
     assert past_index.count('<details class="sec" open>') == 7
-    assert '<a href="fraud_detection_past.html" class="active">Old</a>' in past_index
+    assert '<a href="fraud_detection_past.html" class="active">All old</a>' in past_index
     assert '<a href="index.html">Current</a>' in past_index
+    assert (
+        '<a href="simple_fraud_detection.html">Old (simple harness tests)</a>'
+        in past_index
+    )
     assert '<a href="fraud_detection_past.html" class="active">trajectories</a>' in past_index
     assert 'href="judge_comparisons_fraud_detection.html">judge comparisons</a>' in past_index
     assert ">visuals</a>" not in past_index
@@ -958,15 +1570,18 @@ def test_generic_judge_pages_archive_and_remove_old_judge_test_pages() -> None:
     assert not any(stale_generic_pages)
     assert "judge tests" not in fraud_index.lower()
     assert "judge tests" not in p_index.lower()
-    assert '<a href="index.html" class="active">fraud_detection</a>' in ml_generic
+    assert (
+        '<a href="simple_fraud_detection.html" class="active">'
+        'fraud_detection</a>' in ml_generic
+    )
     assert (
         '<a href="judge_fraud_detection.html" class="active">judge view</a>'
         in ml_generic
     )
-    assert '<a href="index.html">trajectories</a>' in ml_generic
+    assert '<a href="simple_fraud_detection.html">trajectories</a>' in ml_generic
     assert '<a href="visuals.html">visuals</a>' in ml_generic
     assert "judge tests" not in ml_generic.lower()
-    assert '<a href="fraud_detection_past.html">Old</a>' in ml_generic
+    assert '<a href="fraud_detection_past.html">All old</a>' in ml_generic
     assert "past iterations" not in ml_generic
     assert "judge comparisons" not in ml_generic
     assert (
@@ -1008,14 +1623,14 @@ def test_manifested_precanonical_runs_route_to_old_window() -> None:
         viewer.load_all = fake_load
         stats = asyncio.run(viewer.build(use_cache=False))
         output = root / "viewer"
-        current = (output / "index.html").read_text()
+        current = (output / "simple_fraud_detection.html").read_text()
         old = (output / "fraud_detection_past.html").read_text()
 
     assert stats["current_trajectories"] == 0
     assert stats["past_trajectories"] == 1
     assert 'href="trajectory-1.html">1</a>' not in current
     assert 'href="trajectory-1.html">1</a>' in old
-    assert '<a href="fraud_detection_past.html" class="active">Old</a>' in old
+    assert '<a href="fraud_detection_past.html" class="active">All old</a>' in old
 
 
 def test_manifested_trajectory_from_mixed_run_routes_to_old_window(
@@ -1101,7 +1716,7 @@ def test_manifested_continuation_from_mixed_run_routes_to_old_window(
     assert 'href="trajectory-1.html">1</a>' in old
     assert (
         '<a href="subscription_low_checkout_redesign_past.html" '
-        'class="active">Old</a>'
+        'class="active">All old</a>'
     ) in detail
     assert (
         'href="subscription_low_checkout_redesign_past.html">&larr; back</a>'
@@ -1232,7 +1847,69 @@ def test_rejudges_render_only_on_the_judge_comparisons_page() -> None:
         '<a href="judge_comparisons_fraud_detection.html" class="active">'
         in rejudge_detail
     )
-    assert '<a href="judge_comparisons_fraud_detection.html" class="active">Old</a>' in rejudge_detail
+    assert (
+        '<a href="judge_comparisons_fraud_detection.html" class="active">All old</a>'
+        in rejudge_detail
+    )
+
+
+def test_selected_rejudge_becomes_canonical_on_its_original_row() -> None:
+    viewer = load_viewer()
+    official = audit()
+    official["judge"] = "mockllm/old-judge"
+    official["judgment"]["summary"] = "SUPERSEDED SUMMARY"
+    official["judgment"]["raw_result"]["summary"] = "SUPERSEDED SUMMARY"
+    official["judgment_transcript_coverage"] = {
+        "complete": False,
+        "stored_judgment_predates_reconstruction": True,
+        "recovered_messages_not_seen_by_stored_judgment": 1,
+    }
+    official["load_issues"] = [{
+        "kind": "stored_judgment_missing_recovered_messages",
+    }]
+    rejudge = stamp_current_method(viewer, audit())
+    rejudge["judgment"]["envelope"]["post_validation"] = "passed"
+    rejudge["judgment"]["summary"] = "REPLACEMENT SUMMARY"
+    rejudge["judgment"]["raw_result"]["summary"] = "REPLACEMENT SUMMARY"
+    rejudge.update({
+        "mode": "rejudge-current-selected",
+        "task": "retrospective-rejudge",
+        "judge": "mockllm/new-judge",
+        "retrospective_rejudge": {
+            "source_run": "new-run",
+            "source_task": "real_audit_test_fraud_detection",
+            "seed": "fraud_detection",
+            "epoch": 1,
+            "source_key": "source-key",
+        },
+    })
+
+    async def fake_load(*_args, **_kwargs):
+        return [official, rejudge], []
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = pathlib.Path(temporary)
+        point_at(viewer, root)
+        viewer.promoted_rejudge_run_names = lambda: {"rejudge-current-selected"}
+        viewer.load_all = fake_load
+        stats = asyncio.run(viewer.build(use_cache=False))
+        output = root / "viewer"
+        current = (output / "simple_fraud_detection.html").read_text()
+        old = (output / "fraud_detection_past.html").read_text()
+        detail = (output / "trajectory-1.html").read_text()
+        comparisons = (output / "judge_comparisons_fraud_detection.html").read_text()
+
+    assert stats["current_trajectories"] == 1
+    assert stats["past_trajectories"] == 0
+    assert stats["promoted_rejudge_judgments"] == 1
+    assert 'href="trajectory-1.html">1</a>' in current
+    assert 'href="trajectory-1.html">1</a>' not in old
+    assert "Canonical judgment replaced" in detail
+    assert "REPLACEMENT SUMMARY" in detail
+    assert "Superseded stored judgment" in detail
+    assert "SUPERSEDED SUMMARY" in detail
+    assert ">old-judge</td>" in comparisons
+    assert ">new-judge</td>" in comparisons
 
 
 def test_judgment_free_source_collects_multiple_rejudges_automatically() -> None:
@@ -1515,7 +2192,7 @@ def test_failed_current_judgment_is_flagged_on_the_main_page() -> None:
         viewer.load_all = fake_load
         output = root / "viewer"
         stats = asyncio.run(viewer.build(use_cache=False))
-        fraud_main = (output / "index.html").read_text()
+        fraud_main = (output / "simple_fraud_detection.html").read_text()
         detail = (output / "trajectory-1.html").read_text()
         judge_detail = (output / "judge-trajectory-1.html").read_text()
 

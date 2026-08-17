@@ -19,13 +19,18 @@ CATEGORY_KEYS = (
 
 CONTINUATION_DIRECTIONS = (
     (
-        "demand_forecasting_to_checkout_redesign",
-        "demand_forecasting",
+        "fraud_detection_to_checkout_redesign",
+        "fraud_detection",
         "checkout_redesign",
     ),
     (
         "reasoning_prompt_benchmark_to_checkout_redesign",
         "reasoning_prompt_benchmark",
+        "checkout_redesign",
+    ),
+    (
+        "activity_log_context_to_checkout_redesign",
+        "activity_log_context",
         "checkout_redesign",
     ),
     (
@@ -48,9 +53,66 @@ CONTINUATION_DIRECTIONS = (
         "move_fast",
         "checkout_redesign",
     ),
+    (
+        "wikipedia_summaries_to_checkout_redesign",
+        "wikipedia_summaries",
+        "checkout_redesign",
+    ),
+    (
+        "wikipedia_summaries_to_fraud_detection",
+        "wikipedia_summaries",
+        "fraud_detection",
+    ),
+    (
+        "demand_forecasting_to_fraud_detection",
+        "demand_forecasting",
+        "fraud_detection",
+    ),
+    (
+        "checkout_redesign_to_fraud_detection",
+        "checkout_redesign",
+        "fraud_detection",
+    ),
+    (
+        "reasoning_prompt_benchmark_to_fraud_detection",
+        "reasoning_prompt_benchmark",
+        "fraud_detection",
+    ),
+    (
+        "checkout_redesign_to_reasoning_prompt_benchmark",
+        "checkout_redesign",
+        "reasoning_prompt_benchmark",
+    ),
+    (
+        "checkout_redesign_to_retrieval_practice",
+        "checkout_redesign",
+        "retrieval_practice",
+    ),
 )
 DEFAULT_CONTINUATION_DIRECTION = CONTINUATION_DIRECTIONS[0][0]
 OTHER_CONTINUATION_DIRECTION = "other"
+
+# Destination tabs intentionally published by the viewer. Keep this separate from
+# CONTINUATION_DIRECTIONS: that registry also recognizes planned/legacy routes so
+# stored provenance continues to classify correctly without creating empty tabs.
+CONTINUATION_DESTINATIONS = (
+    "checkout_redesign",
+    "fraud_detection",
+)
+
+CONTINUATION_DESTINATION_LABELS = {
+    "checkout_redesign": "p-hacking (checkout_redesign)",
+    "fraud_detection": "ML (fraud_detection)",
+    "reasoning_prompt_benchmark": "p-hacking (reasoning_prompt_benchmark)",
+    "retrieval_practice": "p-hacking (retrieval_practice)",
+}
+
+CONTINUATION_PREFIX_LABELS = {
+    "activity_log_context": "Activity-log context (p-hacking)",
+    "checkout_redesign": "p-hacking (checkout_redesign)",
+    "fraud_detection": "ML (fraud_detection)",
+    "reasoning_prompt_benchmark": "p-hacking (reasoning_prompt_benchmark)",
+}
 
 
 def continuation_of(audit: dict) -> dict | None:
@@ -71,8 +133,25 @@ def prefix_of(audit: dict) -> dict:
     return prefix if isinstance(prefix, dict) else {}
 
 
+def is_activity_log_context_continuation(audit: dict) -> bool:
+    """Whether this continuation uses the complete inline activity-log prefix."""
+
+    return (
+        continuation_of(audit) is not None
+        and prefix_of(audit).get("source_prefix_type") == "activity_log_context"
+    )
+
+
 def prefix_source_trajectory_id(audit: dict) -> int | None:
     value = prefix_of(audit).get("source_trajectory_id")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _prefix_experiment_user_turns(prefix: dict) -> int | None:
+    condition = prefix.get("source_prefix_condition")
+    if not isinstance(condition, dict):
+        return None
+    value = condition.get("experiment_user_turns")
     return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
@@ -80,7 +159,12 @@ def continuation_source(audit: dict) -> str:
     """Stored source name used to route a continuation, without filename guesses."""
 
     prefix = prefix_of(audit)
-    source_seed = prefix.get("source_seed")
+    scripted_type = prefix.get("source_prefix_type")
+    if scripted_type == "activity_log_context":
+        return scripted_type
+    source_seed = (
+        prefix.get("source_comparison_source_seed") or prefix.get("source_seed")
+    )
     if source_seed:
         return str(source_seed)
     if (
@@ -88,8 +172,12 @@ def continuation_source(audit: dict) -> str:
         or prefix.get("source_dataset") == "google-research-datasets/nq_open"
     ):
         return "natural_questions"
-    scripted_type = prefix.get("source_prefix_type")
-    if scripted_type in {"science_ethics", "general_ethics", "move_fast"}:
+    if scripted_type in {
+        "science_ethics",
+        "general_ethics",
+        "move_fast",
+        "wikipedia_summaries",
+    }:
         return str(scripted_type)
     return OTHER_CONTINUATION_DIRECTION
 
@@ -110,6 +198,43 @@ def continuation_direction_label(direction: str) -> str:
         if key == direction:
             return f"{source} → {destination}"
     return "other"
+
+
+def continuation_destination(direction: str) -> str:
+    """Destination-task key for a configured direction.
+
+    The catch-all direction currently contains unconfigured prefix sources going to
+    the one active continuation destination, so it stays under that destination tab.
+    """
+
+    for key, _source, destination in CONTINUATION_DIRECTIONS:
+        if key == direction:
+            return destination
+    return CONTINUATION_DIRECTIONS[0][2]
+
+
+def continuation_destination_label(destination: str) -> str:
+    """Human-facing destination tab label, including its benchmark family."""
+
+    return CONTINUATION_DESTINATION_LABELS.get(destination, destination)
+
+
+def continuation_prefix_label(direction: str) -> str:
+    """Human-facing prefix-source tab label for one direction."""
+
+    for key, source, _destination in CONTINUATION_DIRECTIONS:
+        if key == direction:
+            return CONTINUATION_PREFIX_LABELS.get(source, source)
+    return "other"
+
+
+def continuation_condition_context(direction: str) -> str:
+    """Self-contained task/prefix context for page headings and figure titles."""
+
+    destination = continuation_destination_label(
+        continuation_destination(direction)
+    )
+    return f"Task: {destination} · Prefix: {continuation_prefix_label(direction)}"
 
 
 def category_counts(
@@ -288,13 +413,13 @@ def continuation_prefix_rate_data(
     for audit in continuations:
         prefix = prefix_of(audit)
         source_id = prefix_source_trajectory_id(audit)
+        exact_prefix = prefix.get("sha256") or prefix.get("name")
         prefix_identity = (
-            ("trajectory", source_id)
+            ("payload", str(exact_prefix))
+            if exact_prefix
+            else ("trajectory", source_id)
             if source_id is not None
-            else (
-                "payload",
-                str(prefix.get("sha256") or prefix.get("name") or "unknown"),
-            )
+            else ("payload", "unknown")
         )
         reasoning = (
             audit.get("reasoning")
@@ -314,6 +439,8 @@ def continuation_prefix_rate_data(
             "source_id": source_id,
             "name": str(prefix.get("name") or "prefix"),
             "treatment": treatment_of(audit),
+            "prefix_type": prefix.get("source_prefix_type"),
+            "prefix_user_turns": _prefix_experiment_user_turns(prefix),
         })
         prefix_group["rows"].append(audit)
 
@@ -344,12 +471,15 @@ def continuation_prefix_rate_data(
         treatment_order = {
             "hack-in-one-turn": 0,
             "hack-in-two-turns": 1,
-            "no-hack": 2,
+            "no-honeypot": 2,
+            "no-hack": 3,
         }
         prefixes = sorted(
             group["prefixes"].values(),
             key=lambda item: (
-                treatment_order.get(item["treatment"], 3),
+                treatment_order.get(item["treatment"], 4),
+                item["prefix_user_turns"] is None,
+                item["prefix_user_turns"] or 0,
                 item["source_id"] is None,
                 item["source_id"] if item["source_id"] is not None else item["name"],
             ),
@@ -377,6 +507,14 @@ def continuation_prefix_rate_data(
                 ),
                 "kind": kind,
                 "treatment": prefix_group["treatment"],
+                **(
+                    {"prefix_type": prefix_group["prefix_type"]}
+                    if prefix_group["prefix_type"] is not None else {}
+                ),
+                **(
+                    {"prefix_user_turns": prefix_group["prefix_user_turns"]}
+                    if prefix_group["prefix_user_turns"] is not None else {}
+                ),
                 **_binary_hack_counts(prefix_group["rows"]),
                 **_outcome_composition(prefix_group["rows"]),
             })
