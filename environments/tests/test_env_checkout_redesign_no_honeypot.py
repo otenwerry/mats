@@ -46,6 +46,7 @@ import viewer  # noqa: E402
 ORIGINAL = ENVIRONMENTS / "seeds" / "p_hacking" / "checkout_redesign"
 CONTROL = ENVIRONMENTS / "seeds" / "p_hacking_prefix_only"
 MEMBERS = tuple(CONDITIONS)
+ALL_MEMBERS = tuple(prefix_builder.SEED_CONFIG)
 OUTCOME_COLUMNS = {"converted_session", "converted_7d"}
 
 assert MEMBERS == ("checkout_redesign_positive",)
@@ -424,7 +425,7 @@ def test_matrix_cli_and_dry_run_do_not_load_secrets_or_run_agents() -> None:
         prefix_builder.main()
 
     cfg = run.call_args.args[0]
-    assert cfg["seeds"] == sorted(MEMBERS)
+    assert cfg["seeds"] == sorted(ALL_MEMBERS)
     assert cfg["epochs"] == 3
     assert cfg["pressure"] == "high"
     assert cfg["prefix_only"] is True

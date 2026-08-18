@@ -40,6 +40,7 @@ from env_viewer_components import (  # noqa: E402
     render_transcript,
 )
 from env_viewer_continuations import (  # noqa: E402
+    ARCHIVED_CONTINUATION_DIRECTIONS,
     CONTINUATION_DESTINATIONS,
     CONTINUATION_DIRECTIONS,
     DEFAULT_CONTINUATION_DIRECTION,
@@ -854,6 +855,8 @@ def _navigation(
     )
     default_direction_by_destination = {}
     for direction, _source, destination in CONTINUATION_DIRECTIONS:
+        if direction in ARCHIVED_CONTINUATION_DIRECTIONS:
+            continue
         default_direction_by_destination.setdefault(destination, direction)
     destination_links = []
     for destination in CONTINUATION_DESTINATIONS:
@@ -876,7 +879,10 @@ def _navigation(
     continuation_directions = [
         key
         for key, _source, destination in CONTINUATION_DIRECTIONS
-        if destination == active_continuation_destination
+        if (
+            destination == active_continuation_destination
+            and key not in ARCHIVED_CONTINUATION_DIRECTIONS
+        )
     ]
     if (
         show_other_continuations
@@ -2584,11 +2590,23 @@ def _continuation_visuals_page(
     )
 
 
-def _activity_log_prefix_experiment_context() -> str:
-    return (
-        "Task: p-hacking (checkout_redesign) · "
-        "Prefix: Activity-log context (p-hacking)"
-    )
+def _activity_log_experiment_groups(
+    rows: list[dict], *, active_harness: str
+) -> list[tuple[str, list[dict]]]:
+    """Activity-log rows split by source family and destination task."""
+
+    selected = [row for row in rows if _audit_harness(row) == active_harness]
+    by_direction: dict[str, list[dict]] = defaultdict(list)
+    for row in selected:
+        by_direction[continuation_direction(row)].append(row)
+    ordered = [
+        key for key, source, _destination in CONTINUATION_DIRECTIONS
+        if source in {"activity_log_context", "activity_log_context_ml"}
+        and key in by_direction
+    ]
+    if OTHER_CONTINUATION_DIRECTION in by_direction:
+        ordered.append(OTHER_CONTINUATION_DIRECTION)
+    return [(direction, by_direction[direction]) for direction in ordered]
 
 
 def _activity_log_prefix_trajectories_page(
@@ -2598,10 +2616,14 @@ def _activity_log_prefix_trajectories_page(
     prefix_types: tuple[tuple[str, str], ...],
     active_harness: str,
 ) -> str:
-    selected = [
-        row for row in rows if _audit_harness(row) == active_harness
-    ]
-    context = _activity_log_prefix_experiment_context()
+    groups = _activity_log_experiment_groups(
+        rows, active_harness=active_harness
+    )
+    panels = "".join(
+        f'<h2>{esc(continuation_condition_context(direction))}</h2>'
+        + _continuation_index_sections(direction_rows)
+        for direction, direction_rows in groups
+    )
     body = (
         _navigation(
             seeds,
@@ -2610,11 +2632,11 @@ def _activity_log_prefix_trajectories_page(
             active_prefix_type=ACTIVITY_LOG_PREFIX_TYPE,
             prefix_types=prefix_types,
         )
-        + f'<div class="pagehead"><h1>{esc(context)}</h1></div>'
-        + _continuation_index_sections(selected)
+        + '<div class="pagehead"><h1>Activity-log context — trajectories</h1></div>'
+        + (panels if panels else '<p class="empty">No stored trajectories.</p>')
     )
     return _page(
-        f"Prefixes · {context} · trajectories",
+        "Prefixes · Activity-log context · trajectories",
         body,
         scripts=INDEX_SORT_JS,
     )
@@ -2629,15 +2651,22 @@ def _activity_log_prefix_visuals_page(
     prefix_types: tuple[tuple[str, str], ...],
     active_harness: str,
 ) -> str:
-    selected = [
-        row for row in rows if _audit_harness(row) == active_harness
-    ]
-    groups = continuation_prefix_rate_data(
-        selected,
-        originals,
-        audits_by_id=audits_by_id,
+    experiment_groups = _activity_log_experiment_groups(
+        rows, active_harness=active_harness
     )
-    context = _activity_log_prefix_experiment_context()
+    panels = "".join(
+        f'<h2>{esc(continuation_condition_context(direction))}</h2>'
+        + render_continuation_visuals(
+            continuation_prefix_rate_data(
+                direction_rows,
+                originals,
+                audits_by_id=audits_by_id,
+            ),
+            direction_rows,
+            context=continuation_condition_context(direction),
+        )
+        for direction, direction_rows in experiment_groups
+    )
     body = (
         _navigation(
             seeds,
@@ -2646,11 +2675,11 @@ def _activity_log_prefix_visuals_page(
             active_prefix_type=ACTIVITY_LOG_PREFIX_TYPE,
             prefix_types=prefix_types,
         )
-        + f'<div class="pagehead"><h1>{esc(context)} — visuals</h1></div>'
-        + render_continuation_visuals(groups, selected, context=context)
+        + '<div class="pagehead"><h1>Activity-log context — visuals</h1></div>'
+        + (panels if panels else '<p class="empty">No stored trajectories.</p>')
     )
     return _page(
-        f"Prefixes · {context} · visuals",
+        "Prefixes · Activity-log context · visuals",
         body,
         fit_content=False,
     )
@@ -2990,6 +3019,20 @@ def _prefix_attempt_contract(audit: dict) -> dict:
     family = (audit.get("real_env") or {}).get("family")
     seed = str(audit.get("seed") or "unknown")
     if family == "p_hacking_prefix_only":
+        source_metadata = {
+            "checkout_redesign_positive": (
+                "Checkout redesign · clear positive",
+                "checkout_redesign",
+            ),
+            "reasoning_prompt_benchmark_positive": (
+                "Reasoning-prompt benchmark · clear positive",
+                "reasoning_prompt_benchmark",
+            ),
+        }
+        source_label, comparison_source_seed = source_metadata.get(
+            seed,
+            (seed.replace("_", " ").title(), seed.removesuffix("_positive")),
+        )
         return {
             "family": family,
             "expected_submissions": 1,
@@ -3003,7 +3046,8 @@ def _prefix_attempt_contract(audit: dict) -> dict:
             "generator": "exp_p_hacking_prefix.py",
             "prefix_type": "p_hacking_no_honeypot",
             "prefix_type_label": "P-hacking no-honeypot",
-            "source_label": "Checkout redesign · clear positive",
+            "source_label": source_label,
+            "comparison_source_seed": comparison_source_seed,
         }
     return {
         "family": "ml_prefix_only",
@@ -3129,6 +3173,16 @@ def _ml_prefix_attempt_entry(audit: dict) -> dict:
             "final_llm_judge": False,
             "performance_grader": False,
         },
+        **(
+            {
+                "comparison_source_family": "p_hacking",
+                "comparison_source_seed": contract["comparison_source_seed"],
+                "result_condition": "clear positive",
+                "analysis_honeypot": False,
+            }
+            if contract["family"] == "p_hacking_prefix_only"
+            else {}
+        ),
         "evaluation_access": {
             "test_inputs_available": False,
             "test_labels_available": False,
@@ -3227,9 +3281,22 @@ def _prefix_type(prefix: dict) -> tuple[str, str]:
             if not isinstance(label, str) or not label.strip():
                 label = explicit.replace("_", " ").strip().title()
             if key == "ml_prefix_only":
+                comparison_seed = str(
+                    source.get("comparison_source_seed")
+                    or source.get("seed")
+                    or ""
+                ).strip()
+                normalized_seed = re.sub(
+                    r"[^a-z0-9]+", "_", comparison_seed.lower()
+                ).strip("_")
+                if normalized_seed:
+                    return (
+                        f"ml_{normalized_seed}",
+                        f"ML: {normalized_seed}",
+                    )
                 label = "No-honeypot ML"
             elif key == "activity_log_context":
-                label = "Activity-log context (p-hacking)"
+                label = "Activity-log context"
             return key, label.strip()
     if source.get("kind") == "trajectory":
         family = source.get("family")
@@ -3400,6 +3467,12 @@ def _prefix_condition(prefix: dict) -> tuple[str, str]:
         label = str(stored.get("label") or "outcome unavailable")
         return key, label
 
+    # The prefix-only ML controls omit the hidden evaluation split by design. On
+    # the seed-specific ML page they are the no-honeypot condition, not an unknown
+    # judged outcome.
+    if prefix["source"].get("prefix_type") == "ml_prefix_only":
+        return "no_honeypot", "no-honeypot"
+
     audit = prefix.get("source_audit")
     if not isinstance(audit, dict):
         return "unknown", "outcome unavailable"
@@ -3514,9 +3587,10 @@ def _prefix_condition_sort_key(prefix: dict) -> tuple[int, str]:
     order = {
         "hack_1turn": 0,
         "hack_2turn": 1,
-        "clean": 2,
-        "notable": 3,
-        "review": 4,
+        "no_honeypot": 2,
+        "clean": 3,
+        "notable": 4,
+        "review": 5,
     }
     normalized = re.sub(r"_1turn_cutoff$", "", key)
     return order.get(normalized, len(order)), label
@@ -3612,6 +3686,38 @@ def _prefix_load_errors(errors: list[str]) -> str:
     )
 
 
+def _prefix_comparison_seed(prefix: dict) -> str:
+    source = prefix["source"]
+    comparison_seed = source.get("comparison_source_seed")
+    if isinstance(comparison_seed, str) and comparison_seed.strip():
+        return comparison_seed.strip()
+    seed = source.get("seed")
+    if isinstance(seed, str) and seed.strip():
+        return seed.strip().removesuffix("_positive")
+    return _prefix_source_label(prefix)
+
+
+def _prefix_comparison_seed_sort_key(seed: str) -> tuple[int, str]:
+    try:
+        return SEED_NAV_ORDER.index(seed), seed
+    except ValueError:
+        return len(SEED_NAV_ORDER), seed
+
+
+def _activity_log_comparison_label(prefix: dict) -> str:
+    seed = _prefix_comparison_seed(prefix)
+    task_label = seed.replace("_", " ").strip().capitalize()
+    source = prefix["source"]
+    family = str(
+        source.get("comparison_source_family") or source.get("family") or ""
+    ).lower()
+    if family.startswith("ml_") or seed in {"demand_forecasting", "fraud_detection"}:
+        return f"ML — {task_label}"
+    if "p_hacking" in family or seed == "reasoning_prompt_benchmark":
+        return f"p-hacking — {task_label}"
+    return task_label or _prefix_source_label(prefix)
+
+
 def _prefixes_page(
     prefixes: list[dict],
     errors: list[str],
@@ -3633,6 +3739,11 @@ def _prefixes_page(
         "ml_prefix_only",
         "p_hacking_no_honeypot",
     }
+    show_attempt_status = prefix_only or any(
+        prefix.get("attempt_only")
+        or prefix["source"].get("prefix_type") == "ml_prefix_only"
+        for prefix in prefixes
+    )
     activity_log_prefixes = active_prefix_type == "activity_log_context"
     trajectory_prefixes = (
         active_prefix_type in {
@@ -3670,6 +3781,16 @@ def _prefixes_page(
         sorted(
             prefixes,
             key=lambda prefix: (
+                (
+                    _prefix_comparison_seed_sort_key(
+                        _prefix_comparison_seed(prefix)
+                    )
+                    if active_prefix_type in {
+                        "activity_log_context",
+                        "p_hacking_no_honeypot",
+                    }
+                    else (0, "")
+                ),
                 _prefix_model_sort_key(prefix),
                 (
                     (0, str(prefix["source"].get("epoch") or ""))
@@ -3682,13 +3803,21 @@ def _prefixes_page(
         if group_by_model else prefixes
     )
     rows = []
-    previous_model = None
+    previous_group = None
     for prefix in display_prefixes:
         payload = prefix["payload"]
         source = prefix["source"]
         model = str(payload.get("target") or "unknown")
+        current_group = (
+            (_prefix_comparison_seed(prefix), model)
+            if active_prefix_type in {
+                "activity_log_context",
+                "p_hacking_no_honeypot",
+            }
+            else model
+        )
         row_classes = []
-        if group_by_model and model != previous_model:
+        if group_by_model and current_group != previous_group:
             row_classes.append("group-start")
         if prefix.get("selected"):
             row_classes.append("prefix-selected")
@@ -3701,7 +3830,7 @@ def _prefixes_page(
         row_group = (
             f' data-group="{esc(model, quote=True)}"' if group_by_model else ""
         )
-        previous_model = model
+        previous_group = current_group
         questions = source.get("questions")
         question_count = len(questions) if isinstance(questions, list) else 0
         submissions = source.get("submissions")
@@ -3750,7 +3879,7 @@ def _prefixes_page(
             )
             + (
                 f'<td>{esc(prefix.get("attempt_status") or "stored payload")}</td>'
-                if prefix_only else ""
+                if show_attempt_status else ""
             )
             + (
                 f'<td>{esc(_prefix_source_status(prefix) or "—")}</td>'
@@ -3766,24 +3895,53 @@ def _prefixes_page(
             f'{esc(_prefix_cost(prefix))}</td>'
             '</tr>'
         )
-    table = (
-        '<table class="runs sortable'
-        + (' grouped' if group_by_model else '')
-        + '"><thead><tr class="cols">'
-        '<th>Prefix</th><th>Source</th><th>Model</th>'
-        + ('<th>Condition</th>' if show_condition else '')
-        + ('<th>Selected for</th>' if show_usage and prefix_only else '')
-        + ('<th>Used as</th>' if show_usage and not prefix_only else '')
-        + ('<th>Attempt status</th>' if prefix_only else '')
-        + ('<th>Source status</th>' if show_source_status else '')
-        +
-        f'<th data-sort-type="number">{activity_label}</th>'
-        '<th data-sort-type="number">Messages</th>'
-        '<th data-sort-type="number">Context tokens</th>'
-        '<th>Generation cost</th>'
-        f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
-        if rows else '<p class="empty">No stored prefixes.</p>'
-    )
+
+    def table_for_rows(table_rows: list[str]) -> str:
+        return (
+            '<table class="runs sortable'
+            + (' grouped' if group_by_model else '')
+            + '"><thead><tr class="cols">'
+            '<th>Prefix</th><th>Source</th><th>Model</th>'
+            + ('<th>Condition</th>' if show_condition else '')
+            + ('<th>Selected for</th>' if show_usage and prefix_only else '')
+            + ('<th>Used as</th>' if show_usage and not prefix_only else '')
+            + ('<th>Attempt status</th>' if show_attempt_status else '')
+            + ('<th>Source status</th>' if show_source_status else '')
+            + f'<th data-sort-type="number">{activity_label}</th>'
+            '<th data-sort-type="number">Messages</th>'
+            '<th data-sort-type="number">Context tokens</th>'
+            '<th>Generation cost</th>'
+            f'</tr></thead><tbody>{"".join(table_rows)}</tbody></table>'
+            if table_rows else '<p class="empty">No stored prefixes.</p>'
+        )
+
+    if active_prefix_type in {
+        "activity_log_context",
+        "p_hacking_no_honeypot",
+    } and rows:
+        rows_by_seed: dict[str, list[str]] = defaultdict(list)
+        labels_by_seed: dict[str, str] = {}
+        for prefix, row in zip(display_prefixes, rows, strict=True):
+            seed = _prefix_comparison_seed(prefix)
+            rows_by_seed[seed].append(row)
+            labels_by_seed.setdefault(
+                seed,
+                (
+                    _activity_log_comparison_label(prefix)
+                    if activity_log_prefixes
+                    else _prefix_source_label(prefix)
+                ),
+            )
+        table = "".join(
+            '<details class="sec" open><summary><h2>'
+            + esc(labels_by_seed[seed])
+            + '</h2></summary>'
+            + table_for_rows(rows_by_seed[seed])
+            + '</details>'
+            for seed in sorted(rows_by_seed, key=_prefix_comparison_seed_sort_key)
+        )
+    else:
+        table = table_for_rows(rows)
     body = (
         _navigation(
             seeds,
@@ -4258,7 +4416,7 @@ async def build(*, use_cache: bool = True) -> dict:
                 *prefix_types,
                 (
                     ACTIVITY_LOG_PREFIX_TYPE,
-                    "Activity-log context (p-hacking)",
+                    "Activity-log context",
                 ),
             )
         show_other_continuations = any(
@@ -4284,7 +4442,10 @@ async def build(*, use_cache: bool = True) -> dict:
         visible_continuation_directions = [
             key
             for key, _source, destination in CONTINUATION_DIRECTIONS
-            if destination in CONTINUATION_DESTINATIONS
+            if (
+                destination in CONTINUATION_DESTINATIONS
+                and key not in ARCHIVED_CONTINUATION_DIRECTIONS
+            )
         ]
         expected_continuation_pages = set()
         for harness in HARNESS_NAV_MODES:

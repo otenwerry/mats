@@ -372,7 +372,7 @@ def test_ml_prefix_generation_logs_render_only_as_prefix_attempts() -> None:
             path.read_text() for path in (root / "viewer").glob("*.html")
         )
         prefix_index = (
-            root / "viewer" / "subscription_prefixes_ml_prefix_only.html"
+            root / "viewer" / "subscription_prefixes_ml_fraud_detection.html"
         ).read_text()
         prefix_detail = next(
             path for path in (root / "viewer").glob("prefix-*.html")
@@ -388,6 +388,61 @@ def test_ml_prefix_generation_logs_render_only_as_prefix_attempts() -> None:
     assert "Incomplete prefix attempt" in prefix_detail
     assert "it is not a runnable continuation payload" in prefix_detail
     assert "Do the task." in prefix_detail
+
+
+def test_ml_prefix_only_routes_to_its_seed_page_as_no_honeypot() -> None:
+    viewer = load_viewer()
+    source = {
+        "kind": "external",
+        "prefix_type": "ml_prefix_only",
+        "prefix_type_label": "ML prefix only",
+        "family": "ml_prefix_only",
+        "comparison_source_family": "ml_training_data_misuse",
+        "comparison_source_seed": "demand_forecasting",
+        "seed": "demand_forecasting",
+        "harness": "production",
+        "submissions": 2,
+        "measured_context_tokens": 12_345,
+    }
+    prefix = {
+        "path": pathlib.Path("demand-prefix.json"),
+        "filename": "prefix-demand.html",
+        "payload": {
+            "name": "demand-prefix",
+            "target": "deepseek-v4-pro",
+            "source": source,
+        },
+        "source": source,
+        "messages": [
+            {"role": "user", "content": "Forecast demand."},
+            {"role": "assistant", "content": "Done."},
+            {"role": "user", "content": "Improve it."},
+            {"role": "assistant", "content": "Improved."},
+        ],
+        "mtime": 1.0,
+        "archived": False,
+        "attempt_status": "complete · 2/2 submissions",
+        "used_treatments": [],
+    }
+
+    viewer._assign_prefix_display_names([prefix])
+    page = viewer._prefixes_page(
+        [prefix], [], seeds=["demand_forecasting"],
+        active_harness="subscription",
+        active_prefix_type="ml_demand_forecasting",
+        prefix_types=(("ml_demand_forecasting", "ML: demand_forecasting"),),
+    )
+
+    assert viewer._prefix_type(prefix) == (
+        "ml_demand_forecasting",
+        "ML: demand_forecasting",
+    )
+    assert viewer._prefix_condition(prefix) == ("no_honeypot", "no-honeypot")
+    assert prefix["display_name"] == "MLD-1"
+    assert "Prefixes — ML: demand_forecasting" in page
+    assert ">Condition</th>" in page
+    assert "no-honeypot" in page
+    assert ">Attempt status</th>" in page
 
 
 def test_prefix_selection_highlight_comes_from_campaign_payload_identity() -> None:
@@ -518,6 +573,8 @@ def test_activity_log_prefix_catalog_shows_delivery_and_line_count() -> None:
         "kind": "trajectory",
         "trajectory_id": 711,
         "harness": "production",
+        "comparison_source_family": "ml_training_data_misuse",
+        "seed": "demand_forecasting",
         "prefix_type": "activity_log_context",
         "prefix_type_label": "Activity-log context",
         "activity_log_metadata": {
@@ -560,7 +617,12 @@ def test_activity_log_prefix_catalog_shows_delivery_and_line_count() -> None:
         prefix_types=(("activity_log_context", "Activity-log context"),),
     )
 
+    assert viewer._prefix_type(prefix) == (
+        "activity_log_context",
+        "Activity-log context",
+    )
     assert ">Log lines</th>" in page
+    assert "<h2>ML — Demand forecasting</h2>" in page
     assert 'data-sort-value="949">949</td>' in page
     assert detail_error is None
     assert "inline_user_context" in detail
@@ -1362,10 +1424,9 @@ def test_build_renders_structured_navigation_flags_and_exact_legacy_scores() -> 
         assert not stale.exists()
         assert not stale_judge.exists()
         assert not stale_continuation.exists()
-        # This route is now published for the positive checkout no-honeypot
-        # prefix experiment, so the stale generated page is replaced in place.
-        assert stale_checkout_to_ml.exists()
-        assert "ML (fraud_detection)" in stale_checkout_to_ml.read_text()
+        # Checkout -> ML is retained only in All old because its no-honeypot
+        # source task is not comparable to the reasoning-prompt conditions.
+        assert not stale_checkout_to_ml.exists()
 
     assert stats == {
         "trajectories": 2,

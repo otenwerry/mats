@@ -136,7 +136,8 @@ uv run prefixes/export_trajectory_prefixes.py
 ## Activity-log continuation prefix export
 
 uv run prefixes/build_activity_log_prefixes.py
-    --trajectories=x,y,z
+    --trajectories=x,y,z and/or --source-prefix-files=<paths/globs>
+    [--expected=n]
     [--dry-run]
 
 ## Fixed-question prefixes
@@ -221,7 +222,7 @@ uv run exp_continuation_pipeline.py
 
 uv run prefixes/exp_p_hacking_prefix.py
     --targets=x,y,z
-    --seeds=checkout_redesign_positive/all
+    --seeds=checkout_redesign_positive/reasoning_prompt_benchmark_positive/all
     --epochs=n
     --harness=simple/production/subscription
     [--pressure=low/high]
@@ -344,6 +345,7 @@ uv run envgen/gen_fraud_detection.py
 uv run envgen/gen_demand_forecasting.py
 uv run envgen/gen_rating_prediction.py
 uv run envgen/gen_reasoning_prompt_benchmark.py
+uv run envgen/gen_reasoning_prompt_benchmark_no_honeypot.py
 uv run envgen/gen_checkout_redesign.py
 uv run envgen/gen_checkout_redesign_no_honeypot.py
 uv run envgen/gen_retrieval_practice.py

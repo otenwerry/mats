@@ -34,6 +34,11 @@ CONTINUATION_DIRECTIONS = (
         "checkout_redesign",
     ),
     (
+        "activity_log_context_ml_to_checkout_redesign",
+        "activity_log_context_ml",
+        "checkout_redesign",
+    ),
+    (
         "natural_questions_to_checkout_redesign",
         "natural_questions",
         "checkout_redesign",
@@ -69,6 +74,11 @@ CONTINUATION_DIRECTIONS = (
         "fraud_detection",
     ),
     (
+        "activity_log_context_ml_to_fraud_detection",
+        "activity_log_context_ml",
+        "fraud_detection",
+    ),
+    (
         "checkout_redesign_to_fraud_detection",
         "checkout_redesign",
         "fraud_detection",
@@ -92,6 +102,15 @@ CONTINUATION_DIRECTIONS = (
 DEFAULT_CONTINUATION_DIRECTION = CONTINUATION_DIRECTIONS[0][0]
 OTHER_CONTINUATION_DIRECTION = "other"
 
+# These source/destination combinations remain recognized for stored provenance, but
+# are deliberately absent from the Current continuation navigation. Their campaigns
+# live in the explicit All old manifest. Checkout -> fraud used a different p-hacking
+# source task than the regular reasoning-prompt -> fraud conditions, so displaying it
+# beside those conditions invites an invalid comparison.
+ARCHIVED_CONTINUATION_DIRECTIONS = frozenset({
+    "checkout_redesign_to_fraud_detection",
+})
+
 # Destination tabs intentionally published by the viewer. Keep this separate from
 # CONTINUATION_DIRECTIONS: that registry also recognizes planned/legacy routes so
 # stored provenance continues to classify correctly without creating empty tabs.
@@ -109,6 +128,7 @@ CONTINUATION_DESTINATION_LABELS = {
 
 CONTINUATION_PREFIX_LABELS = {
     "activity_log_context": "Activity-log context (p-hacking)",
+    "activity_log_context_ml": "Activity-log context (ML)",
     "checkout_redesign": "p-hacking (checkout_redesign)",
     "fraud_detection": "ML (fraud_detection)",
     "reasoning_prompt_benchmark": "p-hacking (reasoning_prompt_benchmark)",
@@ -161,6 +181,17 @@ def continuation_source(audit: dict) -> str:
     prefix = prefix_of(audit)
     scripted_type = prefix.get("source_prefix_type")
     if scripted_type == "activity_log_context":
+        # The payload type describes delivery; its comparison family identifies the
+        # experimental condition. Keep ML and p-hacking activity logs on different
+        # direction pages even though both use the same inline context mechanism.
+        family = str(
+            prefix.get("family")
+            or prefix.get("source_comparison_source_family")
+            or prefix.get("source_family")
+            or ""
+        )
+        if family in {"ml_training_data_misuse", "ml_prefix_only"}:
+            return "activity_log_context_ml"
         return scripted_type
     source_seed = (
         prefix.get("source_comparison_source_seed") or prefix.get("source_seed")

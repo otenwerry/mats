@@ -132,3 +132,58 @@ quarantined. The read-only `--plan`, frozen source hashes, live labeled logs, on
 marker, no-automatic-retry policy, and final status manifest follow the required
 wrapper contract above. Every child uses `--skip-viewer`, and the wrapper deliberately
 does not rebuild or reload the viewer.
+
+The checkout-to-fraud continuation arm is historical evidence, not the matched
+no-honeypot condition for the regular reasoning-prompt-to-fraud experiment. Its three
+stored campaign directories are therefore listed in `viewer_old_runs.json`, and that
+source direction is omitted from Current continuation navigation. The trajectories
+remain available under the fraud-detection All old window. The matched replacement is
+reasoning-prompt-benchmark no-honeypot -> fraud detection.
+
+## 2026-08-17 next-continuations + missing-GPT batch
+
+`exp_next_open_20260817.py` is the pinned one-command wrapper for the open-model
+follow-up slate plus the three missing GPT-5.5 jobs from the prior batch. Regular
+`demand_forecasting -> fraud_detection` uses six manually
+selected judged conversation prefixes across the available hack/clean conditions plus
+one accepted `ml_prefix_only` no-honeypot control per DeepSeek, GLM, and Kimi (nine
+sources, 360 continuations). Its matched inline activity-log arm transforms only the
+six judged sources; it deliberately does not copy the three no-honeypot controls (six
+sources, 240 continuations). The independent
+`reasoning_prompt_benchmark -> checkout_redesign` arm uses one frozen clear-positive
+no-honeypot reasoning prefix per open model (120 continuations). The missing GPT-5.5
+work is 40 p-hacking no-honeypot -> fraud-detection continuations, eight
+demand-forecasting prefixes, and three reasoning-prompt no-honeypot prefixes. The
+exact total is 771 paid cells across eleven controllers. The eight production caps sum
+to 232 VMs and the three subscription caps sum to 18, filling the 250-VM account cap
+while respecting the separate 18-worker subscription cap.
+
+Every conversation payload and deterministic activity-log transform is frozen by
+filename, content hash, model, condition, source identity, and delivery semantics. The
+free `--plan` also exercises the ordinary continuation loader, destination-cell
+builder, and protocol-source loader for every controller. Activity-log payloads retain
+the required visible caveat that system messages and private reasoning were omitted;
+the complete stored observable activity is delivered inline. The GPT-5.5 equivalents
+of the three new continuation directions are still deferred until tomorrow; Opus is
+absent. Paid mode performs one AWS login/setup, staggers controllers, streams labeled
+logs, writes durable plan/final manifests, never retries automatically, and
+deliberately does not rebuild the separately managed viewer.
+
+## 2026-08-17 GPT continuation follow-up
+
+`exp_next_gpt_20260817.py` pins the GPT-5.5 versions of the three continuation
+directions deferred from the mixed batch: 120 regular demand-forecasting ->
+fraud-detection cells, 80 matched inline activity-log cells, and 40
+reasoning-prompt no-honeypot -> checkout-redesign cells. It runs four subscription
+controllers with caps 37, 18, 37, and 8, respectively, for a user-selected aggregate
+ceiling of 100 simultaneous workers. The 100-worker number is an intentionally
+aggressive local scheduling choice, not a published OpenAI allowance. The caps are
+weighted by cell count and the 70-minute ML versus 30-minute p-hacking worker limits
+so the controllers have similar worst-case wave durations.
+
+The wrapper retains the existing recovery contract: controller failures do not cancel
+siblings, completed cells are atomically imported, and no retries happen automatically.
+After inspection, infrastructure failures can be selected with `--retry-failed`; a
+subscription/provider exit recorded as a completed transport cell requires the
+additional explicit `--retry-pipeline-failures` switch. Recovery creates a linked
+exact-cell campaign and never overwrites the successful parent evidence.

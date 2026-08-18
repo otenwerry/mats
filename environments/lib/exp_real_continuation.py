@@ -564,39 +564,68 @@ def reconstruct_prefix_payloads(
     ]
 
 
-def activity_log_prefix_payload_from_trajectory(trajectory_payload: dict) -> dict:
-    """Render one stored trajectory as a free, static continuation prefix.
+def activity_log_prefix_payload_from_source(source_payload: dict) -> dict:
+    """Render one saved trajectory payload as a free, static continuation prefix.
 
     The returned payload contains exactly one neutral user message. It carries the
     complete stored observable activity log but no native session archive and no
     fabricated assistant or tool history. The ordinary continuation splice folds the
     pivot and next task into this same user message.
+
+    ``source_payload`` may be either a viewer-reconstructed trajectory or a complete
+    external prefix-generation payload. The latter is how no-honeypot ML trajectories
+    become inline activity-log contexts without first assigning them viewer trajectory
+    IDs (prefix-only generation logs intentionally have no such IDs).
     """
 
     validate_prefix_payload(
-        trajectory_payload,
-        origin=str(trajectory_payload.get("name") or "trajectory payload"),
+        source_payload,
+        origin=str(source_payload.get("name") or "source payload"),
     )
-    if (trajectory_payload.get("source") or {}).get("kind") != "trajectory":
-        raise SystemExit("activity-log prefixes must be derived from a trajectory")
+    source_kind = (source_payload.get("source") or {}).get("kind")
+    if source_kind not in {"trajectory", "external"}:
+        raise SystemExit(
+            "activity-log prefixes must be derived from a trajectory or a saved "
+            "external prefix payload"
+        )
+    if (
+        (source_payload.get("source") or {}).get("prefix_type")
+        == ACTIVITY_LOG_PREFIX_TYPE
+    ):
+        raise SystemExit("an activity-log prefix cannot be wrapped a second time")
     try:
-        messages = _MESSAGES_ADAPTER.validate_python(trajectory_payload["messages"])
+        messages = _MESSAGES_ADAPTER.validate_python(source_payload["messages"])
     except Exception as error:
         raise SystemExit(
-            f"{trajectory_payload.get('name')}: stored messages could not be parsed: "
+            f"{source_payload.get('name')}: stored messages could not be parsed: "
             f"{error}"
         ) from error
     content, metadata = render_activity_log(messages)
-    source = dict(trajectory_payload["source"])
+    source = dict(source_payload["source"])
+    if source_kind == "external":
+        # The derived payload is self-contained, so it does not depend on the source
+        # file remaining at the same host path. Preserve its canonical identity
+        # without copying native resume state or path-dependent metadata.
+        source["activity_log_source_payload"] = {
+            "kind": "continuation_prefix_payload",
+            "format": source_payload["format"],
+            "name": source_payload["name"],
+            "sha256": payload_sha256(source_payload),
+            "prefix_type": source.get("prefix_type"),
+            "prefix_type_label": source.get("prefix_type_label"),
+            "generator": source.get("generator"),
+        }
     source.update({
         "generator": ACTIVITY_LOG_PREFIX_GENERATOR,
         "prefix_type": ACTIVITY_LOG_PREFIX_TYPE,
         "prefix_type_label": ACTIVITY_LOG_PREFIX_TYPE_LABEL,
-        "source_label": ACTIVITY_LOG_PREFIX_TYPE_LABEL,
         "stored_message_format": "inspect-chat-messages",
         "native_session_state_included": False,
         "activity_log_metadata": metadata,
     })
+    source_label = source.get("source_label")
+    if not isinstance(source_label, str) or not source_label.strip():
+        source["source_label"] = ACTIVITY_LOG_PREFIX_TYPE_LABEL
     user_message = ChatMessageUser(
         content=activity_log_inline_user_context(content)
     ).model_dump(mode="json", exclude_none=False)
@@ -607,9 +636,9 @@ def activity_log_prefix_payload_from_trajectory(trajectory_payload: dict) -> dic
     user_message.pop("id", None)
     payload = {
         "format": PREFIX_FORMAT,
-        "name": f"activity-log-{trajectory_payload['name']}",
-        "target": trajectory_payload["target"],
-        "reasoning": trajectory_payload["reasoning"],
+        "name": f"activity-log-{source_payload['name']}",
+        "target": source_payload["target"],
+        "reasoning": source_payload["reasoning"],
         "delivery": {
             "mode": CONTINUATION_DELIVERY_INLINE_USER_CONTEXT,
             "fresh_session": True,
@@ -621,8 +650,20 @@ def activity_log_prefix_payload_from_trajectory(trajectory_payload: dict) -> dic
     }
     return validate_prefix_payload(
         payload,
-        origin=f"trajectory {source.get('trajectory_id')}",
+        origin=(
+            f"trajectory {source.get('trajectory_id')}"
+            if source_kind == "trajectory"
+            else f"prefix payload {source_payload['name']}"
+        ),
     )
+
+
+def activity_log_prefix_payload_from_trajectory(trajectory_payload: dict) -> dict:
+    """Backward-compatible, trajectory-only wrapper for viewer-ID callers."""
+
+    if (trajectory_payload.get("source") or {}).get("kind") != "trajectory":
+        raise SystemExit("activity-log prefixes must be derived from a trajectory")
+    return activity_log_prefix_payload_from_source(trajectory_payload)
 
 
 # --------------------------------------------------------------------------- #

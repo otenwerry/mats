@@ -4,6 +4,9 @@
     "rejudge-current-gpt-5.6-luna-fa4763116926-20260813-155538"
   ],
   "run_directories": [
+    "continuation-aws-no-honeypot-40ep-20260816-215228-a729ef42",
+    "continuation-aws-no-honeypot-40ep-20260816-215248-625ae015",
+    "continuation-aws-no-honeypot-40ep-20260817-014443-9a14f0a5",
     "continuation-aws-trajectory-prefix-1ep-20260811-113624-bfbed5bc-retry-20260811-115458-b6c399b9",
     "continuation-aws-trajectory-prefix-1ep-20260811-113636-c228f787-retry-20260811-115503-19f09535",
     "continuation-prefix-batch-20260812-005732-534175-production",
@@ -20,9 +23,7 @@
     "multi-agent-aws-no-hack-40ep-20260815-015952-c6efb52c",
     "multi-agent-aws-no-hack-40ep-20260815-015952-c6efb52c-retry-20260815-123512-c82a62fd",
     "real-v2-aws-2targets-allow-1ep-20260810-224033-146e9536",
-    "real-v2-aws-2targets-allow-7ep-20260811-183430-4c5d0de1",
     "real-v2-aws-3targets-allow-3ep-20260804-164959-705d60ce",
-    "real-v2-aws-3targets-allow-7ep-20260811-183438-d1ec3f71",
     "real-v2-aws-5targets-allow-1ep-20260810-115520-5ba23c4c",
     "real-v2-aws-5targets-allow-1ep-20260810-130119-c2cdf321",
     "real-v2-aws-5targets-allow-1ep-20260810-144741-99ee5a82",

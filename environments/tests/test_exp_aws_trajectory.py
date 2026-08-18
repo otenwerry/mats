@@ -26,6 +26,7 @@ from exp_aws_trajectory import (  # noqa: E402
     AWS_CLI_VERSION,
     FAILURE_PACKAGE_SECONDS,
     ROOT_VOLUME_GB,
+    SSM_PARAMETER_NAME,
     UNCONDITIONAL_TERMINATION_SECONDS,
     PERSONAL_REIMBURSEMENT_FUNDING,
     RUNTIME_VERSION,
@@ -1242,6 +1243,9 @@ class SafetyContractTests(unittest.TestCase):
     def test_existing_secret_parameter_uses_overwrite_without_tags(self):
         ssm = MagicMock()
         ssm.get_parameter.return_value = {"Parameter": {"Name": "existing"}}
+        ssm.describe_parameters.return_value = {
+            "Parameters": [{"Name": SSM_PARAMETER_NAME, "Tier": "Standard"}]
+        }
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "secret"}, clear=True):
             put_api_keys({"ssm": ssm}, extra_names=[])
@@ -1249,6 +1253,23 @@ class SafetyContractTests(unittest.TestCase):
         request = ssm.put_parameter.call_args.kwargs
         self.assertTrue(request["Overwrite"])
         self.assertNotIn("Tags", request)
+
+    def test_existing_advanced_secret_parameter_is_never_downgraded(self):
+        ssm = MagicMock()
+        # This mirrors AWS: GetParameter confirms existence but does not include Tier.
+        ssm.get_parameter.return_value = {
+            "Parameter": {"Name": SSM_PARAMETER_NAME}
+        }
+        ssm.describe_parameters.return_value = {
+            "Parameters": [{"Name": SSM_PARAMETER_NAME, "Tier": "Advanced"}]
+        }
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "small"}, clear=True):
+            put_api_keys({"ssm": ssm}, extra_names=[])
+
+        request = ssm.put_parameter.call_args.kwargs
+        self.assertEqual(request["Tier"], "Advanced")
+        self.assertTrue(request["Overwrite"])
 
     def test_large_secret_bundle_uses_advanced_ssm_tier_with_warning(self):
         ssm = MagicMock()

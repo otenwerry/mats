@@ -572,12 +572,34 @@ def put_api_keys(
     exists = True
     existing_tier = None
     try:
-        existing_parameter = clients["ssm"].get_parameter(Name=SSM_PARAMETER_NAME)
-        existing_tier = (existing_parameter.get("Parameter") or {}).get("Tier")
+        clients["ssm"].get_parameter(Name=SSM_PARAMETER_NAME)
     except Exception as ex:
         if _client_error_code(ex) != "ParameterNotFound":
             raise
         exists = False
+    if exists:
+        # GetParameter does not return Tier. DescribeParameters does, and an
+        # existing Advanced parameter cannot be overwritten as Standard even
+        # when its new value happens to fit under the Standard 4 KiB limit.
+        metadata = clients["ssm"].describe_parameters(
+            ParameterFilters=[{
+                "Key": "Name",
+                "Option": "Equals",
+                "Values": [SSM_PARAMETER_NAME],
+            }],
+            MaxResults=1,
+        )
+        parameters = metadata.get("Parameters") or []
+        matching = [
+            parameter for parameter in parameters
+            if parameter.get("Name") == SSM_PARAMETER_NAME
+        ]
+        if not matching:
+            raise AwsTrajectoryError(
+                "existing AWS worker-secret parameter was not returned by "
+                "DescribeParameters"
+            )
+        existing_tier = matching[0].get("Tier")
     serialized = json.dumps(values, sort_keys=True)
     serialized_bytes = len(serialized.encode())
     # Standard parameters are limited to 4 KiB. Advanced parameters are billable

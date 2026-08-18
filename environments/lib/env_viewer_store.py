@@ -116,11 +116,14 @@ _SUMMARY_CONTINUATION_FIELDS = (
 )
 
 _SUMMARY_PREFIX_FIELDS = (
+    "family",
     "name",
     "sha256",
+    "source_comparison_source_family",
     "source_comparison_source_seed",
     "source_cutoff",
     "source_dataset",
+    "source_family",
     "source_generator",
     "source_prefix_condition",
     "source_prefix_type",

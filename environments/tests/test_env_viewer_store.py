@@ -75,8 +75,11 @@ def rich_audit() -> dict:
                 "boundary_index": 2,
                 "opening_user_message": large,
                 "prefix": {
+                    "family": "ml_training_data_misuse",
                     "name": "prefix-one",
                     "sha256": "abc",
+                    "source_comparison_source_family": "ml_training_data_misuse",
+                    "source_family": "ml_training_data_misuse",
                     "source_trajectory_id": 4,
                     "messages": [large],
                 },
@@ -113,8 +116,11 @@ def test_compact_audit_keeps_aggregate_facts_without_rich_evidence() -> None:
     assert "gates" not in compact["real_env"]
     assert "opening_user_message" not in compact["real_env"]["continuation"]
     assert compact["real_env"]["continuation"]["prefix"] == {
+        "family": "ml_training_data_misuse",
         "name": "prefix-one",
         "sha256": "abc",
+        "source_comparison_source_family": "ml_training_data_misuse",
+        "source_family": "ml_training_data_misuse",
         "source_trajectory_id": 4,
     }
     assert "result" not in compact["judgment"]["envelope"]

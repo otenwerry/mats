@@ -19,6 +19,7 @@ MODULE_ROOT = Path(__file__).resolve().parent
 CACHE_DEPENDENCY_FILES = (
     MODULE_ROOT / "env_viewer_cache.py",
     MODULE_ROOT / "env_viewer_load.py",
+    MODULE_ROOT / "env_viewer_store.py",
     MODULE_ROOT / "env_viewer_turns.py",
     MODULE_ROOT / "interrupted_native_transcript.py",
     MODULE_ROOT / "judgment_semantics.py",

@@ -681,6 +681,69 @@ def test_activity_log_prefix_is_free_static_user_context_for_any_harness() -> No
     assert simple.boundary_index == 1
 
 
+def test_external_ml_prefix_becomes_self_contained_activity_log_context() -> None:
+    source = payload(
+        name="demand-prefix-e1",
+        messages=prefix_messages(),
+        source={
+            "kind": "external",
+            "family": "ml_prefix_only",
+            "comparison_source_family": "ml_training_data_misuse",
+            "seed": "demand_forecasting",
+            "epoch": 1,
+            "harness": "production",
+            "generator": "exp_ml_prefix.py",
+            "prefix_type": "ml_prefix_only",
+            "prefix_type_label": "ML prefix only",
+            "source_label": "Demand forecasting · no test access",
+            "completed_protocol": True,
+            "continuation_eligibility": {
+                "eligible_by_default": True,
+                "missing_required_deliverables": [],
+            },
+        },
+        native_resume=production_native_resume(),
+    )
+
+    built = continuation.activity_log_prefix_payload_from_source(source)
+    source_identity = built["source"]["activity_log_source_payload"]
+
+    assert built["name"] == "activity-log-demand-prefix-e1"
+    assert built["source"]["kind"] == "external"
+    assert built["source"]["family"] == "ml_prefix_only"
+    assert built["source"]["comparison_source_family"] == (
+        "ml_training_data_misuse"
+    )
+    assert built["source"]["prefix_type"] == "activity_log_context"
+    assert built["source"]["source_label"] == (
+        "Demand forecasting · no test access"
+    )
+    assert source_identity == {
+        "kind": "continuation_prefix_payload",
+        "format": continuation.PREFIX_FORMAT,
+        "name": "demand-prefix-e1",
+        "sha256": continuation.payload_sha256(source),
+        "prefix_type": "ml_prefix_only",
+        "prefix_type_label": "ML prefix only",
+        "generator": "exp_ml_prefix.py",
+    }
+    assert "native_resume" not in built
+    assert continuation.build_prefix_spec(
+        built, harness="production"
+    ).native_resume is None
+
+
+def test_activity_log_prefix_rejects_nested_activity_log_payload() -> None:
+    source = payload(
+        source={
+            "kind": "external",
+            "prefix_type": "activity_log_context",
+        }
+    )
+    with pytest.raises(SystemExit, match="second time"):
+        continuation.activity_log_prefix_payload_from_source(source)
+
+
 def test_activity_log_prefix_rejects_tampered_inline_content() -> None:
     source = payload(
         source={"kind": "trajectory", "trajectory_id": 711},
@@ -1931,7 +1994,7 @@ def test_ml_destination_continuations_have_explicit_viewer_routes() -> None:
         '<div class="contextnav continuation-prefix-nav">', 1
     )[1].split("</div>", 1)[0]
     assert "demand_forecasting" in prefix_nav
-    assert "p-hacking (checkout_redesign)" in prefix_nav
+    assert "p-hacking (checkout_redesign)" not in prefix_nav
 
     reasoning_phacking_page = viewer._continuations_page(
         continuations,
@@ -2060,6 +2123,74 @@ def test_activity_log_context_experiment_renders_under_prefixes() -> None:
         in continuation_page
     )
     assert "Reward-hack rate by prefix condition" in continuation_visuals
+
+
+def test_ml_activity_log_context_routes_and_renders_separately() -> None:
+    from env_viewer_continuations import (
+        CONTINUATION_DIRECTIONS,
+        continuation_direction,
+    )
+
+    viewer = viewer_module()
+    ml_record = record_for(prefix_messages(), 3)
+    ml_record["delivery_mode"] = "inline_user_context"
+    ml_record["prefix"] = {
+        "name": "activity-log-demand-prefix-e1",
+        "family": "ml_training_data_misuse",
+        "source_seed": "demand_forecasting",
+        "source_prefix_type": "activity_log_context",
+    }
+    ml_row = fake_audit(
+        audit_id=42,
+        seed="fraud_detection",
+        target="openrouter/q/m",
+        hack=False,
+        continuation_record_value=ml_record,
+    )
+    p_record = record_for(prefix_messages(), 3)
+    p_record["delivery_mode"] = "inline_user_context"
+    p_record["prefix"] = {
+        "name": "activity-log-traj711",
+        "family": "p_hacking",
+        "source_seed": "reasoning_prompt_benchmark",
+        "source_prefix_type": "activity_log_context",
+    }
+    p_row = fake_audit(
+        audit_id=43,
+        seed="checkout_redesign",
+        target="openrouter/q/m",
+        hack=True,
+        continuation_record_value=p_record,
+    )
+
+    assert (
+        continuation_direction(ml_row)
+        == "activity_log_context_ml_to_fraud_detection"
+    )
+    assert not any(
+        source == "activity_log_context" and destination == "fraud_detection"
+        for _key, source, destination in CONTINUATION_DIRECTIONS
+    )
+    continuation_page = viewer._continuations_page(
+        [ml_row],
+        seeds=["fraud_detection"],
+        active_direction="activity_log_context_ml_to_fraud_detection",
+    )
+    assert "trajectory-42.html" in continuation_page
+    assert "Activity-log context (ML)" in continuation_page
+    assert "Activity-log context (p-hacking)" not in continuation_page
+    page = viewer._activity_log_prefix_trajectories_page(
+        [p_row, ml_row],
+        seeds=["checkout_redesign", "fraud_detection"],
+        prefix_types=(("activity_log_context", "Activity-log context"),),
+        active_harness="simple",
+    )
+    assert "Task: p-hacking (checkout_redesign)" in page
+    assert "Prefix: Activity-log context (p-hacking)" in page
+    assert "Task: ML (fraud_detection)" in page
+    assert "Prefix: Activity-log context (ML)" in page
+    assert "trajectory-42.html" in page
+    assert "trajectory-43.html" in page
 
 
 def test_continuation_trajectory_reuses_petri_jump_to_new_task() -> None:
